@@ -112,6 +112,7 @@ FSDB 与 KDB 应来自同一次 VCS 编译/运行。打开波形后，自动检�
 需要 Rust/Cargo、Node.js 22 或更新版本、C++ 编译器和 Verdi 的 FsdbReader/NPI 头文件。0.8.0 将扩展宿主、Tcl 命令适配和两个 Webview 迁移到 TypeScript；Rust/C++ 继续负责原生读取与缓存。插件目录作为 VS Code 工作区打开后，F5 会先构建再启动开发窗口。
 
 ```bash
+git clone https://github.com/AndreaFrederica/vscode-wave-workbench.git
 cd vscode-wave-workbench
 export VERDI_HOME=/opt/edatools/Synopsys/verdi/T-2022.06-SP2
 export PATH="$HOME/.cargo/bin:$PATH"

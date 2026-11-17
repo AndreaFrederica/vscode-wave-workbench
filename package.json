@@ -310,5 +310,13 @@
     "esbuild": "^0.27.7",
     "prettier": "3.6.2",
     "typescript": "~5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AndreaFrederica/vscode-wave-workbench.git"
+  },
+  "homepage": "https://github.com/AndreaFrederica/vscode-wave-workbench#readme",
+  "bugs": {
+    "url": "https://github.com/AndreaFrederica/vscode-wave-workbench/issues"
   }
 }
