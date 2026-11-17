@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "useUnknownInCatchVariables": true,
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": [
+    "src/shared/**/*.ts",
+    "src/backend.ts",
+    "src/kdb.ts",
+    "src/source-sync.ts",
+    "src/rtl-selection.ts",
+    "src/view-state.ts",
+    "src/tcl.ts",
+    "type-tests/**/*.ts"
+  ]
+}

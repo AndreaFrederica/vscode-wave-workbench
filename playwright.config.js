@@ -1,0 +1,1 @@
+module.exports={testDir:'./test',testMatch:'*.spec.js',timeout:30000,use:{headless:true,launchOptions:{executablePath:process.env.WAVE_CHROMIUM || undefined},viewport:{width:1440,height:850}},workers:1};

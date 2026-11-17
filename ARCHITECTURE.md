@@ -1,0 +1,58 @@
+# TypeScript 架构（0.8.0）
+
+扩展宿主、Tcl 命令适配和 Webview 源码使用 TypeScript。原生 FSDB/KDB 读取、虚拟信号运算与 LRU 缓存仍由独立 Rust 后端及 C++ SDK 桥负责。
+
+| 路径 | 职责 |
+| --- | --- |
+| `src/extension.ts` | VS Code 命令、会话、编辑器布局、RTL 双向定位 |
+| `src/viewer.ts` | 波形编辑器会话类型 |
+| `src/backend.ts` | 子进程生命周期、请求编号、超时与 Rust JSON 协议 |
+| `src/kdb.ts` | 独立 KDB 会话、层次与源位置缓存 |
+| `src/commands.ts`、`src/tcl.ts` | nWave 命令适配与 Tcl 子进程 |
+| `src/rtl-selection.ts`、`src/source-sync.ts` | RTL 批量信号提取与实例跟随 |
+| `src/view-state.ts` | 保存状态验证、虚拟依赖注册及规范信号恢复 |
+| `src/shared/protocol.ts` | 信号、位投影、标记、波形块、保存状态及后端请求/结果类型 |
+| `src/shared/signals.ts` | 宿主和浏览器共用的信号身份、标签、位投影及样式恢复 |
+| `src/webview/wave.ts` | 波形 Canvas、虚拟列表、操作菜单、分组、标记和悬停 |
+| `src/webview/sidebar.ts`、`src/webview/dom.ts` | 侧边栏交互及按元素 ID 推导 DOM 类型 |
+| `media/` | HTML、CSS、SVG 静态资源 |
+| `src/tcl/bridge.tcl` | Tcl 运行时桥，构建时复制到 `dist/tcl/` |
+| `native/` | Rust/C++ 原生组件；本次未迁移 |
+
+原先相互依赖全局变量的波形和工作流脚本合为一个浏览器入口，共享工具通过模块导入。esbuild 为扩展宿主生成 CommonJS 模块，为两个 Webview 分别生成独立浏览器包。Webview 资源根目录包含 `media/` 和 `dist/webview/`；浏览器包不依赖 Node 或运行时 npm 模块。
+
+## 类型检查
+
+`npm run typecheck` 执行三组检查：
+
+- `tsconfig.json` 检查所有 TypeScript 源码及 VS Code API 使用。
+- `tsconfig.core.json` 对后端协议、KDB、Tcl 桥、共享模型、RTL 提取、源码比较和状态恢复启用完整 `strict`，包括隐式 any 和空值检查。
+- `tsconfig.webview.json` 单独检查浏览器入口，不加载 Node/VS Code 全局类型。
+
+旧界面事件处理器和部分宿主消息派发尚使用兼容配置：允许推导出的 any，未全面启用空值检查。JSON/VS Code 消息边界保留现有运行时验证；TypeScript 类型不能验证外部 JSON。迁移不使用 `@ts-nocheck`。
+
+后端客户端按方法推导参数及返回类型，例如 `request('query', ...)` 要求十进制字符串时间戳，`request('open', ...)` 必须提供路径。`type-tests/backend.ts` 用编译检查防止这些约束意外退化。
+
+## 构建、调试与发布
+
+```bash
+npm ci
+npm run typecheck
+npm run build
+npm test
+npm run test:ui
+npm run format:check
+npm run package
+```
+
+测试加载 `dist/` 编译产物。`npm test`、`npm run test:ui` 和 VSIX 打包会先执行类型检查和构建。F5 配置先执行构建，使用生成的 source map 调试 TypeScript；修改源码后重新构建再重启调试。
+
+VSIX 包含 `dist/`、`media/`、Tcl 桥与原生二进制，不分发 TypeScript 源码、source map、测试或构建依赖。用户机器运行插件无需 npm install 或 TypeScript 编译器。
+
+## 外部仿真工程
+
+插件运行不依赖原 OpenTitan 目录。可选 MAC/FPU 脚本与完整芯片层次测试通过 `WAVE_TEST_PROJECT_ROOT` 定位外部工程，搭配 `WAVE_TEST_KDB`、`WAVE_TEST_FSDB`、`WAVE_TEST_FPU_RUN` 选择数据。仓库不包含仿真数据或 Verdi SDK。
+
+## 后续 MCP 接入
+
+0.8.0 只完成 TypeScript 迁移，尚未注册 MCP 服务或启动监听端口。后续 MCP 工具可复用后端协议与会话模型，提供层次查询、信号查找、指定时刻取值等能力；具体工具与连接方式在下一步实现。

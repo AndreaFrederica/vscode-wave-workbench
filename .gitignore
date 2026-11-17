@@ -1,0 +1,17 @@
+node_modules/
+native/target/
+bin/wave-backend*
+*.vsix
+playwright-report/
+test-results/
+dist/
+
+# Local credentials and external simulation databases
+.env
+.env.*
+*.pem
+*.key
+*.fsdb
+*.kdb
+*.daidir/
+*.log

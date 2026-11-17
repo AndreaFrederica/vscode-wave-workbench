@@ -1,0 +1,29 @@
+name: Checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and test native VCD backend
+        run: |
+          cargo test --locked --manifest-path native/Cargo.toml
+          cargo build --locked --release --manifest-path native/Cargo.toml
+          mkdir -p bin
+          cp native/target/release/wave-backend bin/
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:ui
+      - run: npm run package

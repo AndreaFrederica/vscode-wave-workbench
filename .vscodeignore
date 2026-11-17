@@ -1,0 +1,16 @@
+node_modules/**
+native/**
+test/**
+.vscode/**
+.gitignore
+package-lock.json
+playwright.config.js
+test-results/**
+playwright-report/**
+*.vsix
+src/**
+scripts/**
+tsconfig*.json
+dist/**/*.map
+type-tests/**
+.github/**

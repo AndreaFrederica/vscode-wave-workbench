@@ -1,0 +1,108 @@
+import type {
+  ChildProcessWithoutNullStreams,
+  SpawnOptionsWithoutStdio,
+} from "node:child_process";
+import type { BackendProtocol } from "./shared/protocol";
+import { spawn } from "node:child_process";
+import * as readline from "node:readline";
+import * as path from "node:path";
+interface BackendOptions extends SpawnOptionsWithoutStdio {
+  onLog?: (text: string) => void;
+}
+class Backend {
+  pending: Map<
+    number,
+    {
+      resolve: (value: any) => void;
+      reject: (error: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >;
+  sequence: number;
+  closed: boolean;
+  child: ChildProcessWithoutNullStreams;
+  constructor(binary: string, options: BackendOptions = {}) {
+    this.pending = new Map();
+    this.sequence = 0;
+    this.closed = false;
+    const env = { ...(options.env || process.env) };
+    const home = env.VERDI_HOME || env.NOVAS_HOME;
+    const readerLib =
+      env.FSDB_LIB_DIR || (home && path.join(home, "share/FsdbReader/linux64"));
+    if (readerLib)
+      env.LD_LIBRARY_PATH = [readerLib, env.LD_LIBRARY_PATH]
+        .filter(Boolean)
+        .join(path.delimiter);
+    this.child = spawn(binary, [], {
+      stdio: ["pipe", "pipe", "pipe"],
+      ...options,
+      env,
+    });
+    const fail = (error: Error) => {
+      this.closed = true;
+      for (const p of this.pending.values()) {
+        clearTimeout(p.timer);
+        p.reject(error);
+      }
+      this.pending.clear();
+    };
+    this.child.on("error", fail);
+    this.child.on("exit", (code, signal) =>
+      fail(
+        new Error(
+          `Wave backend exited (${signal || code}). Check Verdi Reader library path and Output > Wave Workbench.`,
+        ),
+      ),
+    );
+    this.child.stdin.on("error", fail);
+    this.child.stderr.on("data", (d) => options.onLog?.(d.toString()));
+    readline
+      .createInterface({ input: this.child.stdout })
+      .on("line", (line) => {
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          options.onLog?.(line);
+          return;
+        }
+        const p = this.pending.get(msg.id);
+        if (!p) return;
+        this.pending.delete(msg.id);
+        clearTimeout(p.timer);
+        if (msg.error) p.reject(new Error(msg.error));
+        else p.resolve(msg.result);
+      });
+  }
+  request<M extends keyof BackendProtocol>(
+    method: M,
+    ...[args]: {} extends BackendProtocol[M]["args"]
+      ? [args?: BackendProtocol[M]["args"]]
+      : [args: BackendProtocol[M]["args"]]
+  ): Promise<BackendProtocol[M]["result"]> {
+    if (this.closed) return Promise.reject(new Error("Wave backend is closed"));
+    return new Promise((resolve, reject) => {
+      const id = ++this.sequence;
+      const timer = setTimeout(() => {
+        this.dispose();
+        reject(
+          new Error(
+            "Wave read exceeded 120 seconds; reduce the selected window/signals.",
+          ),
+        );
+      }, 120000);
+      this.pending.set(id, { resolve, reject, timer });
+      this.child.stdin.write(JSON.stringify({ id, method, ...args }) + "\n");
+    });
+  }
+  dispose() {
+    this.closed = true;
+    this.child.kill();
+    for (const p of this.pending.values()) {
+      clearTimeout(p.timer);
+      p.reject(new Error("Wave backend closed"));
+    }
+    this.pending.clear();
+  }
+}
+export { Backend };

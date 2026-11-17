@@ -1,0 +1,314 @@
+{
+  "name": "wave-workbench",
+  "displayName": "Wave Workbench — FSDB / KDB / nWave",
+  "version": "0.8.0",
+  "publisher": "local-hdl",
+  "description": "Native FSDB/KDB waveform viewer with nWave Tcl commands and Vide interoperability.",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": false
+  },
+  "activationEvents": [
+    "onCustomEditor:waveWorkbench.viewer",
+    "onStartupFinished",
+    "onView:waveWorkbench.control"
+  ],
+  "extensionPack": [
+    "pascal-lab.vide-code-extension"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "waveWorkbench.open",
+        "title": "Wave Workbench: Open FSDB / VCD",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "waveWorkbench.addSelection",
+        "title": "Wave Workbench: Add Selected RTL Signals to Wave",
+        "icon": "$(add)"
+      },
+      {
+        "command": "waveWorkbench.videStatus",
+        "title": "Wave Workbench: Show Vide Integration"
+      },
+      {
+        "command": "waveWorkbench.attachKdb",
+        "title": "Wave Workbench: Attach KDB (simv.daidir)"
+      },
+      {
+        "command": "waveWorkbench.openPicker",
+        "title": "Wave Workbench: 打开波形文件…",
+        "icon": "$(folder-open)"
+      },
+      {
+        "command": "waveWorkbench.openLast",
+        "title": "Wave Workbench: 一键打开上次波形",
+        "icon": "$(history)"
+      },
+      {
+        "command": "waveWorkbench.runTcl",
+        "title": "Wave Workbench: 执行 nWave Tcl 命令…",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "waveWorkbench.runScript",
+        "title": "Wave Workbench: 运行 nWave Tcl 脚本…",
+        "icon": "$(play)"
+      },
+      {
+        "command": "waveWorkbench.fit",
+        "title": "Wave Workbench: nWave: Zoom All",
+        "icon": "$(screen-full)"
+      },
+      {
+        "command": "waveWorkbench.zoomIn",
+        "title": "Wave Workbench: nWave: Zoom In",
+        "icon": "$(zoom-in)"
+      },
+      {
+        "command": "waveWorkbench.zoomOut",
+        "title": "Wave Workbench: nWave: Zoom Out",
+        "icon": "$(zoom-out)"
+      },
+      {
+        "command": "waveWorkbench.nextEdge",
+        "title": "Wave Workbench: nWave: Next Transition",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "waveWorkbench.previousEdge",
+        "title": "Wave Workbench: nWave: Previous Transition",
+        "icon": "$(arrow-left)"
+      },
+      {
+        "command": "waveWorkbench.setCursor",
+        "title": "Wave Workbench: nWave: Set Cursor…",
+        "icon": "$(location)"
+      },
+      {
+        "command": "waveWorkbench.setMarker",
+        "title": "Wave Workbench: nWave: Set Marker…",
+        "icon": "$(bookmark)"
+      },
+      {
+        "command": "waveWorkbench.saveSignals",
+        "title": "Wave Workbench: nWave: Save Signals…",
+        "icon": "$(save)"
+      },
+      {
+        "command": "waveWorkbench.restoreSignals",
+        "title": "Wave Workbench: nWave: Restore Signals…",
+        "icon": "$(folder-open)"
+      },
+      {
+        "command": "waveWorkbench.cacheStats",
+        "title": "Wave Workbench: 查看 Rust 波形缓存统计",
+        "icon": "$(database)"
+      },
+      {
+        "command": "waveWorkbench.showSidebar",
+        "title": "Wave Workbench: 打开波形侧边栏",
+        "icon": "$(layout-sidebar)"
+      },
+      {
+        "command": "waveWorkbench.debugLayout",
+        "title": "Wave Workbench: 上方代码 / 下方波形",
+        "icon": "$(layout)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "waveWorkbench.addSelection",
+          "when": "editorLangId == systemverilog || editorLangId == verilog",
+          "group": "navigation@90"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "waveWorkbench.open",
+          "when": "resourceExtname == .fsdb || resourceExtname == .vcd",
+          "group": "navigation"
+        },
+        {
+          "command": "waveWorkbench.runScript",
+          "when": "resourceExtname == .tcl || resourceExtname == .rc",
+          "group": "navigation@91"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "waveWorkbench.open",
+          "group": "navigation@1"
+        },
+        {
+          "command": "waveWorkbench.runTcl",
+          "when": "activeCustomEditorId == waveWorkbench.viewer",
+          "group": "navigation@2"
+        },
+        {
+          "command": "waveWorkbench.addSelection",
+          "when": "editorLangId == systemverilog || editorLangId == verilog",
+          "group": "navigation@3"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "waveWorkbench.open",
+          "when": "view == workbench.explorer.fileView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "waveWorkbench.open",
+          "when": "view == waveWorkbench.control",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "customEditors": [
+      {
+        "viewType": "waveWorkbench.viewer",
+        "displayName": "Wave Workbench",
+        "selector": [
+          {
+            "filenamePattern": "*.fsdb"
+          },
+          {
+            "filenamePattern": "*.vcd"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "configuration": {
+      "title": "Wave Workbench",
+      "properties": {
+        "waveWorkbench.backendPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Native wave-backend executable; empty uses bundled binary."
+        },
+        "waveWorkbench.verdiHome": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Verdi installation containing share/FsdbReader/linux64. Defaults to VERDI_HOME or NOVAS_HOME."
+        },
+        "waveWorkbench.eventsPerSignal": {
+          "type": "integer",
+          "default": 20000,
+          "minimum": 100,
+          "maximum": 100000,
+          "description": "Maximum events returned per signal/window. Zoom in when truncated."
+        },
+        "waveWorkbench.kdbPath": {
+          "type": "string",
+          "default": "",
+          "description": "Matching VCS simv.daidir or its simv.kdb. Empty automatically checks beside the waveform."
+        },
+        "waveWorkbench.sourcePathMappings": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Explicit KDB source path prefix replacements for relocated source snapshots."
+        },
+        "waveWorkbench.hierarchyMappings": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Explicit FSDB hierarchy prefix to KDB hierarchy prefix replacements."
+        },
+        "waveWorkbench.defaultWaveform": {
+          "type": "string",
+          "default": "",
+          "description": "One-click open target. Empty reopens the last waveform in this workspace; otherwise opens a file picker. Relative to workspace root."
+        },
+        "waveWorkbench.tclshPath": {
+          "type": "string",
+          "default": "/usr/bin/tclsh",
+          "scope": "machine",
+          "description": "Tcl 8.6+ interpreter used for nWave commands. Scripts run in a safe child interpreter."
+        },
+        "waveWorkbench.cacheSizeMB": {
+          "type": "integer",
+          "default": 64,
+          "minimum": 0,
+          "maximum": 512,
+          "description": "Rust decoded waveform LRU cache budget in MiB per waveform backend. Reopen waveform to apply. Does not bound SDK or total process memory."
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "waveWorkbench.open",
+        "key": "ctrl+alt+w",
+        "mac": "cmd+alt+w"
+      },
+      {
+        "command": "waveWorkbench.addSelection",
+        "key": "ctrl+alt+enter",
+        "mac": "cmd+alt+enter",
+        "when": "editorTextFocus && (editorLangId == systemverilog || editorLangId == verilog)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "waveWorkbench",
+          "title": "Wave Workbench",
+          "icon": "media/activity-wave.svg"
+        }
+      ]
+    },
+    "views": {
+      "waveWorkbench": [
+        {
+          "type": "webview",
+          "id": "waveWorkbench.control",
+          "name": "波形与 Tcl 指令",
+          "contextualTitle": "Wave Workbench"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "package": "vsce package --no-dependencies --allow-missing-repository",
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.core.json && tsc --noEmit -p tsconfig.webview.json",
+    "vscode:prepublish": "npm run typecheck && npm run build",
+    "pretest": "npm run typecheck && npm run build",
+    "test:ui": "npm run typecheck && npm run build && playwright test",
+    "format": "prettier --write \"src/**/*.ts\" \"scripts/*.mjs\" \"type-tests/*.ts\" \"tsconfig*.json\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"scripts/*.mjs\" \"type-tests/*.ts\" \"tsconfig*.json\""
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "@types/node": "^22.20.5",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^4.1.1",
+    "esbuild": "^0.27.7",
+    "prettier": "3.6.2",
+    "typescript": "~5.9.3"
+  }
+}
