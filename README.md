@@ -15,7 +15,7 @@ VS Code 数字波形调试插件初版，采用类似 Verdi/nWave 的层次树�
 当前二进制适用于 Linux x86_64 / VS Code Remote SSH，已在本机 Verdi T-2022.06-SP2、Vide 1.2.5 环境验证后端。SDK 与 NPI 库不随 VSIX 分发，运行时需要本机安装及可用的 NPI/Verdi 许可。
 
 ```bash
-code --install-extension wave-workbench-0.8.0.vsix
+code --install-extension wave-workbench-0.8.1.vsix
 ```
 
 安装后打开 FSDB / VCD，或运行 `Wave Workbench: Open FSDB / VCD`。现有文件若以文本方式打开，使用「Reopen Editor With… → Wave Workbench」。
@@ -28,7 +28,7 @@ code --install-extension wave-workbench-0.8.0.vsix
 }
 ```
 
-## 按 Verdi 流程调试（0.8.0）
+## 按 Verdi 流程调试（0.8.1）
 
 插件侧边栏现有原生 KDB 实例树（Hierarchy/Module），点击实例打开对应 RTL，并在侧边栏下方显示该实例已 dump 的 Signals。支持从 RTL 右键、顶部 `+` 或 `Ctrl+Alt+Enter` 添加信号，优先匹配当前 KDB 实例。波形区补齐多选、拖入/排序、右键菜单、分组折叠、精确 A/B 输入和框选缩放。
 

@@ -69,7 +69,8 @@ while {[gets stdin line] >= 0} {
     set ::scriptDir [decode [lindex $fields 1]]
     incr commandBudget 200000
     interp limit wave command -value $commandBudget
-    interp limit wave time -seconds [expr {[clock seconds]+60}]
+    # Match the host's 120-second deadline, including time spent in SDK RPCs.
+    interp limit wave time -seconds [expr {[clock seconds]+120}]
     set code [catch {interp eval wave [decode [lindex $fields 0]]} result]
     puts "DONE\t[expr {$code ? {ERROR} : {OK}}]\t[encode $result]"
 }
