@@ -4,7 +4,7 @@
   "version": "0.8.0",
   "publisher": "local-hdl",
   "description": "Native FSDB/KDB waveform viewer with nWave Tcl commands and Vide interoperability.",
-  "license": "MIT",
+  "license": "MPL-2.0",
   "engines": {
     "vscode": "^1.85.0"
   },

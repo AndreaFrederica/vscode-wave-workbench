@@ -1,0 +1,10 @@
+Copyright (c) 2026 Wave Workbench contributors
+
+Wave Workbench source code is licensed under the Mozilla Public License,
+version 2.0 (MPL-2.0). See LICENSE.
+Source: https://github.com/AndreaFrederica/vscode-wave-workbench
+
+Synopsys FSDB Reader SDK / NPI headers and shared libraries are external
+dependencies and are not included in this repository or extension package.
+Their respective license terms apply independently.
+Third-party npm and Cargo dependencies retain their own licenses.

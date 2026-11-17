@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MPL-2.0
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 const {test,expect}=require('@playwright/test');
 const fs=require('node:fs'),path=require('node:path');
 const {Sidebar}=require('../dist/sidebar'),{Backend}=require('../dist/backend'),{TclRunner}=require('../dist/tcl'),{WaveCommands}=require('../dist/commands');

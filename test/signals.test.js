@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MPL-2.0
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 const {test}=require('node:test'),assert=require('node:assert/strict');const W=require('../dist/shared/signals');const {restoreView}=require('../dist/view-state');
 test('bit projections preserve ranges, four states, padding and source identity',()=>{
  for(const [name,labels] of [['bus[7:0]',['bus[7]','bus[0]']],['bus[0:7]',['bus[0]','bus[7]']],['bus[15:8]',['bus[15]','bus[8]']],['bus[-1:-8]',['bus[-1]','bus[-8]']]]){const s={id:'x',scope:'top',name,width:8};const bits=W.bits(s);assert.equal(W.label(bits[0]),labels[0]);assert.equal(W.label(bits[7]),labels[1]);assert.equal(W.project('10100101',bits[0]),'1');assert.equal(W.project('1',bits[0]),'0');assert.equal(W.project('x',bits[7]),'x');assert.equal(W.project('z',bits[0]),'z');assert.equal(bits[0].id,s.id);assert.notEqual(W.key(bits[0]),W.key(bits[7]));}

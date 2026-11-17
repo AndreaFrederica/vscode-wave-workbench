@@ -6,6 +6,8 @@ VS Code 数字波形调试插件初版，采用类似 Verdi/nWave 的层次树�
 - **KDB 原生接入**：另一个独立 Rust 进程动态加载本机 `libNPI.so`，用 `npi_load_design(-dbdir ...)` 读取 VCS elaboration 数据库，按完整层次解析真实对象、声明、实例位置及模块定义。
 - **波形界面**：信号搜索、层次浏览、拖动排序、双游标与时间差、缩放平移、事件跳转和多进制显示。
 
+本项目采用 **MPL-2.0** 开源，完整许可文本见 `LICENSE`，版权与外部依赖说明见 `NOTICE`。
+
 本项目是独立仓库；插件运行不依赖 OpenTitan 工程目录。真实 MAC/FPU 集成测试可通过 `WAVE_TEST_PROJECT_ROOT` 指向外部仿真数据，默认测试使用仓库内示例。
 
 ## 安装

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MPL-2.0
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 const {test}=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {TclRunner}=require('../dist/tcl');const {formatValue,quote}=require('../dist/commands');
 test('real Tcl: variables, loops, nested lists, source, persistence, errors and isolation',async t=>{
