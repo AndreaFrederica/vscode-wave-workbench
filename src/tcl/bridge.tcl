@@ -56,7 +56,7 @@ proc safeFile {operation args} {
 }
 proc logPuts {args} {puts "LOG\t[encode [join $args { }]]"}
 proc unknownWave {name args} {error "Unsupported Verdi/nWave command: $name. Use waveHelp to list supported commands."}
-set names {waveFindSignals waveGetEvents waveView waveGroup waveTooltip waveLayout waveRestoreView wvCreateWindow wvGetCurrentWindow wvOpenFile wvAddSignal wvDeleteSignal wvSelectSignal wvSetCursor wvSetMarker wvZoom wvZoomAll wvZoomIn wvZoomOut wvZoomCursorMarker wvSetRadix wvGetSigValueByTime wvIsSignalExistInWaveform wvSetWindowTimeUnit wvGetWindowTimeUnit wvSearchNext wvSearchPrev wvSaveSignal srcGetFileName srcSetScope waveHelp}
+set names {waveFindSignals waveGetEvents waveDecode waveDecodeEvents waveAnnotate waveView waveGroup waveTooltip waveLayout waveBusLabels waveRestoreView wvCreateWindow wvGetCurrentWindow wvOpenFile wvAddSignal wvDeleteSignal wvSelectSignal wvSetCursor wvSetMarker wvZoom wvZoomAll wvZoomIn wvZoomOut wvZoomCursorMarker wvSetRadix wvGetSigValueByTime wvIsSignalExistInWaveform wvSetWindowTimeUnit wvGetWindowTimeUnit wvSearchNext wvSearchPrev wvSaveSignal srcGetFileName srcSetScope waveHelp}
 foreach name $names {interp alias wave $name {} rpc $name}
 interp alias wave wvRestoreSignal {} restore
 interp alias wave source {} scriptSource

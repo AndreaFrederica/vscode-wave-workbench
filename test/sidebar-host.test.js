@@ -9,7 +9,16 @@ const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 test('registered sidebar drives real Tcl/VCD, keeps per-wave variables, reveals hidden target, and updates after close',async t=>{
   const root=path.resolve(__dirname,'..'),commands=new Map(),states=[],disposable={dispose(){}};let provider,sidebar,sideReceive;
   const uri=fsPath=>({fsPath,toString(){return fsPath;}});
-  const vscode={Uri:{file:uri,joinPath:(u,...p)=>uri(path.join(u.fsPath,...p))},ViewColumn:{Beside:2},extensions:{getExtension:()=>null},
+  class EventEmitter {
+    constructor() { this.listeners = []; }
+    event = listener => {
+      this.listeners.push(listener);
+      return { dispose: () => { this.listeners = this.listeners.filter(item => item !== listener); } };
+    };
+    fire(event) { for (const listener of this.listeners) listener(event); }
+    dispose() { this.listeners = []; }
+  }
+  const vscode={EventEmitter,Uri:{file:uri,joinPath:(u,...p)=>uri(path.join(u.fsPath,...p))},ViewColumn:{Beside:2},extensions:{getExtension:()=>null},
     workspace:{getConfiguration:()=>({get:()=>undefined})},
     window:{registerWebviewViewProvider:(id,p)=>{assert.equal(id,'waveWorkbench.control');sidebar=p;return disposable;},registerCustomEditorProvider:(_id,p)=>{provider=p;return disposable;},createOutputChannel:()=>({append(){},appendLine(){},dispose(){}}),showErrorMessage:m=>{throw Error(m);}},
     commands:{registerCommand:(name,fn)=>{commands.set(name,fn);return disposable;},executeCommand:async(name,...args)=>commands.get(name)?.(...args)}};

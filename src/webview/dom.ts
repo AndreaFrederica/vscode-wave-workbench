@@ -8,6 +8,7 @@ interface Elements {
   fileMenu: HTMLDetailsElement;
   file: HTMLElement;
   backend: HTMLElement;
+  busLabelMode: HTMLSelectElement;
   groupMenu: HTMLDetailsElement;
   groupTools: HTMLElement;
   newGroup: HTMLButtonElement;
@@ -34,6 +35,7 @@ interface Elements {
   nextMarker: HTMLButtonElement;
   toggleMarkers: HTMLButtonElement;
   radix: HTMLSelectElement;
+  toggleTooltip: HTMLInputElement;
   findSignal: HTMLInputElement;
   findNext: HTMLButtonElement;
   toggleFilter: HTMLButtonElement;
@@ -86,6 +88,13 @@ interface Elements {
   groupName: HTMLInputElement;
   cancelGroup: HTMLButtonElement;
   renameSignalForm: HTMLFormElement;
+  editAnnotation: HTMLButtonElement;
+  annotationForm: HTMLFormElement;
+  annotationSignal: HTMLElement;
+  annotationTags: HTMLInputElement;
+  annotationNote: HTMLTextAreaElement;
+  annotationError: HTMLElement;
+  cancelAnnotation: HTMLButtonElement;
   signalAlias: HTMLInputElement;
   cancelSignalRename: HTMLButtonElement;
   virtualForm: HTMLFormElement;

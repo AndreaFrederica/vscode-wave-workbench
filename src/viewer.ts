@@ -7,8 +7,25 @@ import type * as vscode from "vscode";
 import type { Backend } from "./backend";
 import type { KdbSession } from "./kdb";
 import type { TclRunner } from "./tcl";
-import type { Metadata, Location } from "./shared/protocol";
+import type { Metadata, Location, WaveState } from "./shared/protocol";
+
+export interface WaveDocument extends vscode.CustomDocument {
+  view?: WaveState;
+  savedView?: WaveState;
+  projectPath?: string;
+  savedKdb?: string;
+  backup?: {
+    view: WaveState;
+    kdb?: string;
+    savedView?: WaveState;
+    savedKdb?: string;
+    projectPath?: string;
+  };
+  dirty?: boolean;
+}
+
 export interface Viewer {
+  document: WaveDocument;
   panel: vscode.WebviewPanel;
   backend: Backend;
   meta: Metadata;
@@ -18,6 +35,11 @@ export interface Viewer {
   treeExpanded: Set<string>;
   sourceInstances: Map<string, string>;
   selectedScope: string;
+  rtlCursor?: {
+    tick: number;
+    displayFactor: number;
+    displayScale: string | null;
+  };
   scopeHistory: string[];
   scopeIndex: number;
   pendingUI: Map<
@@ -33,7 +55,7 @@ export interface Viewer {
   resolveReady: (viewer: Viewer) => void;
   ui: (action: string, payload?: any) => Promise<any>;
   showHierarchy: (scope?: string) => Promise<void>;
-  attachKdb: (database?: string) => Promise<boolean>;
+  attachKdb: (database?: string, edited?: boolean) => Promise<boolean>;
   disposed?: boolean;
   running?: boolean;
   debugLayout?: boolean;

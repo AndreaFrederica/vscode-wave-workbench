@@ -3,8 +3,14 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-import type { Viewer } from "./viewer";
-import type { Signal, Location, Metadata } from "./shared/protocol";
+import type { Viewer, WaveDocument } from "./viewer";
+import type {
+  ClipContext,
+  Signal,
+  Location,
+  Metadata,
+  WaveClip,
+} from "./shared/protocol";
 import * as vscode from "vscode";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -12,24 +18,50 @@ import * as crypto from "node:crypto";
 import { identifiers, resolveSelection, codeOnly } from "./rtl-selection";
 import { registerVirtuals, restoreView } from "./view-state";
 import { readWaveProject, saveWaveProject } from "./project";
+import { loadDecoderProfiles } from "./decoder-config";
+import { decodeWord, supportsProfile } from "./shared/decoders";
+import { findSignal, readSignalAt } from "./signal-lookup";
 import { serveWaveMcp } from "./mcp";
+import {
+  clipFormats,
+  collectClip,
+  serializeClip,
+  type ClipFormat,
+  type ClipOptions,
+} from "./wave-clip";
 import * as WaveSignal from "./shared/signals";
 import { Backend } from "./backend";
 import { KdbSession, mapPrefix } from "./kdb";
 import { Sidebar } from "./sidebar";
-import { WaveCommands, HELP, quote } from "./commands";
+import { WaveCommands, HELP, formatValue, quote } from "./commands";
 import { moduleAt, commonScope, SourceFiles } from "./source-sync";
 import { TclRunner } from "./tcl";
 function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel("Wave Workbench");
   context.subscriptions.push(output);
   const viewers = new Set<Viewer>();
+  const projectChanges = new vscode.EventEmitter<
+    vscode.CustomDocumentContentChangeEvent<WaveDocument>
+  >();
+  context.subscriptions.push(projectChanges);
   let current: Viewer, sidebar: Sidebar;
   const tclOutput = new Map<Viewer, string[]>();
   let syncTimer: ReturnType<typeof setTimeout>,
     syncGeneration = 0,
     suppressEditorSync = 0;
   const sourceFiles = new SourceFiles();
+  function dumpScope(viewer: Viewer, scope: string) {
+    const mappings =
+      vscode.workspace
+        .getConfiguration("waveWorkbench", viewer.uri)
+        .get<Record<string, string>>("hierarchyMappings") || {};
+    return mapPrefix(
+      scope,
+      Object.fromEntries(
+        Object.entries(mappings).map(([dump, kdb]) => [kdb, dump]),
+      ),
+    );
+  }
   const report = (e) => {
     output.appendLine(e.stack || String(e));
     if (!e.sidebarLogged) sidebar?.log("ERROR: " + (e.message || String(e)));
@@ -65,6 +97,179 @@ function activate(context: vscode.ExtensionContext) {
     sidebar.refresh();
     await viewer.panel.webview.postMessage({ type: "scopeSelected", scope });
   }
+  async function sourceInstances(
+    viewer: Viewer,
+    file: string,
+    module: string,
+    valid: () => boolean,
+  ) {
+    const session = viewer.kdb;
+    const cfg = vscode.workspace.getConfiguration("waveWorkbench", viewer.uri);
+    const candidates = await session.instances(module);
+    const matches: Location[] = [];
+    for (const candidate of candidates) {
+      if (!valid()) return [];
+      const record = candidate.definitionFile
+        ? candidate
+        : await session.resolve(candidate.fullname);
+      if (!record?.definitionFile) continue;
+      const mapped = mapPrefix(
+        record.definitionFile,
+        cfg.get("sourcePathMappings"),
+      );
+      const definition = path.resolve(path.dirname(session.path), mapped);
+      if (sourceFiles.same(file, definition)) matches.push(candidate);
+    }
+    return matches;
+  }
+  const rtlDocuments = new WeakMap<
+    vscode.TextDocument,
+    { version: number; text: string; code: string }
+  >();
+  async function provideRtlHover(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    token: vscode.CancellationToken,
+  ) {
+    const viewer = current;
+    if (!viewer?.meta || !viewer.kdb || !viewer.rtlCursor) return;
+    const session = viewer.kdb;
+    const cursor = viewer.rtlCursor;
+    const selectedScope = viewer.selectedScope;
+    const valid = () =>
+      !token.isCancellationRequested &&
+      current === viewer &&
+      !viewer.disposed &&
+      viewer.kdb === session &&
+      viewer.rtlCursor === cursor &&
+      viewer.selectedScope === selectedScope;
+    if (!valid()) return;
+
+    let source = rtlDocuments.get(document);
+    if (source?.version !== document.version) {
+      const text = document.getText();
+      source = { version: document.version, text, code: codeOnly(text) };
+      rtlDocuments.set(document, source);
+    }
+    const nameRange = document.getWordRangeAtPosition(
+      position,
+      /[A-Za-z_$][\w$]*/,
+    );
+    if (!nameRange) return;
+    const start = document.offsetAt(nameRange.start);
+    const end = document.offsetAt(nameRange.end);
+    const name = document.getText(nameRange);
+    if (source.code.slice(start, end) !== name || identifiers(name)[0] !== name)
+      return;
+    const line = document.lineAt(position.line).text;
+    const before = line.slice(0, nameRange.start.character).trimEnd();
+    if (/(?:[.`\\]|::)$/.test(before)) return;
+    const after = line.slice(nameRange.end.character);
+    if (/^\s*(?:::|\.|\()/.test(after)) return;
+    const index = /^\s*\[\s*(-?\d+)\s*\]/.exec(after);
+    const target = index ? `${name}[${index[1]}]` : name;
+    const module = moduleAt(source.text, position.line);
+    if (!module) return;
+
+    const file = document.uri.fsPath;
+    const matches = await sourceInstances(viewer, file, module, valid);
+    if (!valid() || !matches.length) return;
+    const selected = matches
+      .filter(
+        ({ fullname }) =>
+          selectedScope === fullname ||
+          selectedScope.startsWith(fullname + "."),
+      )
+      .sort((a, b) => b.fullname.length - a.fullname.length)[0];
+    const remembered = viewer.sourceInstances.get(file);
+    const best = Math.max(
+      ...matches.map(({ fullname }) => commonScope(fullname, selectedScope)),
+    );
+    const closest = matches.filter(
+      ({ fullname }) => commonScope(fullname, selectedScope) === best,
+    );
+    const instance =
+      selected ||
+      closest.find(({ fullname }) => fullname === remembered) ||
+      (closest.length === 1 ? closest[0] : undefined);
+    if (!instance)
+      return new vscode.Hover(
+        "Wave Workbench · 请在波形侧边栏选择要查看的实例",
+        nameRange,
+      );
+
+    const scope = dumpScope(viewer, instance.fullname);
+    const signal = await findSignal(viewer.backend, `${scope}.${target}`);
+    if (!valid() || !signal.supported) return;
+    const raw = await readSignalAt(viewer.backend, signal, cursor.tick);
+    if (!valid() || raw === undefined) return;
+    const unit = cursor.displayScale || viewer.meta.scale;
+    const time = Number((cursor.tick / cursor.displayFactor).toPrecision(15));
+    const style = viewer.document.view?.chosen.find(
+      (entry) => WaveSignal.key(entry) === WaveSignal.key(signal),
+    );
+    const decoded =
+      style?.decoder && decodeWord(style.decoder, raw, signal.width);
+    const markdown = new vscode.MarkdownString();
+    markdown.appendMarkdown("**Wave Workbench · 游标 A**\n\n");
+    markdown.appendText(
+      `${time} × ${unit} · ${path.basename(viewer.uri.fsPath)}`,
+    );
+    markdown.appendMarkdown("\n\n");
+    markdown.appendCodeblock(
+      `${signal.scope}.${WaveSignal.label(signal)}`,
+      "text",
+    );
+    const bits = /^[01xz]+$/i.test(raw);
+    const shown =
+      bits && signal.width > 1
+        ? "0x" + formatValue(raw, signal.width, "Hex", true)
+        : raw;
+    markdown.appendText(
+      `值  ${shown.length > 256 ? shown.slice(0, 256) + "…" : shown}`,
+    );
+    if (bits && signal.width > 1 && signal.width <= 128) {
+      markdown.appendMarkdown("\n\n");
+      markdown.appendText(
+        "Binary  " + formatValue(raw, signal.width, "Bin", true),
+      );
+    }
+    if (decoded) {
+      markdown.appendMarkdown("\n\n");
+      markdown.appendText("解码  " + decoded);
+    }
+    if (style?.annotation) {
+      markdown.appendMarkdown("\n\n");
+      markdown.appendText(
+        style.annotation.tags.map((tag) => "#" + tag).join(" "),
+      );
+      if (style.annotation.note) {
+        markdown.appendMarkdown("\n\n");
+        markdown.appendText(style.annotation.note);
+      }
+    }
+    return new vscode.Hover(markdown, nameRange);
+  }
+  const rtlLanguages = ["systemverilog", "verilog"];
+  if (vscode.languages?.registerHoverProvider)
+    context.subscriptions.push(
+      vscode.languages.registerHoverProvider(
+        [...rtlLanguages, { pattern: "**/*.{sv,svh,v,vh}" }],
+        {
+          async provideHover(document, position, token) {
+            try {
+              return await provideRtlHover(document, position, token);
+            } catch (error) {
+              if (
+                !token.isCancellationRequested &&
+                !String(error.message).startsWith("Dumped signal not found:")
+              )
+                output.appendLine("RTL hover: " + error.message);
+            }
+          },
+        },
+      ),
+    );
   async function syncEditor(
     editor: vscode.TextEditor | undefined,
     generation: number,
@@ -75,7 +280,7 @@ function activate(context: vscode.ExtensionContext) {
       !viewer?.kdb ||
       !doc?.uri?.fsPath ||
       typeof doc.getText !== "function" ||
-      !["systemverilog", "verilog"].includes(doc.languageId)
+      !rtlLanguages.includes(doc.languageId)
     )
       return;
     const session = viewer.kdb,
@@ -93,31 +298,14 @@ function activate(context: vscode.ExtensionContext) {
       viewer.selectedScope === viewer.sourceInstances.get(file)
     )
       return;
-    let candidates = await session.instances(module);
-    if (!valid() || !candidates.length) return;
-    const cfg = vscode.workspace.getConfiguration("waveWorkbench", viewer.uri);
     const remembered = viewer.sourceInstances.get(file);
-    candidates = [...candidates].sort(
+    const matches = await sourceInstances(viewer, file, module, valid);
+    matches.sort(
       (a, b) =>
         Number(b.fullname === remembered) - Number(a.fullname === remembered) ||
         commonScope(b.fullname, viewer.selectedScope) -
           commonScope(a.fullname, viewer.selectedScope),
     );
-    const matches = [];
-    for (const candidate of candidates) {
-      if (!valid()) return;
-      const record = candidate.definitionFile
-        ? candidate
-        : await session.resolve(candidate.fullname);
-      let definition = mapPrefix(
-        record.definitionFile,
-        cfg.get("sourcePathMappings"),
-      );
-      if (!definition) continue;
-      if (!path.isAbsolute(definition))
-        definition = path.resolve(path.dirname(session.path), definition);
-      if (sourceFiles.same(file, definition)) matches.push(candidate);
-    }
     if (!valid() || !matches.length) return;
     let choice = matches.find((n) => n.fullname === remembered) || matches[0];
     const best = commonScope(choice.fullname, viewer.selectedScope),
@@ -327,6 +515,7 @@ function activate(context: vscode.ExtensionContext) {
         ![
           "open",
           "openPicker",
+          "openRecent",
           "attachKdb",
           "runScript",
           "cacheStats",
@@ -358,6 +547,45 @@ function activate(context: vscode.ExtensionContext) {
             process.cwd(),
           file,
         );
+  const previousWaveform = context.workspaceState.get<string>("lastWaveform");
+  let recentFiles = context.workspaceState.get<string[]>(
+    "recentWaveFiles",
+    previousWaveform ? [previousWaveform] : [],
+  );
+  function rememberFile(filename: string) {
+    recentFiles = [
+      filename,
+      ...recentFiles.filter((entry) => entry !== filename),
+    ].slice(0, 20);
+    return context.workspaceState.update("recentWaveFiles", recentFiles);
+  }
+  async function openRecent() {
+    const entries = await Promise.all(
+      recentFiles.map(async (filename) => ({
+        label: path.basename(filename),
+        description: path.dirname(filename),
+        filename,
+        exists: await fs.promises.stat(filename).then(
+          (info) => info.isFile(),
+          () => false,
+        ),
+      })),
+    );
+    const available = entries.filter((entry) => entry.exists);
+    if (!available.length) {
+      await vscode.window.showInformationMessage("没有可打开的最近波形文件");
+      return;
+    }
+    const selection = await vscode.window.showQuickPick(available, {
+      title: "最近打开的波形和工程",
+      placeHolder: "选择 FSDB、VCD 或波形工程",
+      matchOnDescription: true,
+    });
+    if (!selection) return;
+    if (/\.waveproj$/i.test(selection.filename))
+      await openProject(selection.filename);
+    else await openWaveform(selection.filename);
+  }
   async function openWaveform(
     candidate?: string | vscode.Uri,
     { picker = false } = {},
@@ -385,15 +613,21 @@ function activate(context: vscode.ExtensionContext) {
     if (!filename) return;
     const uri = vscode.Uri.file(filename);
     await context.workspaceState.update("lastWaveform", filename);
-    await vscode.commands.executeCommand(
-      "vscode.openWith",
-      uri,
-      "waveWorkbench.viewer",
-    );
-    const viewer = [...viewers].find((v) => v.uri.fsPath === filename);
+    const findViewer = () =>
+      [...viewers].find((v) => v.uri.fsPath === filename);
+    let viewer = findViewer();
+    if (!viewer) {
+      await vscode.commands.executeCommand(
+        "vscode.openWith",
+        uri,
+        "waveWorkbench.viewer",
+      );
+      viewer = findViewer();
+    }
     if (viewer) {
       viewer.panel.reveal?.();
       await viewer.ready;
+      if (viewer.meta && !viewer.disposed) await rememberFile(filename);
       return viewer;
     }
   }
@@ -421,6 +655,8 @@ function activate(context: vscode.ExtensionContext) {
       let target = viewer;
       const engine = new WaveCommands({
         getViewer: () => target,
+        decoderProfiles: (viewer) =>
+          loadDecoderProfiles(decoderConfigPath(viewer)),
         open: async (file) => {
           const filename = resolvePath(
             file,
@@ -476,26 +712,103 @@ function activate(context: vscode.ExtensionContext) {
       sidebar.refresh();
     }
   }
-  async function saveProject(viewer: Viewer, filename?: string) {
+  async function saveProject(
+    viewer: Viewer,
+    filename?: string,
+    cancellation?: vscode.CancellationToken,
+  ) {
     if (!viewer) throw new Error("先打开波形");
     await viewer.ready;
-    filename ||= (
-      await vscode.window.showSaveDialog({
-        defaultUri: vscode.Uri.file(
-          viewer.uri.fsPath.replace(/\.[^.]+$/, "") + ".waveproj",
-        ),
-        filters: { "Wave Workbench": ["waveproj"] },
-      })
-    )?.fsPath;
-    if (!filename) return;
-    if (!filename.endsWith(".waveproj")) filename += ".waveproj";
-    await saveWaveProject(
-      filename,
-      viewer.uri.fsPath,
-      await viewer.ui("snapshot"),
-      viewer.kdb?.path,
-    );
+    const document = viewer.document;
+    filename ||=
+      document.projectPath ||
+      (
+        await vscode.window.showSaveDialog({
+          title: "保存波形工程",
+          defaultUri: vscode.Uri.file(
+            viewer.uri.fsPath.replace(/\.[^.]+$/, "") + ".waveproj",
+          ),
+          filters: { "Wave Workbench": ["waveproj"] },
+        })
+      )?.fsPath;
+    if (!filename || cancellation?.isCancellationRequested) return;
+    if (!/\.waveproj$/i.test(filename)) filename += ".waveproj";
+    const view = viewer.panel.visible
+      ? await viewer.ui("snapshot")
+      : document.view || document.savedView;
+    if (!view) throw Error("波形视图尚未就绪");
+    const kdb = viewer.kdb?.path;
+    if (cancellation?.isCancellationRequested) return;
+    await saveWaveProject(filename, viewer.uri.fsPath, view, kdb);
+    document.projectPath = filename;
+    document.savedView = view;
+    document.savedKdb = kdb;
+    await rememberFile(filename);
     return filename;
+  }
+  async function saveActiveProject(viewer: Viewer) {
+    if (!viewer) throw Error("先打开波形");
+    viewer.panel.reveal(viewer.panel.viewColumn);
+    await vscode.commands.executeCommand("workbench.action.files.save");
+  }
+  function decoderConfigPath(viewer: Viewer) {
+    const root = (
+      vscode.workspace.getWorkspaceFolder?.(viewer.uri) ??
+      vscode.workspace.workspaceFolders?.[0]
+    )?.uri.fsPath;
+    return root ? path.join(root, ".vscode", "wave-decoders.json") : undefined;
+  }
+  async function editDecoderConfig(viewer: Viewer) {
+    const filename = decoderConfigPath(viewer);
+    if (!filename) throw Error("请先打开工作区文件夹");
+    await fs.promises.mkdir(path.dirname(filename), { recursive: true });
+    const example = {
+      version: 1,
+      profiles: [
+        { id: "cv32-id", label: "CV32 · ID 指令", builtin: "rv32-zfinx" },
+        {
+          id: "request-state",
+          label: "请求状态",
+          width: 2,
+          rules: [
+            { mask: "0x3", value: "0x0", label: "Idle" },
+            { mask: "0x3", value: "0x1", label: "Request" },
+            { mask: "0x3", value: "0x2", label: "Wait" },
+            { mask: "0x3", value: "0x3", label: "Done" },
+          ],
+        },
+      ],
+    };
+    await fs.promises
+      .writeFile(filename, JSON.stringify(example, null, 2) + "\n", {
+        flag: "wx",
+      })
+      .catch((error) => {
+        if (error.code !== "EEXIST") throw error;
+      });
+    await vscode.window.showTextDocument(
+      await vscode.workspace.openTextDocument(filename),
+    );
+  }
+  async function selectDecoder(viewer: Viewer) {
+    const signal: Signal = await viewer.ui("activeSignal");
+    if (!signal) throw Error("请先选中一个信号");
+    const profiles = await loadDecoderProfiles(decoderConfigPath(viewer));
+    const choices = [
+      { label: "直接显示原始值", description: "", profile: undefined },
+      ...profiles
+        .filter((p) => supportsProfile(p, signal.width))
+        .map((profile) => ({
+          label: profile.label,
+          description: profile.id,
+          profile,
+        })),
+    ];
+    const pick = await vscode.window.showQuickPick(choices, {
+      title: "信号解码 · " + WaveSignal.label(signal),
+      placeHolder: "选择解码配置",
+    });
+    if (pick) await viewer.ui("setDecoder", { signal, profile: pick.profile });
   }
   async function openProject(filename?: string) {
     filename ||= (
@@ -513,6 +826,19 @@ function activate(context: vscode.ExtensionContext) {
       throw Error("Waveform not found: " + project.waveform);
     const viewer = await openWaveform(project.waveform);
     if (!viewer) throw Error("无法打开工程的波形");
+    const document = viewer.document;
+    if (document.dirty) {
+      const choice = await vscode.window.showWarningMessage(
+        "当前波形有未保存的工程改动。",
+        { modal: true },
+        "保存工程",
+        "不保存",
+      );
+      if (choice === "保存工程") {
+        await saveActiveProject(viewer);
+        if (document.dirty) return;
+      } else if (choice !== "不保存") return;
+    }
     const view = await restoreView(viewer.backend, project.view, viewer.meta);
     if (
       project.kdb &&
@@ -521,10 +847,125 @@ function activate(context: vscode.ExtensionContext) {
       if (fs.existsSync(project.kdb)) await viewer.attachKdb(project.kdb);
       else output.appendLine("Wave project KDB not found: " + project.kdb);
     }
-    await viewer.ui("restoreView", view);
+    await viewer.ui("restoreView", { ...view, projectBaseline: true });
+    document.projectPath = filename;
+    document.savedView = document.view || view;
+    document.savedKdb = viewer.kdb?.path;
+    await rememberFile(filename);
     current = viewer;
+    if (document.dirty) await saveActiveProject(viewer);
     return viewer;
   }
+  async function exportClipArtifact(
+    viewer: Viewer,
+    clip: WaveClip,
+    format: ClipFormat,
+    filename?: string,
+    exclusive = true,
+  ) {
+    const summary = {
+      format,
+      waveform: clip.waveform,
+      timescale: clip.timescale,
+      start: clip.start,
+      end: clip.end,
+      signalCount: clip.traces.length,
+      truncated: clip.truncated,
+    };
+    if (!filename && format !== "png")
+      throw Error("A path is required for this format");
+    if (filename && path.extname(filename).toLowerCase() !== "." + format)
+      throw Error("The file extension must match the export format");
+    if (filename && path.resolve(filename) === path.resolve(viewer.uri.fsPath))
+      throw Error("Choose a destination different from the source waveform");
+    if (format === "vcd" && clip.truncated)
+      throw Error(
+        "The waveform segment exceeds the event limit. Choose a shorter interval to export VCD.",
+      );
+
+    const png: string | undefined =
+      format === "png" ? await viewer.ui("renderClipImage", clip) : undefined;
+    if (!filename) return { ...summary, imagePng: png };
+    const data =
+      format === "png"
+        ? Buffer.from(png, "base64")
+        : serializeClip(clip, format);
+    await fs.promises.writeFile(filename, data, {
+      flag: exclusive ? "wx" : "w",
+    });
+    return { ...summary, path: filename };
+  }
+
+  async function chooseClipExport(viewer: Viewer) {
+    if (!viewer) throw Error("先打开波形");
+    await viewer.ready;
+    if (!viewer.meta) throw Error("波形未加载成功");
+    const view: ClipContext = await viewer.ui("clipContext");
+    const options = [
+      { label: "当前可见时间窗口", range: "view" as const },
+      ...(view.cursorB !== null && view.cursorA !== view.cursorB
+        ? [{ label: "游标 A 到 B", range: "cursors" as const }]
+        : []),
+    ];
+    const scope = await vscode.window.showQuickPick(
+      [
+        {
+          label: "已选信号",
+          description: `${view.selected.length} 个`,
+          signals: view.selected,
+        },
+        {
+          label: "当前显示的信号",
+          description: `${view.displayed.length} 个`,
+          signals: view.displayed,
+        },
+      ],
+      { placeHolder: "选择要截取的信号" },
+    );
+    if (!scope) return;
+    const interval = await vscode.window.showQuickPick(options, {
+      placeHolder: "选择截取的时间范围",
+    });
+    if (!interval) return;
+    const kind = await vscode.window.showQuickPick(
+      [
+        { label: "PNG 图片", format: "png" as const },
+        { label: "CSV 事件表", format: "csv" as const },
+        { label: "JSON 波形数据", format: "json" as const },
+        { label: "VCD 波形片段", format: "vcd" as const },
+      ],
+      { placeHolder: "选择导出格式" },
+    );
+    if (!kind) return;
+
+    const clip = await collectClip(viewer, { range: interval.range }, false, {
+      ...view,
+      selected: scope.signals,
+    });
+    const destination = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.file(
+        path.join(
+          path.dirname(viewer.uri.fsPath),
+          `wave-${clip.start}-${clip.end}.${kind.format}`,
+        ),
+      ),
+      filters: { [kind.label]: [kind.format] },
+    });
+    if (!destination) return;
+    await exportClipArtifact(
+      viewer,
+      clip,
+      kind.format,
+      destination.fsPath,
+      false,
+    );
+    vscode.window.showInformationMessage(
+      clip.truncated
+        ? "波形已导出。部分信号达到事件上限，文件中已标记。"
+        : "波形片段已导出。",
+    );
+  }
+
   async function runScript(uri?: vscode.Uri) {
     uri ||= (
       await vscode.window.showOpenDialog({
@@ -599,9 +1040,107 @@ function activate(context: vscode.ExtensionContext) {
     sidebar.refresh();
     output.appendLine(`KDB ${record.fullname} -> ${file}:${line} (${target})`);
   }
-  const provider: vscode.CustomReadonlyEditorProvider = {
-    async openCustomDocument(uri) {
-      return { uri, dispose() {} };
+  const provider: vscode.CustomEditorProvider<WaveDocument> = {
+    onDidChangeCustomDocument: projectChanges.event,
+    async openCustomDocument(uri, openContext) {
+      const backupId = openContext?.backupId;
+      const backup: WaveDocument["backup"] = backupId
+        ? JSON.parse(await fs.promises.readFile(backupId, "utf8"))
+        : undefined;
+      return {
+        uri,
+        backup,
+        projectPath: backup?.projectPath,
+        savedView: backup?.savedView,
+        savedKdb: backup?.savedKdb,
+        dirty: !!backup,
+        dispose() {},
+      };
+    },
+    async saveCustomDocument(document, cancellation) {
+      const viewer = [...viewers].find((view) => view.document === document);
+      if (!viewer || cancellation.isCancellationRequested)
+        throw new vscode.CancellationError();
+      if (
+        !(
+          document.projectPath &&
+          document.view &&
+          document.view === document.savedView &&
+          viewer.kdb?.path === document.savedKdb
+        )
+      ) {
+        if (!(await saveProject(viewer, undefined, cancellation)))
+          throw new vscode.CancellationError();
+      }
+      document.dirty = false;
+      await viewer.panel.webview.postMessage({
+        type: "projectSaved",
+        view: document.savedView,
+      });
+    },
+    async saveCustomDocumentAs(document, destination, cancellation) {
+      if (
+        destination.scheme !== "file" ||
+        !/\.waveproj$/i.test(destination.fsPath)
+      )
+        throw Error("请选择 .waveproj 作为工程文件扩展名");
+      const viewer = [...viewers].find((view) => view.document === document);
+      if (
+        !viewer ||
+        !(await saveProject(viewer, destination.fsPath, cancellation))
+      )
+        throw new vscode.CancellationError();
+      document.dirty = false;
+      await viewer.panel.webview.postMessage({
+        type: "projectSaved",
+        view: document.savedView,
+      });
+    },
+    async revertCustomDocument(document) {
+      const viewer = [...viewers].find((view) => view.document === document);
+      if (!viewer || !document.savedView) return;
+      const restored = await restoreView(
+        viewer.backend,
+        document.savedView,
+        viewer.meta,
+      );
+      if (document.savedKdb !== viewer.kdb?.path) {
+        if (document.savedKdb) await viewer.attachKdb(document.savedKdb, false);
+        else {
+          viewer.kdb?.dispose();
+          viewer.kdb = null;
+          viewer.treeCache.clear();
+          viewer.treeExpanded.clear();
+          sidebar.refresh();
+          await viewer.panel.webview.postMessage({ type: "kdbDetached" });
+        }
+      }
+      await viewer.ui("restoreView", { ...restored, projectBaseline: true });
+      document.dirty = false;
+    },
+    async backupCustomDocument(document, { destination }, cancellation) {
+      const viewer = [...viewers].find((view) => view.document === document);
+      const view = document.view || document.backup?.view;
+      if (!view || cancellation.isCancellationRequested)
+        throw new vscode.CancellationError();
+      const filename = destination.fsPath;
+      await fs.promises.mkdir(path.dirname(filename), { recursive: true });
+      const backup: WaveDocument["backup"] = {
+        view,
+        kdb: viewer?.kdb?.path,
+        savedView: document.savedView,
+        savedKdb: document.savedKdb,
+        projectPath: document.projectPath,
+      };
+      await fs.promises.writeFile(filename, JSON.stringify(backup), {
+        mode: 0o600,
+      });
+      return {
+        id: filename,
+        delete: () => {
+          void fs.promises.rm(filename, { force: true }).catch(() => {});
+        },
+      };
     },
     async resolveCustomEditor(document, panel) {
       const cfg = vscode.workspace.getConfiguration(
@@ -624,6 +1163,7 @@ function activate(context: vscode.ExtensionContext) {
         onLog: (s) => output.append(s),
       });
       const viewer = {
+        document,
         panel,
         backend,
         meta: null,
@@ -706,7 +1246,7 @@ function activate(context: vscode.ExtensionContext) {
         });
       }
       viewer.showHierarchy = showHierarchy;
-      viewer.attachKdb = async (suggested) => {
+      viewer.attachKdb = async (suggested, edited = !suggested) => {
         if (viewer.attaching) return viewer.attaching;
         viewer.attaching = (async () => {
           let database = suggested;
@@ -742,6 +1282,10 @@ function activate(context: vscode.ExtensionContext) {
             });
             await showHierarchy();
             scheduleEditorSync(vscode.window.activeTextEditor);
+            if (edited && document.view) {
+              document.dirty = true;
+              projectChanges.fire({ document });
+            }
             return true;
           } catch (e) {
             session.dispose();
@@ -773,6 +1317,7 @@ function activate(context: vscode.ExtensionContext) {
                 throw new Error(
                   "Time range exceeds exact canvas tick precision (2^53). Native backend retains u64 timestamps.",
                 );
+              await rememberFile(document.uri.fsPath);
               await applyDebugLayout(viewer);
               await panel.webview.postMessage({
                 type: "metadata",
@@ -788,6 +1333,7 @@ function activate(context: vscode.ExtensionContext) {
                 "simv.daidir",
               );
               const database =
+                document.backup?.kdb ||
                 context.workspaceState.get<string>(
                   `kdb:${document.uri.toString()}`,
                 ) ||
@@ -795,8 +1341,48 @@ function activate(context: vscode.ExtensionContext) {
                 cfg.get<string>("kdbPath");
               try {
                 if (database && !viewer.kdb) await viewer.attachKdb(database);
+                if (!document.dirty) document.savedKdb = viewer.kdb?.path;
+                if (document.backup) {
+                  const backup = document.backup;
+                  const restored = await restoreView(
+                    backend,
+                    backup.view,
+                    meta,
+                  );
+                  await viewer.ui("restoreView", {
+                    ...restored,
+                    projectBaseline: true,
+                  });
+                  document.backup = undefined;
+                }
               } finally {
                 viewer.resolveReady(viewer);
+              }
+            } else if (msg.type === "rtlCursor") {
+              if (
+                viewer.meta &&
+                Number.isSafeInteger(msg.tick) &&
+                msg.tick >= Number(viewer.meta.start) &&
+                msg.tick <= Number(viewer.meta.end) &&
+                Number.isFinite(msg.displayFactor) &&
+                msg.displayFactor > 0
+              ) {
+                viewer.rtlCursor = {
+                  tick: msg.tick,
+                  displayFactor: msg.displayFactor,
+                  displayScale:
+                    typeof msg.displayScale === "string"
+                      ? msg.displayScale
+                      : null,
+                };
+              }
+            } else if (msg.type === "projectState" && msg.view) {
+              document.view = msg.view;
+              if (msg.baseline) {
+                if (!document.dirty) document.savedView = document.view;
+              } else {
+                document.dirty = true;
+                projectChanges.fire({ document });
               }
             } else if (msg.type === "uiResult") {
               const p = viewer.pendingUI.get(msg.id);
@@ -813,10 +1399,18 @@ function activate(context: vscode.ExtensionContext) {
               await executeTcl(viewer, msg.script);
             } else if (msg.type === "openWaveform") {
               await openWaveform(undefined, { picker: true });
+            } else if (msg.type === "openRecent") {
+              await openRecent();
+            } else if (msg.type === "selectDecoder") {
+              await selectDecoder(viewer);
+            } else if (msg.type === "editDecoderConfig") {
+              await editDecoderConfig(viewer);
             } else if (msg.type === "saveProject") {
-              await saveProject(viewer);
+              await saveActiveProject(viewer);
             } else if (msg.type === "openProject") {
               await openProject();
+            } else if (msg.type === "exportClip") {
+              await chooseClipExport(viewer);
             } else if (msg.type === "runScript") {
               await runScript();
             } else if (msg.type === "attachKdb") {
@@ -1016,9 +1610,12 @@ function activate(context: vscode.ExtensionContext) {
     debugLayout: () => applyDebugLayout(current, true),
     open: (uri) => openWaveform(uri),
     openPicker: () => openWaveform(undefined, { picker: true }),
-    openLast: () => openWaveform(),
+    openRecent,
+    openLast: () =>
+      openWaveform(context.workspaceState.get<string>("lastWaveform")),
     runScript: (uri) => runScript(uri),
-    saveProject: () => saveProject(current),
+    exportClip: () => chooseClipExport(current),
+    saveProject: () => saveActiveProject(current),
     openProject: (uri) => openProject(uri?.fsPath),
     runTcl: async () => {
       if (!current) await openWaveform();
@@ -1159,14 +1756,9 @@ function activate(context: vscode.ExtensionContext) {
     clearTimeout(syncTimer);
     await syncEditor(editor, ++syncGeneration);
     if (viewer.disposed || current !== viewer) return;
-    let scope = viewer.sourceInstances.get(editor.document.uri?.fsPath) || "";
-    const mappings =
-      vscode.workspace
-        .getConfiguration("waveWorkbench", viewer.uri)
-        .get("hierarchyMappings") || {};
-    scope = mapPrefix(
-      scope,
-      Object.fromEntries(Object.entries(mappings).map(([a, b]) => [b, a])),
+    let scope = dumpScope(
+      viewer,
+      viewer.sourceInstances.get(editor.document.uri?.fsPath) || "",
     );
     let result = await resolveSelection(viewer.backend, names, scope);
     if (!scope) {
@@ -1290,6 +1882,28 @@ function activate(context: vscode.ExtensionContext) {
               ? [...viewers].find((v) => v.uri.fsPath === args.waveform)
               : current;
             if (!viewer) throw Error("Open a waveform first");
+            if (name === "wave_clip" || name === "wave_export") {
+              await viewer.ready;
+              if (!viewer.meta) throw Error("Waveform did not load");
+              if (!viewer.panel.visible) viewer.panel.reveal(undefined, true);
+              const clip = await collectClip(
+                viewer,
+                args as ClipOptions,
+                name === "wave_clip",
+              );
+              if (name === "wave_clip") return clip;
+              const format = args.format as ClipFormat;
+              if (!clipFormats.includes(format))
+                throw Error("Unsupported clip format");
+              return exportClipArtifact(
+                viewer,
+                clip,
+                format,
+                typeof args.path === "string"
+                  ? path.resolve(workspace, args.path)
+                  : undefined,
+              );
+            }
             if (name === "wave_save_project") {
               const filename = await saveProject(
                 viewer,

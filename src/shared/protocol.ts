@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
+
+import type { Annotation, DecoderProfile } from "./decoders";
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 export type Radix = "bin" | "oct" | "hex" | "unsigned" | "signed";
+export type BusLabelMode = "auto" | "full";
 export interface Operand {
   id: string;
   scope?: string;
@@ -29,6 +32,8 @@ export interface Signal {
   sourceWidth?: number;
   parentBus?: string;
   definition?: Definition;
+  decoder?: DecoderProfile;
+  annotation?: Annotation;
 }
 export interface Marker {
   name: string;
@@ -74,6 +79,7 @@ export interface WaveState {
   markers: Marker[];
   markersVisible?: boolean;
   tooltipEnabled?: boolean;
+  busLabelMode?: BusLabelMode;
   rowHeight?: number;
   namesFraction?: number;
   radix: Radix;
@@ -141,4 +147,34 @@ export interface BackendProtocol {
   kdbChildren: { args: { query: string }; result: Location[] };
   kdbScopes: { args: { query: string }; result: Location[] };
   kdbInstances: { args: { query: string }; result: Location[] };
+}
+
+export interface ClipContext {
+  start: number;
+  end: number;
+  cursorA: number;
+  cursorB: number | null;
+  selected: Signal[];
+  displayed: Signal[];
+  markers: Marker[];
+}
+
+export interface WaveClip {
+  waveform: string;
+  timescale: string;
+  start: string;
+  end: string;
+  traces: {
+    path: string;
+    label: string;
+    group?: string;
+    width: number;
+    decoder?: DecoderProfile;
+    annotation?: Annotation;
+    events: [string, string][];
+    truncated: boolean;
+  }[];
+  eventLimitPerSignal: number;
+  truncated: boolean;
+  markers: Marker[];
 }

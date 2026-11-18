@@ -1,7 +1,7 @@
 {
   "name": "wave-workbench",
   "displayName": "Wave Workbench — FSDB / KDB / nWave",
-  "version": "0.9.0",
+  "version": "0.9.5",
   "publisher": "local-hdl",
   "description": "Native FSDB/KDB waveform viewer with nWave Tcl commands and Vide interoperability.",
   "license": "MPL-2.0",
@@ -58,6 +58,11 @@
       {
         "command": "waveWorkbench.openLast",
         "title": "Wave Workbench: 一键打开上次波形",
+        "icon": "$(history)"
+      },
+      {
+        "command": "waveWorkbench.openRecent",
+        "title": "Wave Workbench: 最近打开的波形和工程…",
         "icon": "$(history)"
       },
       {
@@ -137,6 +142,10 @@
       {
         "command": "waveWorkbench.openProject",
         "title": "Wave Workbench: 打开波形工程…"
+      },
+      {
+        "command": "waveWorkbench.exportClip",
+        "title": "Wave Workbench: 截取 / 导出波形…"
       }
     ],
     "menus": {

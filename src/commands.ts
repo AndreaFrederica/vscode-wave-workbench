@@ -3,10 +3,17 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import { findSignal, normalName, readSignalAt } from "./signal-lookup";
 import type { Viewer } from "./viewer";
 import type { TclNode } from "./tcl";
 import * as WaveSignal from "./shared/signals";
 import { restoreView } from "./view-state";
+import {
+  builtinProfiles,
+  decodeWord,
+  type DecoderProfile,
+} from "./shared/decoders";
+import type { Signal } from "./shared/protocol";
 import * as fs from "node:fs";
 import * as path from "node:path";
 const UNITS = { s: 1, ms: 1e-3, us: 1e-6, ns: 1e-9, ps: 1e-12, fs: 1e-15 };
@@ -25,9 +32,12 @@ wvSearchNext / wvSearchPrev (current loaded window, transition search)
 waveRestoreView json; waveView
 waveFindSignals query ?offset? ?limit?
 waveGetEvents signal start end ?limit?
+waveDecode list | set signal decoderId | clear signal
+waveDecodeEvents signal start end ?limit?
+waveAnnotate signal ?commaSeparatedTags note?
 waveGroup list | create name | target name | move name target before|after
 waveGroup rename name newName | remove name | expand name | collapse name | assign name signal...
-waveTooltip ?0|1?; waveLayout ?rowHeight signalColumnPercent?
+waveTooltip ?0|1?; waveLayout ?rowHeight signalColumnPercent?; waveBusLabels ?auto|full?
 wvSaveSignal file.tcl; wvRestoreSignal file.tcl; source file.tcl
 srcGetFileName full.name; srcSetScope full.name
 All wv commands except wvCreateWindow accept -win 1. Unsupported commands/options raise errors.
@@ -50,22 +60,6 @@ function parse(nodes: TclNode[], spec: Record<string, number> = {}) {
 const text = (n?: TclNode) => n?.value;
 function names(nodes: TclNode[]) {
   return nodes.flatMap((n) => (n.items?.length > 1 ? n.items : [n])).map(text);
-}
-function normalName(name: string, delimiter = "/") {
-  return name
-    .replace(
-      new RegExp(
-        "^" +
-          (delimiter === "/"
-            ? "/"
-            : delimiter.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) +
-          "+",
-      ),
-      "",
-    )
-    .split(delimiter)
-    .join(".")
-    .replace(/\s*\[\s*-?\d+\s*:\s*-?\d+\s*\]$/, "");
 }
 function scaleSeconds(scale: string) {
   const match = /^([\d.e+-]+)\s*(s|ms|us|ns|ps|fs)$/i.exec(scale);
@@ -123,15 +117,23 @@ interface CommandHooks {
   open?: (file: string) => Promise<void>;
   source?: unknown;
   scope?: (scope: string) => Promise<void>;
+  decoderProfiles?: (viewer: Viewer) => Promise<DecoderProfile[]>;
 }
 class WaveCommands {
   getViewer: CommandHooks["getViewer"];
   open: CommandHooks["open"];
   source: unknown;
   scope: CommandHooks["scope"];
+  decoderProfiles: CommandHooks["decoderProfiles"];
   windowScale: string;
-  constructor({ getViewer, open, source, scope }: CommandHooks) {
-    Object.assign(this, { getViewer, open, source, scope });
+  constructor({
+    getViewer,
+    open,
+    source,
+    scope,
+    decoderProfiles,
+  }: CommandHooks) {
+    Object.assign(this, { getViewer, open, source, scope, decoderProfiles });
   }
   async execute(command: string, nodes: TclNode[]) {
     if (command === "waveHelp") return HELP;
@@ -180,6 +182,7 @@ class WaveCommands {
       [
         "wvGetWindowTimeUnit",
         "waveGetEvents",
+        "waveDecodeEvents",
         "wvSetCursor",
         "wvSetMarker",
         "wvZoom",
@@ -208,30 +211,8 @@ class WaveCommands {
     };
     const time = (t: number) =>
       String((t * scaleSeconds(viewer.meta.scale)) / scaleSeconds(scale));
-    const find = async (name: string) => {
-      const normalized = normalName(name, text(o["-delim"]) || "/");
-      let result = await viewer.backend.request("search", {
-        query: normalized,
-      });
-      const exact = result.signals.find(
-        (s) => normalName(`${s.scope}.${s.name}`, ".") === normalized,
-      );
-      if (exact) return exact;
-      const bit = /^(.*)\[(-?\d+)\]$/.exec(normalized);
-      if (bit) {
-        result = await viewer.backend.request("search", { query: bit[1] });
-        for (const s of result.signals) {
-          if (normalName(`${s.scope}.${s.name}`, ".") !== bit[1]) continue;
-          const range = /\[\s*(-?\d+)\s*:\s*(-?\d+)\s*\]$/.exec(s.name),
-            right = range ? Number(range[2]) : 0,
-            direction = range && Number(range[1]) < right ? -1 : 1,
-            offset = (Number(bit[2]) - right) * direction;
-          if (Number.isSafeInteger(offset) && offset >= 0 && offset < s.width)
-            return { ...s, width: 1, sourceWidth: s.width, bitOffset: offset };
-        }
-      }
-      throw new Error(`Dumped signal not found: ${name}`);
-    };
+    const find = (name: string) =>
+      findSignal(viewer.backend, name, text(o["-delim"]) || "/");
     const ui = (action: string, payload: unknown = {}) =>
       viewer.ui(action, payload);
     switch (command) {
@@ -339,21 +320,11 @@ class WaveCommands {
         const signal = await find(args[0]),
           snapshot = o["-time"] ? null : await ui("snapshot");
         const t = o["-time"] ? ticks(text(o["-time"])) : snapshot.cursorA;
-        const result = (
-          await viewer.backend.request("query", {
-            signals: [signal.id],
-            start: String(t),
-            end: String(t),
-            limit: 100000,
-          })
-        )[signal.id];
-        if (result.truncated)
-          throw new Error("Value query has too many same-tick events");
-        const raw = result.events.at(-1)?.[1];
+        const raw = await readSignalAt(viewer.backend, signal, t);
         return raw == null
           ? ""
           : formatValue(
-              WaveSignal.project(raw, signal),
+              raw,
               signal.width,
               text(o["-format"]) || "Hex",
               !!o["-lz"],
@@ -406,6 +377,46 @@ class WaveCommands {
         });
         return JSON.stringify(result);
       }
+      case "waveDecode": {
+        const [operation, name, id] = args;
+        if (operation === "list") {
+          count(1);
+          return JSON.stringify(
+            await (this.decoderProfiles?.(viewer) || builtinProfiles),
+          );
+        }
+        if (operation !== "set" && operation !== "clear")
+          throw Error("Expected list, set or clear");
+        count(operation === "set" ? 3 : 2);
+        const signal = await find(name);
+        const profiles =
+          operation === "set"
+            ? await (this.decoderProfiles?.(viewer) || builtinProfiles)
+            : [];
+        const profile = profiles.find((item) => item.id === id);
+        if (operation === "set" && !profile)
+          throw Error("Decoder not found: " + id);
+        return String(await ui("setDecoder", { signal, profile }));
+      }
+      case "waveAnnotate": {
+        count(1, 3);
+        if (args.length === 2) throw Error("Supply both tags and note");
+        const signal = await find(args[0]);
+        if (args.length === 3)
+          return String(
+            await ui("annotateSignal", {
+              signal,
+              tags: args[1].split(/[,，]/),
+              note: args[2],
+            }),
+          );
+        const snapshot = await ui("snapshot");
+        const row = (snapshot.chosen as Signal[]).find(
+          (item) => WaveSignal.key(item) === WaveSignal.key(signal),
+        );
+        return JSON.stringify(row?.annotation ?? null);
+      }
+      case "waveDecodeEvents":
       case "waveGetEvents": {
         count(3, 4);
         const signal = await find(args[0]);
@@ -427,14 +438,28 @@ class WaveCommands {
             limit,
           })
         )[signal.id];
+        const decode = command === "waveDecodeEvents";
+        const configured: Signal | undefined = decode
+          ? (await ui("snapshot")).chosen.find(
+              (item: Signal) => WaveSignal.key(item) === WaveSignal.key(signal),
+            )
+          : undefined;
+        if (decode && !configured?.decoder)
+          throw Error("Signal has no decoder: " + args[0]);
         return JSON.stringify({
           signal: args[0],
           unit: scale,
           truncated: block.truncated,
-          events: block.events.map(([tick, raw]) => [
-            time(Number(tick)),
-            WaveSignal.project(raw, signal),
-          ]),
+          events: block.events.map(([tick, raw]) => {
+            const value = WaveSignal.project(raw, signal);
+            return decode
+              ? [
+                  time(Number(tick)),
+                  value,
+                  decodeWord(configured.decoder, value, signal.width) ?? null,
+                ]
+              : [time(Number(tick)), value];
+          }),
         });
       }
       case "waveLayout": {
@@ -466,6 +491,11 @@ class WaveCommands {
             enabled: args.length ? args[0] === "1" : undefined,
           }),
         );
+      case "waveBusLabels":
+        count(0, 1);
+        if (args.length && !["auto", "full"].includes(args[0]))
+          throw Error("waveBusLabels expects auto or full");
+        return String(await ui("busLabelMode", { mode: args[0] }));
       case "waveGroup": {
         count(1, 100000);
         const [operation, group, target, side] = args;
@@ -538,6 +568,8 @@ class WaveCommands {
           s.chosen.some(
             (signal) =>
               Number.isInteger(signal.bitOffset) ||
+              signal.decoder ||
+              signal.annotation ||
               signal.id.startsWith("@virtual:"),
           )
         ) {

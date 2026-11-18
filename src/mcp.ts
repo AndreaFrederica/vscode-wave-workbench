@@ -9,7 +9,61 @@ import * as readline from "node:readline";
 
 type Arguments = Record<string, unknown>;
 const maxMessage = 2 * 1024 * 1024;
+const clipProperties = {
+  waveform: {
+    type: "string",
+    description:
+      "Absolute path of an open waveform. Defaults to the active view.",
+  },
+  signals: {
+    type: "array",
+    items: { type: "string" },
+    minItems: 1,
+    maxItems: 64,
+    description:
+      "Full signal paths. Defaults to selected signal rows, or displayed rows if none are selected.",
+  },
+  range: {
+    type: "string",
+    enum: ["view", "cursors", "explicit"],
+    description:
+      "Visible time window, A/B cursor interval, or explicit tick bounds.",
+  },
+  start: {
+    type: "string",
+    description:
+      "Start tick, as an integer string. Together with end, defaults to explicit range.",
+  },
+  end: { type: "string", description: "End tick, as an integer string." },
+  limit: {
+    type: "integer",
+    minimum: 1,
+    maximum: 5000,
+    description:
+      "Maximum events per signal before the total clip budget is applied.",
+  },
+};
 const toolDefinitions = [
+  tool(
+    "wave_clip",
+    "Read a clipped segment from open waveform signals. Returns initial values, transitions, tick scale, markers and truncation flags.",
+    clipProperties,
+    [],
+  ),
+  tool(
+    "wave_export",
+    "Export a waveform segment as PNG, CSV, JSON or VCD. PNG may be returned directly as an image. Data formats require a destination path.",
+    {
+      ...clipProperties,
+      format: { type: "string", enum: ["png", "csv", "json", "vcd"] },
+      path: {
+        type: "string",
+        description:
+          "A new destination file. Relative paths are resolved against the workspace.",
+      },
+    },
+    ["format"],
+  ),
   tool(
     "wave_tcl",
     "Run a Tcl script in the selected live Wave Workbench view and return its result and puts output.",
@@ -39,10 +93,46 @@ const toolDefinitions = [
   ),
 ];
 
+type InputProperty = {
+  type: string;
+  enum?: readonly string[];
+  minimum?: number;
+  maximum?: number;
+  minItems?: number;
+  maxItems?: number;
+  items?: { type: string };
+  description?: string;
+};
+
+function validArgument(value: unknown, property: InputProperty) {
+  if (property.type === "string")
+    return (
+      typeof value === "string" &&
+      value.length > 0 &&
+      (!property.enum || property.enum.includes(value))
+    );
+  if (property.type === "integer")
+    return (
+      typeof value === "number" &&
+      Number.isSafeInteger(value) &&
+      value >= (property.minimum ?? -Infinity) &&
+      value <= (property.maximum ?? Infinity)
+    );
+  return (
+    property.type === "array" &&
+    Array.isArray(value) &&
+    value.length >= (property.minItems ?? 0) &&
+    value.length <= (property.maxItems ?? Infinity) &&
+    value.every(
+      (item) => typeof item === property.items?.type && item.length > 0,
+    )
+  );
+}
+
 function tool(
   name: string,
   description: string,
-  properties: Arguments,
+  properties: Record<string, InputProperty>,
   required: string[],
 ) {
   return {
@@ -114,12 +204,12 @@ export function serveWaveMcp(
           throw Error("Invalid Wave Workbench tool call");
         if (
           definition.inputSchema.required.some(
-            (key) => typeof args[key] !== "string" || !args[key].length,
+            (key) => !Object.hasOwn(args, key),
           ) ||
           Object.keys(args).some(
             (key) =>
               !Object.hasOwn(definition.inputSchema.properties, key) ||
-              typeof args[key] !== "string",
+              !validArgument(args[key], definition.inputSchema.properties[key]),
           )
         )
           throw Error("Invalid Wave Workbench tool arguments");
@@ -252,7 +342,7 @@ async function stdio(workspace: string) {
           ? version
           : supportedVersions[0],
         capabilities: { tools: {} },
-        serverInfo: { name: "wave-workbench", version: "0.9.0" },
+        serverInfo: { name: "wave-workbench", version: "0.9.5" },
       };
     } else if (request.method === "ping") response.result = {};
     else if (request.method === "tools/list")
@@ -264,9 +354,25 @@ async function stdio(workspace: string) {
           request.params?.name,
           request.params?.arguments ?? {},
         );
-        response.result = {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-        };
+        if (
+          request.params?.name === "wave_export" &&
+          result &&
+          typeof result === "object" &&
+          "imagePng" in result &&
+          typeof result.imagePng === "string"
+        ) {
+          const { imagePng, ...metadata } = result;
+          response.result = {
+            content: [
+              { type: "text", text: JSON.stringify(metadata) },
+              { type: "image", mimeType: "image/png", data: imagePng },
+            ],
+          };
+        } else {
+          response.result = {
+            content: [{ type: "text", text: JSON.stringify(result) }],
+          };
+        }
       } catch (error) {
         response.result = {
           isError: true,

@@ -306,6 +306,56 @@ test('hover reads truncated tail on demand and drops tooltip on leave',async({pa
  }finally{env.dispose();fs.rmSync(dir,{recursive:true,force:true});}
 });
 
+test('narrow bus cells render compact values on the canvas and in PNG', async ({page}) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wave-bus-label-'));
+  const filename = path.join(directory, 'narrow.vcd');
+  fs.writeFileSync(filename, [
+    '$timescale 1 ns $end', '$scope module top $end',
+    '$var wire 32 v bus [31:0] $end', '$upscope $end', '$enddefinitions $end',
+    '#0', 'b101 v', '#50', 'b' + (0xF7ADBEEF).toString(2) + ' v',
+    '#100', 'b110 v', '#1000', '',
+  ].join('\n'));
+  await page.setViewportSize({width: 1100, height: 700});
+  await page.addInitScript(() => {
+    const fillText = CanvasRenderingContext2D.prototype.fillText;
+    window.drawnLabels = [];
+    CanvasRenderingContext2D.prototype.fillText = function (label, ...args) {
+      window.drawnLabels.push({label: String(label), viewer: this.canvas.id === 'canvas'});
+      return fillText.call(this, label, ...args);
+    };
+  });
+  const env = await setup(page, filename);
+  const labels = (viewer) => page.evaluate(
+    viewer => window.drawnLabels.filter(entry => entry.viewer === viewer).map(entry => entry.label),
+    viewer,
+  );
+  try {
+    await env.run('wvAddSignal {/top/bus[31:0]}');
+    await expect(page.locator('.row .value')).toHaveText('00000005');
+    await expect.poll(() => labels(true)).toContain('5');
+    await expect.poll(async () => (await labels(true)).some(label => /^…[A-F]*F$/.test(label))).toBe(true);
+    await expect.poll(() => labels(true)).toContain('00000006');
+    const {collectClip} = require('../dist/wave-clip');
+    const clip = await collectClip(env.viewer, {}, true);
+    await env.viewer.ui('renderClipImage', clip);
+    expect((await labels(false)).some(label => /^…[A-Fa-f]*f$/i.test(label))).toBe(true);
+
+    await page.locator('#displayMenu summary').click();
+    await page.evaluate(() => { window.drawnLabels.length = 0; });
+    await page.getByLabel('总线格数值').selectOption('full');
+    expect(await env.run('waveBusLabels')).toBe('full');
+    await expect.poll(() => labels(true)).toContain('00000006');
+    expect(await labels(true)).not.toContain('5');
+    expect((await labels(true)).some(label => label.startsWith('…'))).toBe(false);
+    expect(await env.run('waveBusLabels auto')).toBe('auto');
+    await expect(page.getByLabel('总线格数值')).toHaveValue('auto');
+    await expect.poll(() => labels(true)).toContain('5');
+  } finally {
+    env.dispose();
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
+});
+
 test('group headers reorder, row selection sets the add target and projects restore the view', async ({page}) => {
   const file = path.resolve(__dirname, '../examples/demo.vcd');
   const env = await setup(page, file);
@@ -321,8 +371,9 @@ test('group headers reorder, row selection sets the add target and projects rest
     await page.getByText('clk', {exact: true}).first().click();
     await env.run('wvAddSignal {/tb/dut/data[7:0]}');
     await expect(page.locator('.groupRow[data-group="A"]')).toContainText('A (2)');
-    await page.locator('#toggleTooltip').click();
-    await expect(page.locator('#toggleTooltip')).toHaveAttribute('aria-pressed', 'false');
+    const tooltipToggle = page.getByRole('checkbox', {name: '悬停提示'});
+    await tooltipToggle.uncheck();
+    await expect(tooltipToggle).not.toBeChecked();
     await page.locator('#displayMenu summary').click();
     await page.locator('#waveRowHeight').fill('48');
     await expect.poll(() => page.locator('.row').first().evaluate(row => row.getBoundingClientRect().height)).toBe(48);
@@ -333,11 +384,12 @@ test('group headers reorder, row selection sets the add target and projects rest
     await page.mouse.move(separator.x + 140, separator.y + 12, {steps: 5});
     await page.mouse.up();
     await expect.poll(async () => (await page.locator('#names').boundingBox()).width).toBeGreaterThan(width + 80);
-    await env.run('wvZoom 10 40; wvSetCursor 20; wvSetMarker -name Result 30');
+    await env.run('wvZoom 10 40; wvSetCursor 20; wvSetMarker -name Result 30; waveBusLabels full');
     const state = await env.viewer.ui('snapshot');
     const filename = path.join(directory, 'demo.waveproj');
     await saveWaveProject(filename, file, state);
-    await env.run('waveGroup move B A after; waveTooltip 1; waveLayout 32 30; wvZoomAll');
+    await env.run('waveGroup move B A after; waveTooltip 1; waveLayout 32 30; waveBusLabels auto; wvZoomAll');
+    await expect(tooltipToggle).toBeChecked();
     const project = await readWaveProject(filename);
     expect(project.waveform).toBe(file);
     await env.viewer.ui('restoreView', await restoreView(env.viewer.backend, project.view, env.viewer.meta));
@@ -345,11 +397,120 @@ test('group headers reorder, row selection sets the add target and projects rest
     expect(restored.groupOrder).toEqual(['B', 'A']);
     expect(restored.activeGroup).toBe('A');
     expect(restored.tooltipEnabled).toBe(false);
+    expect(restored.busLabelMode).toBe('full');
+    await expect(tooltipToggle).not.toBeChecked();
     expect(restored.rowHeight).toBe(48);
     expect(restored.namesFraction).toBe(state.namesFraction);
     expect(restored.markers).toEqual(state.markers);
     expect([restored.start, restored.end, restored.cursorA]).toEqual([10, 40, 20]);
   } finally {
+    env.dispose();
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
+});
+
+test('decoder and annotation bindings survive a waveform project round trip', async ({page}) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wave-decoder-'));
+  const filename = path.join(directory, 'instructions.vcd');
+  fs.writeFileSync(filename, [
+    '$timescale 1 ns $end', '$scope module top $end',
+    '$var wire 32 i instr [31:0] $end', '$var wire 1 v valid $end',
+    '$upscope $end', '$enddefinitions $end',
+    '#0', 'b' + (0x18c58553).toString(2) + ' i', '1v',
+    '#20', 'b' + (0x00128293).toString(2) + ' i', '#40', '',
+  ].join('\n'));
+  const env = await setup(page, filename);
+  try {
+    const name = '{/top/instr[31:0]}';
+    await env.run(`wvAddSignal ${name} /top/valid; wvSelectSignal ${name}; waveDecode set ${name} rv32-zfinx`);
+    const row = page.locator('.row').first();
+    await expect(row.locator('.value')).toHaveText('fdiv.s x10, x11, x12, rne');
+    await clickTool(page, '#editAnnotation');
+    await page.getByLabel('标签（逗号分隔）').fill('CV32, ID, CV32');
+    await page.getByLabel('注释', {exact: true}).fill('IF/ID 指令\n参照 valid。');
+    await page.getByRole('button', {name:'保存标签和注释'}).click();
+    await expect(row).toHaveAttribute('title', /#CV32 #ID/);
+    await page.locator('#toggleFilter').click();
+    await page.locator('#filterSignals').fill('tag:ID');
+    await expect(page.locator('.row')).toHaveCount(1);
+    const events = JSON.parse(await env.run(`waveDecodeEvents ${name} 0 39`));
+    expect(events.events.map(event => event[2])).toEqual(['fdiv.s x10, x11, x12, rne', 'addi x5, x5, 1']);
+    const {saveWaveProject, readWaveProject} = require('../dist/project');
+    const {restoreView} = require('../dist/view-state');
+    const project = path.join(directory, 'instructions.waveproj');
+    await saveWaveProject(project, filename, await env.viewer.ui('snapshot'));
+    await env.run(`waveDecode clear ${name}; waveAnnotate ${name} {} {}`);
+    const view = await restoreView(env.viewer.backend, (await readWaveProject(project)).view, env.viewer.meta);
+    await env.viewer.ui('restoreView', view);
+    await expect(row.locator('.value')).toHaveText('fdiv.s x10, x11, x12, rne');
+    await expect(row).toHaveAttribute('title', /参照 valid。/);
+  } finally {
+    env.dispose();
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
+});
+
+test('waveform clips preserve initial values, reopen as VCD and return PNG through MCP', async ({page}) => {
+  const file = path.resolve(__dirname, '../examples/demo.vcd');
+  const env = await setup(page, file);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wave-clip-test-'));
+  const {collectClip, serializeClip} = require('../dist/wave-clip');
+  const {serveWaveMcp} = require('../dist/mcp');
+  const {spawn} = require('node:child_process');
+  const readline = require('node:readline');
+  const backend = new Backend(path.resolve(__dirname, '../bin/wave-backend'));
+  let host;
+  let client;
+  let replies;
+  try {
+    await env.run('wvAddSignal -group {CPU {/tb/dut/clk} {/tb/dut/data[7:0]}}; wvSelectSignal {/tb/dut/data[7:0]}');
+    await env.run('wvSetCursor 17; wvSetMarker 37');
+    const clip = await collectClip(env.viewer, {range: 'cursors'}, true);
+    expect(clip.traces).toHaveLength(1);
+    expect(clip.traces[0].events).toEqual([['17', '00000000'], ['20', '00101010'], ['30', '11110000']]);
+    expect(serializeClip(clip, 'csv')).toContain('"tb.dut.data[7:0]",17,"1ns","00000000",false');
+    const filename = path.join(directory, 'clip.vcd');
+    fs.writeFileSync(filename, serializeClip(clip, 'vcd'));
+    const meta = await backend.request('open', {path: filename});
+    expect([meta.start, meta.end, meta.scale]).toEqual(['0', '20', '1ns']);
+    const id = meta.signals[0].id;
+    const data = await backend.request('query', {signals: [id], start: '0', end: '20', limit: 10});
+    expect(data[id].events).toEqual([['0', '00000000'], ['3', '00101010'], ['13', '11110000']]);
+
+    await new Promise((resolve, reject) => {
+      host = serveWaveMcp(directory, async (name, args) => {
+        if (name === 'wave_list') return {selected: file, views: [file]};
+        const segment = await collectClip(env.viewer, args, name === 'wave_clip');
+        if (name === 'wave_clip') return segment;
+        expect(name).toBe('wave_export');
+        return {start: segment.start, imagePng: await env.viewer.ui('renderClipImage', segment)};
+      }, (message) => String(message).startsWith('MCP socket ') ? resolve() : reject(Error(message)));
+    });
+    client = spawn(process.execPath, [path.resolve(__dirname, '../dist/mcp.js'), directory], {stdio: ['pipe', 'pipe', 'inherit']});
+    replies = readline.createInterface({input: client.stdout});
+    const lines = replies[Symbol.asyncIterator]();
+    async function call(id, name, args) {
+      client.stdin.write(JSON.stringify({
+        jsonrpc: '2.0', id, method: 'tools/call', params: {name, arguments: args},
+      }) + '\n');
+      const reply = JSON.parse((await lines.next()).value);
+      expect(reply.id).toBe(id);
+      expect(reply.result.isError, JSON.stringify(reply.result)).toBeUndefined();
+      return reply.result.content;
+    }
+    const args = {start: '17', end: '37', signals: ['/tb/dut/data[5]']};
+    const [content] = await call(1, 'wave_clip', args);
+    expect(JSON.parse(content.text).traces[0].events).toEqual([['17', '0'], ['20', '1']]);
+    const [, png] = await call(2, 'wave_export', {...args, format: 'png'});
+    expect(png.mimeType).toBe('image/png');
+    expect(Buffer.from(png.data, 'base64').subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+    const truncated = await collectClip(env.viewer, {...args, limit: 1}, true);
+    expect(truncated.truncated).toBe(true);
+  } finally {
+    replies?.close();
+    client?.stdin.end();
+    host?.dispose();
+    backend.dispose();
     env.dispose();
     fs.rmSync(directory, {recursive: true, force: true});
   }

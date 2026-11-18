@@ -4,12 +4,21 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import { getElement as $ } from "./dom";
+import { renderClipImage } from "./clip-image";
+import { drawBusLabel } from "./bus-label";
 import * as WaveSignal from "../shared/signals";
+import {
+  decodeWord,
+  normalizeAnnotation,
+  supportsProfile,
+  validateProfile,
+} from "../shared/decoders";
 import type {
   Signal,
   Metadata,
   WaveState,
   Block,
+  BusLabelMode,
   Marker,
   QueryResult,
 } from "../shared/protocol";
@@ -66,6 +75,8 @@ let expandedBuses = new Set(saved.expandedBuses || []);
 let virtualDefinitions = saved.virtualDefinitions || [];
 let markersVisible = saved.markersVisible !== false;
 let tooltipEnabled = saved.tooltipEnabled !== false;
+let busLabelMode: BusLabelMode =
+  saved.busLabelMode === "full" ? "full" : "auto";
 let clearWaveHover: () => void;
 let rowHeight = normalizeRowHeight(saved.rowHeight);
 let namesFraction = normalizeNamesFraction(saved.namesFraction);
@@ -96,10 +107,43 @@ function applyTrackLayout() {
 }
 applyTrackLayout();
 let persistTimer;
+let sentRtlCursor: string;
+function publishRtlCursor() {
+  if (!meta) return;
+  const stamp = JSON.stringify([cursorA, displayFactor, displayScale]);
+  if (stamp === sentRtlCursor) return;
+  sentRtlCursor = stamp;
+  vscode.postMessage({
+    type: "rtlCursor",
+    tick: cursorA,
+    displayFactor,
+    displayScale,
+  });
+}
+let projectSignature: string | undefined;
+let projectDirty = false;
+let projectTimer: number | undefined;
+const signatureOf = (view: WaveState) =>
+  JSON.stringify({ ...view, scrollTop: undefined });
+function publishProjectState(baseline = false) {
+  if (projectTimer !== undefined) clearTimeout(projectTimer);
+  projectTimer = undefined;
+  const view = snapshot();
+  const signature = signatureOf(view);
+  if (!baseline && signature === projectSignature) return;
+  projectSignature = signature;
+  projectDirty = !baseline;
+  vscode.postMessage({ type: "projectState", view, baseline });
+}
 let cursorValues = {},
   cursorFlight = null,
   cursorSequence = 0;
 function persist() {
+  publishRtlCursor();
+  if (projectSignature !== undefined) {
+    if (!projectDirty) publishProjectState();
+    else projectTimer ??= window.setTimeout(publishProjectState, 100);
+  }
   clearTimeout(persistTimer);
   persistTimer = window.setTimeout(
     () =>
@@ -116,6 +160,8 @@ function persist() {
           bitOffset: s.bitOffset,
           sourceWidth: s.sourceWidth,
           parentBus: s.parentBus,
+          decoder: s.decoder,
+          annotation: s.annotation,
         })),
         start,
         end,
@@ -125,6 +171,7 @@ function persist() {
         markers,
         markersVisible,
         tooltipEnabled,
+        busLabelMode,
         rowHeight,
         namesFraction,
         displayScale,
@@ -227,11 +274,19 @@ function rebuildRows() {
         children.get(s.parentBus).push(i);
       }
     }
-    const matches = (i) =>
-      !signalFilter ||
-      `${WaveSignal.label(chosen[i])} ${chosen[i].scope}.${chosen[i].name}`
-        .toLowerCase()
-        .includes(signalFilter.toLowerCase());
+    const filter = signalFilter.trim().toLowerCase();
+    const matches = (i) => {
+      const s = chosen[i];
+      if (filter.startsWith("tag:"))
+        return s.annotation?.tags.some((tag) =>
+          tag.toLowerCase().includes(filter.slice(4).trim()),
+        );
+      return [
+        WaveSignal.label(s),
+        `${s.scope}.${s.name}`,
+        ...(s.annotation?.tags || []),
+      ].some((text) => text.toLowerCase().includes(filter));
+    };
     const rows = [];
     for (const i of indices) {
       const s = chosen[i];
@@ -486,8 +541,7 @@ function removeGroup(name: string) {
 }
 function setTooltip(enabled: boolean) {
   tooltipEnabled = enabled;
-  const button = $("toggleTooltip");
-  button.setAttribute("aria-pressed", String(enabled));
+  $("toggleTooltip").checked = enabled;
   if (!enabled) clearWaveHover?.();
   persist();
 }
@@ -893,6 +947,20 @@ function render() {
     const name = document.createElement("span");
     name.className = "name";
     name.textContent = WaveSignal.label(s);
+    if (s.annotation) {
+      const mark = document.createElement("span");
+      mark.className = "signalAnnotation";
+      mark.textContent = "✎";
+      mark.setAttribute("aria-label", "有标签或注释");
+      name.append(mark);
+      row.title += [
+        s.annotation.tags.map((tag) => "#" + tag).join(" "),
+        s.annotation.note,
+      ]
+        .filter(Boolean)
+        .map((text) => "\n" + text)
+        .join("");
+    }
     row.classList.toggle("groupChild", !!s.group);
     row.classList.toggle("busBit", Number.isInteger(s.bitOffset));
     row.style.setProperty(
@@ -901,7 +969,13 @@ function render() {
     );
     const value = document.createElement("span");
     value.className = "value";
-    value.textContent = formatSignal(cursorValue(s.id), s);
+    const raw = cursorValue(s.id);
+    value.textContent =
+      (s.decoder &&
+        decodeWord(s.decoder, WaveSignal.project(raw, s), s.width)) ||
+      formatSignal(raw, s);
+    if (s.decoder)
+      value.title = value.textContent + " · " + formatSignal(raw, s);
     const toggle = document.createElement("button");
     toggle.className = "busToggle";
     toggle.textContent =
@@ -1070,13 +1144,28 @@ function draw() {
         ctx.closePath();
       }
       ctx.stroke();
-      if (s.width > 1 && right - left > 28) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(left + 5, y, right - left - 10, rowHeight);
-        ctx.clip();
-        ctx.fillText(formatSignal(raw, s), left + 8, y + 20);
-        ctx.restore();
+      if (s.width > 1 && right - left >= 10) {
+        const decoded = s.decoder && decodeWord(s.decoder, v, s.width);
+        const value = decoded || formatSignal(raw, s),
+          mode = s.displayRadix || radix;
+        const compact = decoded
+          ? decoded.split(" ", 1)[0]
+          : (mode === "hex" || mode === "bin") &&
+              s.notation !== "verilog" &&
+              value.startsWith("0") &&
+              /^[01]+$/.test(v)
+            ? value.replace(/^0+(?=.)/, "")
+            : undefined;
+        drawBusLabel(
+          ctx,
+          value,
+          left,
+          right,
+          y + 20,
+          busLabelMode,
+          compact,
+          !!decoded,
+        );
       }
     }
     if (data[s.id]?.truncated) {
@@ -1148,7 +1237,16 @@ function source(target = "declaration") {
 }
 function action(name) {
   if (
-    ["openWaveform", "runScript", "saveProject", "openProject"].includes(name)
+    [
+      "openWaveform",
+      "openRecent",
+      "selectDecoder",
+      "editDecoderConfig",
+      "runScript",
+      "saveProject",
+      "openProject",
+      "exportClip",
+    ].includes(name)
   ) {
     vscode.postMessage({ type: name });
     return;
@@ -1380,6 +1478,17 @@ function setRowHeight(height: number) {
 }
 $("waveRowHeight").oninput = (event) =>
   setRowHeight(Number((event.target as HTMLInputElement).value));
+function setBusLabelMode(value: unknown) {
+  busLabelMode = value === "full" ? "full" : "auto";
+  $("busLabelMode").value = busLabelMode;
+}
+$("busLabelMode").value = busLabelMode;
+$("busLabelMode").onchange = () => updateBusLabels($("busLabelMode").value);
+function updateBusLabels(value: unknown) {
+  setBusLabelMode(value);
+  persist();
+  if (meta) draw();
+}
 const waveSplit = $("waveSplit");
 function setNamesFraction(value: number | undefined) {
   namesFraction = normalizeNamesFraction(value);
@@ -1430,6 +1539,7 @@ window.addEventListener("message", async (e) => {
         signals: saved.chosen.slice(0, MAX_SIGNALS),
         virtualDefinitions,
       });
+    else publishProjectState(true);
     renderTree();
     request();
   } else if (msg.type === "ui") {
@@ -1456,6 +1566,11 @@ window.addEventListener("message", async (e) => {
     appendLog(msg.text);
   } else if (msg.type === "kdbAttached") {
     $("kdbState").textContent = `已接入 · ${msg.path}`;
+  } else if (msg.type === "kdbDetached") {
+    $("kdbState").textContent = "未接入 KDB";
+    kdbScope = "";
+    kdbRows = [];
+    renderKdb();
   } else if (msg.type === "kdbHierarchy") {
     kdbScope = msg.scope;
     kdbRows = msg.children;
@@ -1482,10 +1597,18 @@ window.addEventListener("message", async (e) => {
     renderCatalog();
   } else if (msg.type === "restore") {
     chosen = msg.signals.filter((s) => s.supported);
+    publishProjectState(true);
     window.waveWorkflow?.scope(saved.scope || chosen[active]?.scope || "");
     request();
     $("tracks").scrollTop = saved.scrollTop || 0;
     scheduleViewport();
+  } else if (msg.type === "projectSaved") {
+    if (signatureOf(snapshot()) === signatureOf(msg.view)) {
+      publishProjectState(true);
+    } else {
+      projectSignature = signatureOf(msg.view);
+      projectTimer ??= window.setTimeout(publishProjectState, 100);
+    }
   } else if (msg.type === "data") {
     if (cursorFlight && msg.request === cursorFlight.request) {
       const flight = cursorFlight;
@@ -1534,7 +1657,7 @@ function appendLog(text) {
   log.textContent = (log.textContent + "\n" + text).slice(-20000);
   log.scrollTop = log.scrollHeight;
 }
-function snapshot() {
+function snapshot(): WaveState & { chosen: Signal[] } {
   return {
     virtualDefinitions,
     signalFilter,
@@ -1551,6 +1674,7 @@ function snapshot() {
     markers,
     markersVisible,
     tooltipEnabled,
+    busLabelMode,
     rowHeight,
     namesFraction,
     scrollTop: $("tracks").scrollTop,
@@ -1560,7 +1684,32 @@ function snapshot() {
 }
 async function uiAction(name, p) {
   if (name === "snapshot") return snapshot();
+  if (name === "activeSignal") return chosen[active] || null;
+  if (name === "setDecoder" || name === "annotateSignal") {
+    const signal = chosen.find((s) => key(s) === key(p.signal));
+    if (!signal) throw Error("信号还未添加到当前波形");
+    if (name === "setDecoder") {
+      const profile = p.profile && validateProfile(p.profile);
+      if (profile && !supportsProfile(profile, signal.width))
+        throw Error("解码配置与信号位宽不符");
+      signal.decoder = profile;
+    } else {
+      signal.annotation = normalizeAnnotation(p.tags, p.note);
+    }
+    request();
+    return 1;
+  }
+  if (name === "clipContext") {
+    const explicit = chosen.filter((signal) => selectedKeys.has(key(signal)));
+    const displayed = displayRows
+      .filter((row) => row.index !== undefined)
+      .map((row) => chosen[row.index]);
+    const selected = explicit.length ? explicit : displayed;
+    return { start, end, cursorA, cursorB, selected, displayed, markers };
+  }
+  if (name === "renderClipImage") return renderClipImage(p, busLabelMode);
   if (name === "restoreView") {
+    if (p.projectBaseline) projectSignature = undefined;
     virtualDefinitions = p.virtualDefinitions || [];
     chosen = p.chosen;
     expandedBuses = new Set(p.expandedBuses || []);
@@ -1576,6 +1725,7 @@ async function uiAction(name, p) {
     markers = p.markers || [];
     markersVisible = p.markersVisible !== false;
     setTooltip(p.tooltipEnabled !== false);
+    setBusLabelMode(p.busLabelMode);
     rowHeight = normalizeRowHeight(p.rowHeight);
     namesFraction = normalizeNamesFraction(p.namesFraction);
     applyTrackLayout();
@@ -1584,6 +1734,7 @@ async function uiAction(name, p) {
     setWindow(p.start, p.end);
     $("tracks").scrollTop = p.scrollTop || 0;
     render();
+    if (p.projectBaseline) publishProjectState(true);
     return 1;
   }
 
@@ -1712,6 +1863,10 @@ async function uiAction(name, p) {
   if (name === "tooltip") {
     if (p.enabled !== undefined) setTooltip(p.enabled);
     return Number(tooltipEnabled);
+  }
+  if (name === "busLabelMode") {
+    if (p.mode !== undefined) updateBusLabels(p.mode);
+    return busLabelMode;
   }
   if (name === "cursor") {
     cursorA = p.time;
@@ -2067,6 +2222,8 @@ vscode.postMessage({ type: "ready" });
         },
       ],
       ["重命名显示名称", () => editAlias()],
+      ["选择解码配置…", () => action("selectDecoder")],
+      ["标签和注释…", () => editAnnotation()],
       ["上移", () => move(-1)],
       ["下移", () => move(1)],
       ["复制完整路径", () => copyPaths()],
@@ -2552,6 +2709,33 @@ vscode.postMessage({ type: "ready" });
     $("signalAlias").select();
   }
   $("renameSignal").onclick = editAlias;
+  let annotationTarget: Signal;
+  function editAnnotation() {
+    annotationTarget = chosen[active];
+    if (!annotationTarget) return;
+    $("annotationSignal").textContent = WaveSignal.label(annotationTarget);
+    $("annotationTags").value =
+      annotationTarget.annotation?.tags.join(", ") || "";
+    $("annotationNote").value = annotationTarget.annotation?.note || "";
+    $("annotationError").textContent = "";
+    openEditor($("annotationForm"));
+    $("annotationTags").focus();
+  }
+  $("editAnnotation").onclick = editAnnotation;
+  $("cancelAnnotation").onclick = closeEditor;
+  $("annotationForm").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await uiAction("annotateSignal", {
+        signal: annotationTarget,
+        tags: $("annotationTags").value.split(/[,，]/),
+        note: $("annotationNote").value,
+      });
+      closeEditor();
+    } catch (error) {
+      $("annotationError").textContent = error.message;
+    }
+  };
   $("cancelSignalRename").onclick = () => {
     closeEditor();
   };
@@ -2902,8 +3086,9 @@ vscode.postMessage({ type: "ready" });
     hoverBand.hidden = true;
   }
   clearWaveHover = hideHover;
-  $("toggleTooltip").setAttribute("aria-pressed", String(tooltipEnabled));
-  $("toggleTooltip").onclick = () => setTooltip(!tooltipEnabled);
+  const tooltipToggle = $("toggleTooltip");
+  tooltipToggle.checked = tooltipEnabled;
+  tooltipToggle.onchange = () => setTooltip(tooltipToggle.checked);
   function hoverHit(e) {
     if (!tooltipEnabled || !meta || e.buttons || pointer || draggingMarker)
       return null;
@@ -2969,6 +3154,17 @@ vscode.postMessage({ type: "ready" });
     time.textContent =
       "时间：" + timeLabel(hit.time) + " · ΔA " + timeLabel(hit.time - cursorA);
     tooltip.append(title, full, time);
+    if (signal.annotation) {
+      const annotation = document.createElement("div");
+      annotation.className = "hoverAnnotation";
+      annotation.textContent = [
+        signal.annotation.tags.map((tag) => "#" + tag).join(" "),
+        signal.annotation.note,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      tooltip.append(annotation);
+    }
     if (result?.error) {
       const note = document.createElement("div");
       note.className = "hoverWarning";
@@ -2983,7 +3179,10 @@ vscode.postMessage({ type: "ready" });
       empty.textContent = "此时刻没有已记录的值";
       tooltip.append(empty);
     } else {
+      const decoded =
+        signal.decoder && decodeWord(signal.decoder, projected, signal.width);
       for (const [name, value] of [
+        ...(decoded ? [["解码", decoded]] : []),
         ["值", formatSignal(raw, signal)],
         ["Hex", format(projected, signal.width, "hex")],
         ["Binary", format(projected, signal.width, "bin")],

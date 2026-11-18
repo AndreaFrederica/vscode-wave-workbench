@@ -4,6 +4,11 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import type { Signal } from "./protocol";
+import {
+  normalizeAnnotation,
+  supportsProfile,
+  validateProfile,
+} from "./decoders";
 const baseKey = (s: Pick<Signal, "id" | "scope" | "name">) =>
   `${s.scope}\u0000${s.name}\u0000${s.id}`;
 const key = (s: Pick<Signal, "id" | "scope" | "name" | "bitOffset">) =>
@@ -47,6 +52,8 @@ function bits(s: Signal): Signal[] {
     displayRadix: "bin",
     displayName: undefined,
     parentBus: key(s),
+    decoder: undefined,
+    annotation: undefined,
   }));
 }
 function restore(s: Partial<Signal>, canonical: Signal): Signal {
@@ -57,6 +64,9 @@ function restore(s: Partial<Signal>, canonical: Signal): Signal {
     s.bitOffset < canonical.width;
   if (s.bitOffset !== undefined && !bit)
     throw Error("Saved bit selection is outside the source Bus");
+  const decoder = s.decoder && validateProfile(s.decoder);
+  if (decoder && !supportsProfile(decoder, bit ? 1 : canonical.width))
+    throw Error("解码配置与信号位宽不符");
   return {
     ...canonical,
     group: typeof s.group === "string" ? s.group : undefined,
@@ -65,6 +75,9 @@ function restore(s: Partial<Signal>, canonical: Signal): Signal {
       ? s.highlight
       : undefined,
     notation: s.notation === "verilog" ? "verilog" : undefined,
+    decoder,
+    annotation:
+      s.annotation && normalizeAnnotation(s.annotation.tags, s.annotation.note),
     displayRadix: ["hex", "bin", "oct", "unsigned", "signed"].includes(
       s.displayRadix || "",
     )

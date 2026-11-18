@@ -9,8 +9,11 @@ await rm("dist", { recursive: true, force: true });
 const host = (await readdir("src"))
   .filter((s) => s.endsWith(".ts"))
   .map((s) => "src/" + s);
+const shared = (await readdir("src/shared"))
+  .filter((s) => s.endsWith(".ts"))
+  .map((s) => "src/shared/" + s);
 await build({
-  entryPoints: [...host, "src/shared/signals.ts"],
+  entryPoints: [...host, ...shared],
   outdir: "dist",
   outbase: "src",
   platform: "node",

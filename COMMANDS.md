@@ -103,7 +103,9 @@ source /absolute/path/to/doc/cv32e40p_mac_trace/verdi_cv32e40p_mac.tcl
 
 「文件 → 保存波形工程」将波形和 KDB 路径、信号、分组、标记、游标、时间范围和显示设置保存到 `.waveproj`。工程通过相对路径引用波形与 KDB。「文件 → 打开波形工程」可恢复视图，也可以在资源管理器中右键工程文件打开。
 
-拖动分组标题到另一个标题的上半或下半可调整顺序。选中信号会将它所属的分组设为后续添加的目标，显式指定的分组优先。工具栏的「悬停提示」可关闭波形提示，「显示」菜单可调行高。拖动信号栏与波形画布之间的分隔线可调宽度，双击恢复默认。
+拖动分组标题到另一个标题的上半或下半可调整顺序。选中信号会将它所属的分组设为后续添加的目标，显式指定的分组优先。工具栏搜索框左侧的「悬停提示」复选框可开关波形提示，「显示」菜单可调行高。拖动信号栏与波形画布之间的分隔线可调宽度，双击恢复默认。
+
+「显示 → 总线格数值」控制画布和 PNG 导出中的总线标签。默认的「自动缩写」优先显示完整值，空间不足时缩写，省略号表示前方还有数字。「仅完整值」会留空放不下完整值的格子。悬停提示和游标 A 的值栏可查看完整值。
 
 | Tcl 命令 | 用途 |
 | --- | --- |
@@ -116,6 +118,7 @@ source /absolute/path/to/doc/cv32e40p_mac_trace/verdi_cv32e40p_mac.tcl
 | `waveGroup rename name newName` | 重命名分组 |
 | `waveGroup assign name signal...` | 移动已显示的信号 |
 | `waveTooltip ?0/1?` | 查询或设置悬停提示 |
+| `waveBusLabels ?auto/full?` | 查询或设置总线格的数值显示策略 |
 | `waveLayout ?rowHeight signalColumnPercent?` | 查询或设置行高和信号栏占比 |
 
 打开工作区后，启用 `waveWorkbench.mcpEnabled` 并重新加载 VS Code。MCP 客户端在运行 VS Code 工作区扩展宿主的机器上，通过 stdio 启动 `node <插件路径>/dist/mcp.js <工作区绝对路径>`。该进程连接当前工作区的用户私有 Unix socket。Remote SSH 使用远端扩展宿主与远端 MCP 进程。
@@ -129,3 +132,54 @@ waveLayout 44 32
 wvZoom 400000 700000
 waveGetEvents /tb/dut/apu_rvalid 400000 700000
 ```
+
+## 截取 / 导出波形（0.9.1）
+
+在波形视图中选中信号行，然后通过「文件」或「信号」菜单中的「截取 / 导出波形…」选择信号范围、当前时间窗口或游标 A/B 区间，再保存为 PNG、CSV、JSON 或 VCD。VCD 可以重新打开，时间从截取起点的 0 开始。CSV 和 JSON 保留原始时间刻度。导出图片包含信号名称和时间轴。
+
+MCP 客户端可以直接使用两个工具，无需编排 Tcl。
+
+| 工具 | 输入 | 输出 |
+| --- | --- | --- |
+| `wave_clip` | `signals` 全路径列表，`range` 可取 `view`、`cursors`、`explicit`，显式范围用 `start`、`end` 指定整数 tick 字符串 | 时基、起止位置、标记、各信号起点值、变化事件以及截断状态 |
+| `wave_export` | 同样的截取参数，外加 `format` 和可选 `path` | PNG 可直接作为图像返回。提供路径时，输出 PNG、CSV、JSON 或 VCD 文件 |
+
+省略信号时使用已经选中的信号行，未选中时使用当前显示的信号行。省略范围时使用当前窗口，同时提供 `start`、`end` 时使用显式范围。每次最多截取 64 个信号。MCP 可用 `limit` 设置每个信号的事件上限，工具也会应用总量上限。如果范围太大，JSON、CSV 和 PNG 会标记截断。VCD 要求所选范围在事件上限内。
+
+```json
+{
+  "signals": ["/cv32_apu_overlap_tb/dut/apu_busy", "/cv32_apu_overlap_tb/dut/apu_rvalid"],
+  "start": "440000",
+  "end": "675000",
+  "format": "png"
+}
+```
+
+## 波形解码和信号注释
+
+选中信号后，用「信号 → 选择解码配置」切换解码器。波形格、游标 A、悬停提示和 PNG 导出会显示解码结果。选「直接显示原始值」可恢复数值显示。内置配置包括 RV32IMFC、RV32IMC + Zfinx、TL-UL A/D opcode 和 AXI BRESP/RRESP。内置协议配置解码信号值，观察握手时可同时添加 valid、ready 等信号。
+
+「信号 → 编辑解码配置」打开工作区下的 `.vscode/wave-decoders.json`。一个文件可定义多个配置。以下示例把内置 Zfinx 解码器作为一个配置，并为一个 8 位自定义命令字添加匹配规则。
+
+```json
+{
+  "version": 1,
+  "profiles": [
+    { "id": "cv32-id", "label": "CV32 ID", "builtin": "rv32-zfinx" },
+    {
+      "id": "request",
+      "label": "请求命令",
+      "width": 8,
+      "rules": [
+        { "mask": "0xf0", "value": "0x20", "label": "Read channel={3:0:dec}" }
+      ]
+    }
+  ]
+}
+```
+
+规则按顺序匹配 `(word & mask) == value`。标签里的位段使用 `{高位:低位:格式}`，格式可选 `hex`、`bin`、`dec`、`signed`。修改配置文件后，重新在选择器里应用该配置即可更新绑定。工程会保存每个信号应用的配置，重开工程可恢复该版本。
+
+「信号 → 标签和注释」为选中的信号添加逗号分隔的标签和多行注释。信号行悬停及波形悬停可查看注释。筛选框可输入 `tag:ID` 等标签。标签与注释随 `.waveproj` 保存。
+
+Tcl 和 MCP 的 `wave_tcl` 可使用 `waveDecode list`、`waveDecode set signal decoderId`、`waveDecode clear signal`、`waveDecodeEvents signal start end ?limit?` 和 `waveAnnotate signal ?commaSeparatedTags note?`。`waveDecodeEvents` 的事件项包含时间、原始二进制值和解码结果。

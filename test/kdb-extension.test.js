@@ -10,7 +10,16 @@ test('extension host adapter: real FSDB + KDB opens declaration / instantiation 
   const uri=file=>({fsPath:file,toString(){return file;}});
   class Position{constructor(line,character){this.line=line;this.character=character;}}
   class Range{constructor(start,end){this.start=start;this.end=end;}}
-  const vscode={
+  class EventEmitter {
+    constructor() { this.listeners = []; }
+    event = listener => {
+      this.listeners.push(listener);
+      return { dispose: () => { this.listeners = this.listeners.filter(item => item !== listener); } };
+    };
+    fire(event) { for (const listener of this.listeners) listener(event); }
+    dispose() { this.listeners = []; }
+  }
+  const vscode={EventEmitter,
     Uri:{file:uri,joinPath:(base,...parts)=>uri(path.join(base.fsPath,...parts))},Position,Range,Selection:Range,ViewColumn:{Beside:2},
     env:{clipboard:{writeText:async text=>{clipboard=text;}}},
     extensions:{getExtension:()=>({packageJSON:{version:'1.2.5'}})},
@@ -65,7 +74,7 @@ test('extension host adapter: real FSDB + KDB opens declaration / instantiation 
   await commands.get('waveWorkbench.openLast')();
   // A title button on an RTL file reopens the workspace's last wave.
   await commands.get('waveWorkbench.open')(uri('/tmp/example.sv'));
-  assert.deepEqual(openedWaves,[document.uri.fsPath,document.uri.fsPath,document.uri.fsPath]);assert.equal(dialogs,0);
+  assert.deepEqual(openedWaves,[]);assert.equal(dialogs,0);
   await commands.get('waveWorkbench.openPicker')();assert.equal(dialogs,1);assert.equal(openedWaves.at(-1),path.join(root,'examples/demo.vcd'));
   assert.equal(stored.get('lastWaveform'),path.join(root,'examples/demo.vcd'));
 });
