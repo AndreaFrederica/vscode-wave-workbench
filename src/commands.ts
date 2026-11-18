@@ -11,12 +11,14 @@ import { restoreView } from "./view-state";
 import {
   builtinProfiles,
   decodeWord,
+  uartFrameLabel,
   type DecoderProfile,
 } from "./shared/decoders";
+import { scaleSeconds } from "./shared/time";
+import { decodeUart, uartBitTicks } from "./shared/uart";
 import type { Signal } from "./shared/protocol";
 import * as fs from "node:fs";
 import * as path from "node:path";
-const UNITS = { s: 1, ms: 1e-3, us: 1e-6, ns: 1e-9, ps: 1e-12, fs: 1e-15 };
 const HELP = `Supported nWave Tcl commands (current window):
 wvCreateWindow / wvGetCurrentWindow
 wvOpenFile filename
@@ -60,12 +62,6 @@ function parse(nodes: TclNode[], spec: Record<string, number> = {}) {
 const text = (n?: TclNode) => n?.value;
 function names(nodes: TclNode[]) {
   return nodes.flatMap((n) => (n.items?.length > 1 ? n.items : [n])).map(text);
-}
-function scaleSeconds(scale: string) {
-  const match = /^([\d.e+-]+)\s*(s|ms|us|ns|ps|fs)$/i.exec(scale);
-  if (!match || !(Number(match[1]) > 0))
-    throw new Error(`Unsupported time scale ${scale}`);
-  return Number(match[1]) * UNITS[match[2].toLowerCase()];
 }
 function quote(value: unknown) {
   return (
@@ -430,14 +426,6 @@ class WaveCommands {
           limit > 10000
         )
           throw Error("Invalid event window or limit");
-        const block = (
-          await viewer.backend.request("query", {
-            signals: [signal.id],
-            start: String(start),
-            end: String(end),
-            limit,
-          })
-        )[signal.id];
         const decode = command === "waveDecodeEvents";
         const configured: Signal | undefined = decode
           ? (await ui("snapshot")).chosen.find(
@@ -446,6 +434,47 @@ class WaveCommands {
           : undefined;
         if (decode && !configured?.decoder)
           throw Error("Signal has no decoder: " + args[0]);
+        const uart = configured?.decoder?.uart;
+        const bitTicks = uart && uartBitTicks(uart, viewer.meta.scale);
+        if (uart && (!Number.isFinite(bitTicks) || bitTicks < 2))
+          throw Error("UART baud rate exceeds the waveform's time resolution");
+        const through = uart
+          ? Math.min(Number(viewer.meta.end), Math.ceil(end + 13 * bitTicks))
+          : end;
+        const block = (
+          await viewer.backend.request("query", {
+            signals: [signal.id],
+            start: uart ? viewer.meta.start : String(start),
+            end: String(through),
+            limit: uart ? 100000 : limit,
+          })
+        )[signal.id];
+        if (uart) {
+          const displayRatio =
+            scaleSeconds(viewer.meta.scale) / scaleSeconds(scale);
+          const last = block.truncated
+            ? Number(block.events.at(-1)?.[0])
+            : through;
+          const frames = decodeUart(
+            uart,
+            viewer.meta.scale,
+            block.events,
+            last,
+            (raw) => WaveSignal.project(raw, signal),
+          ).filter((frame) => frame.end > start && frame.start <= end);
+          return JSON.stringify({
+            signal: args[0],
+            unit: scale,
+            truncated: block.truncated || frames.length > limit,
+            frames: frames.slice(0, limit).map((frame) => ({
+              start: String(frame.start * displayRatio),
+              end: String(frame.end * displayRatio),
+              word: frame.word,
+              errors: frame.errors,
+              label: uartFrameLabel(configured.decoder, frame),
+            })),
+          });
+        }
         return JSON.stringify({
           signal: args[0],
           unit: scale,

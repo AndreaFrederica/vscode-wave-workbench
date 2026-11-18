@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
+import { validateUart, type UartFrame, type UartOptions } from "./uart";
 import { disassembleRv32 } from "./riscv";
+import riscv from "../../decoders/riscv.json";
+import tlul from "../../decoders/tlul.json";
+import axi from "../../decoders/axi.json";
+import uart from "../../decoders/uart.json";
+import iic from "../../decoders/iic.json";
 
 export type BuiltinDecoder =
   | "rv32imfc"
@@ -8,10 +14,13 @@ export type BuiltinDecoder =
   | "tlul-a"
   | "tlul-d"
   | "axi-resp";
-export interface Rule {
+export interface Match {
   mask: string;
   value: string;
+}
+export interface Rule extends Match {
   label: string;
+  branches?: { when: Match[]; label: string }[];
 }
 export interface DecoderProfile {
   id: string;
@@ -19,23 +28,35 @@ export interface DecoderProfile {
   builtin?: BuiltinDecoder;
   width?: number;
   rules?: Rule[];
+  uart?: UartOptions;
 }
 export interface Annotation {
   tags: string[];
   note: string;
 }
+export interface DecoderGroup {
+  id: string;
+  label: string;
+  filename: string;
+  builtin: boolean;
+  profiles: DecoderProfile[];
+}
+export interface DecoderCatalog {
+  groups: DecoderGroup[];
+  warnings: string[];
+}
 
-export const builtinProfiles: DecoderProfile[] = [
-  { id: "rv32imfc", label: "RISC-V RV32IMFC", builtin: "rv32imfc" },
-  {
-    id: "rv32-zfinx",
-    label: "RISC-V RV32IMC + Zfinx · CV32",
-    builtin: "rv32-zfinx",
-  },
-  { id: "tlul-a", label: "TL-UL A opcode", builtin: "tlul-a", width: 3 },
-  { id: "tlul-d", label: "TL-UL D opcode", builtin: "tlul-d", width: 3 },
-  { id: "axi-resp", label: "AXI BRESP / RRESP", builtin: "axi-resp", width: 2 },
-];
+const files = { riscv, tlul, axi, uart, iic };
+export const builtinGroups: DecoderGroup[] = Object.entries(files).map(
+  ([id, file]) => ({
+    id: "builtin/" + id,
+    label: file.label,
+    filename: id + ".json",
+    builtin: true,
+    profiles: file.profiles as DecoderProfile[],
+  }),
+);
+export const builtinProfiles = builtinGroups.flatMap((group) => group.profiles);
 
 const numeric = /^(0[xX][0-9a-fA-F]+|0[bB][01]+|[0-9]+)$/;
 export function validateProfile(value: unknown): DecoderProfile {
@@ -49,13 +70,36 @@ export function validateProfile(value: unknown): DecoderProfile {
     p.label.length > 120
   )
     throw Error("解码配置需要有效的 id 和 label");
+  const uart = p.uart === undefined ? undefined : validateUart(p.uart);
+  if (uart && (p.builtin !== undefined || p.width !== 1))
+    throw Error("UART 串行规则须绑定一位信号");
+  if (
+    uart &&
+    (p.rules === undefined || (Array.isArray(p.rules) && !p.rules.length))
+  )
+    return { id: p.id, label: p.label, width: 1, uart };
   if (p.builtin !== undefined) {
-    const engine = builtinProfiles.find((entry) => entry.builtin === p.builtin);
-    if (!engine || p.rules !== undefined)
+    const engine = builtinProfiles.find((entry) => entry.id === p.builtin);
+    if (!engine || (p.width !== undefined && !supportsProfile(engine, p.width)))
       throw Error("无效的内置解码器配置 " + p.id);
-    return { ...engine, id: p.id, label: p.label };
+    if (engine.rules) {
+      return validateProfile({
+        ...engine,
+        id: p.id,
+        label: p.label,
+        rules: p.rules ?? engine.rules,
+      });
+    }
+    if (p.rules === undefined || (Array.isArray(p.rules) && !p.rules.length)) {
+      return {
+        ...engine,
+        id: p.id,
+        label: p.label,
+        ...(p.width !== undefined ? { width: p.width } : {}),
+      };
+    }
   }
-  const width = p.width;
+  const width = uart?.dataBits ?? p.width ?? (p.builtin ? 32 : undefined);
   if (
     width === undefined ||
     !Number.isInteger(width) ||
@@ -67,35 +111,60 @@ export function validateProfile(value: unknown): DecoderProfile {
   )
     throw Error("自定义配置需要 2–256 位宽和 1–256 条规则 " + p.id);
   const max = (1n << BigInt(width)) - 1n;
-  const rules = p.rules.map((rule) => {
+  function match(entry: Match) {
     if (
-      !rule ||
-      typeof rule.mask !== "string" ||
-      rule.mask.length > 258 ||
-      !numeric.test(rule.mask) ||
-      typeof rule.value !== "string" ||
-      rule.value.length > 258 ||
-      !numeric.test(rule.value) ||
-      typeof rule.label !== "string" ||
-      !rule.label.trim() ||
-      rule.label.length > 160
+      !entry ||
+      typeof entry.mask !== "string" ||
+      typeof entry.value !== "string" ||
+      entry.mask.length > 258 ||
+      entry.value.length > 258 ||
+      !numeric.test(entry.mask) ||
+      !numeric.test(entry.value)
     )
-      throw Error("无效的解码规则 " + p.id);
-    const mask = BigInt(rule.mask),
-      expected = BigInt(rule.value);
-    if (mask > max || (expected & mask) !== expected)
+      throw Error("掩码和匹配值须为非负整数");
+    const mask = BigInt(entry.mask),
+      value = BigInt(entry.value);
+    if (mask > max || (value & mask) !== value)
       throw Error("规则的掩码或匹配值超出位宽 " + p.id);
-    for (const field of rule.label.matchAll(fieldPattern)) {
-      if (Number(field[1]) >= width || Number(field[2]) > Number(field[1]))
+    return { mask: "0x" + mask.toString(16), value: "0x" + value.toString(16) };
+  }
+  function label(text: string, wordWidth: number) {
+    if (typeof text !== "string" || !text.trim() || text.length > 160)
+      throw Error("无效的解码文本 " + p.id);
+    for (const field of text.matchAll(fieldPattern)) {
+      if (Number(field[1]) >= wordWidth || Number(field[2]) > Number(field[1]))
         throw Error("规则的标签字段超出位宽 " + p.id);
     }
-    return {
-      mask: "0x" + mask.toString(16),
-      value: "0x" + expected.toString(16),
-      label: rule.label,
-    };
+    return text;
+  }
+  const rules = p.rules.map((rule) => {
+    const decoded = { ...match(rule), label: label(rule.label, width) };
+    if (rule.branches === undefined) return decoded;
+    if (!Array.isArray(rule.branches) || rule.branches.length > 32)
+      throw Error("每条规则最多 32 个分支");
+    const branches = rule.branches.map((branch) => {
+      if (
+        !branch ||
+        !Array.isArray(branch.when) ||
+        !branch.when.length ||
+        branch.when.length > 16
+      )
+        throw Error("每个分支须包含 1–16 个条件");
+      return {
+        when: branch.when.map(match),
+        label: label(branch.label, width),
+      };
+    });
+    return { ...decoded, branches };
   });
-  return { id: p.id, label: p.label, width, rules };
+  return {
+    id: p.id,
+    label: p.label,
+    ...(p.width !== undefined ? { width: p.width } : {}),
+    rules,
+    ...(p.builtin ? { builtin: p.builtin } : {}),
+    ...(uart ? { uart } : {}),
+  };
 }
 
 export function supportsProfile(profile: DecoderProfile, width: number) {
@@ -105,9 +174,23 @@ export function supportsProfile(profile: DecoderProfile, width: number) {
 }
 
 const fieldPattern = /\{(\d{1,3}):(\d{1,3}):(hex|dec|signed|bin)\}/g;
+const compileMatch = ({ mask, value }: Match) => ({
+  mask: BigInt(mask),
+  value: BigInt(value),
+});
+function compileRule(rule: Rule) {
+  return {
+    ...compileMatch(rule),
+    label: rule.label,
+    branches: rule.branches?.map((branch) => ({
+      label: branch.label,
+      when: branch.when.map(compileMatch),
+    })),
+  };
+}
 const compiledRules = new WeakMap<
   DecoderProfile,
-  { mask: bigint; value: bigint; label: string }[]
+  ReturnType<typeof compileRule>[]
 >();
 
 export function decodeWord(
@@ -115,32 +198,67 @@ export function decodeWord(
   bits: string | undefined,
   width: number,
 ): string | undefined {
-  if (!bits || bits.length > width || !supportsProfile(profile, width)) return;
+  if (
+    !bits ||
+    bits.length > width ||
+    !supportsProfile(profile, width) ||
+    profile.uart
+  )
+    return;
+  if (
+    profile.rules?.length ||
+    (profile.builtin && !profile.builtin.startsWith("rv32"))
+  ) {
+    if (/^[01]+$/.test(bits)) {
+      const label = decodeRuleValue(profile, BigInt("0b" + bits));
+      if (label !== undefined) return label;
+    }
+  }
   if (profile.builtin === "rv32imfc" || profile.builtin === "rv32-zfinx") {
     // An FSDB may leave the upper halfword unknown for a compressed instruction.
     const word = bits.endsWith("11") ? bits : bits.slice(-16);
     if (!/^[01]+$/.test(word) || (width === 16 && word.endsWith("11"))) return;
     return disassembleRv32(parseInt(word, 2), profile.builtin === "rv32-zfinx");
   }
-  if (!/^[01]+$/.test(bits)) return;
-  const word = BigInt("0b" + bits);
-  if (profile.builtin === "tlul-a")
-    return ["PutFullData", "PutPartialData", , , "Get"][Number(word)];
-  if (profile.builtin === "tlul-d")
-    return ["AccessAck", "AccessAckData"][Number(word)];
-  if (profile.builtin === "axi-resp")
-    return ["OKAY", "EXOKAY", "SLVERR", "DECERR"][Number(word)];
+}
+
+export function decodeRuleValue(profile: DecoderProfile, word: bigint) {
   let rules = compiledRules.get(profile);
   if (!rules) {
-    rules = (profile.rules || []).map((rule) => ({
-      ...rule,
-      mask: BigInt(rule.mask),
-      value: BigInt(rule.value),
-    }));
+    const sourceRules =
+      profile.rules ??
+      builtinProfiles.find((entry) => entry.id === profile.builtin)?.rules ??
+      [];
+    rules = sourceRules.map(compileRule);
     compiledRules.set(profile, rules);
   }
-  const match = rules.find((rule) => (word & rule.mask) === rule.value);
-  return match?.label.replace(fieldPattern, (_, msb, lsb, radix) => {
+  const matches = ({ mask, value }: ReturnType<typeof compileMatch>) =>
+    (word & mask) === value;
+  const rule = rules.find(matches);
+  if (rule) {
+    const branch = rule.branches?.find((entry) => entry.when.every(matches));
+    return formatRule(branch?.label ?? rule.label, word);
+  }
+}
+
+export function uartFrameLabel(profile: DecoderProfile, frame: UartFrame) {
+  if (frame.errors.includes("unknown")) return "UART 数据未知";
+  const custom = decodeRuleValue(profile, BigInt(frame.word));
+  const hex =
+    "0x" +
+    frame.word
+      .toString(16)
+      .toUpperCase()
+      .padStart(Math.ceil((profile.uart?.dataBits ?? 8) / 4), "0");
+  const label = custom ?? hex;
+  const errors = frame.errors.map((error) =>
+    error === "parity" ? "校验错误" : "停止位错误",
+  );
+  return errors.length ? label + " · " + errors.join("、") : label;
+}
+
+function formatRule(label: string, word: bigint) {
+  return label.replace(fieldPattern, (_, msb, lsb, radix) => {
     const low = BigInt(lsb),
       count = BigInt(msb) - low + 1n;
     const value = (word >> low) & ((1n << count) - 1n);

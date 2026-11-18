@@ -16,6 +16,7 @@ interface Window {
     menu: (x: number, y: number) => void;
     groupsChanged: () => void;
     editGroup: (name?: string) => void;
+    editAnnotation: (signal?: import("../shared/protocol").Signal) => void;
     groupMenu: (x: number, y: number, name: string) => void;
   };
   waveMarkers?: { render: () => void };

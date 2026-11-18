@@ -1,8 +1,18 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none';style-src {{csp}};script-src 'nonce-{{nonce}}'"><link rel="stylesheet" href="{{css}}"><title>Wave Workbench</title></head><body>
 <div class="toolbar"><button data-action="open">打开默认/上次波形</button><button data-action="openPicker">选择文件…</button><button data-action="openRecent">最近打开…</button><button data-action="attachKdb">接入 KDB</button><button data-action="debugLayout">上方代码 / 下方波形</button><button data-action="runScript">运行 Tcl 脚本…</button></div>
 <label for="session">指令目标</label><select id="session" aria-label="指令目标"><option value="">尚未打开波形</option></select><p id="sessionStatus" role="status">先打开 FSDB / VCD，再输入 nWave 命令。</p>
-<div class="instanceHeading"><strong>Hierarchy / Instance</strong><span>Module</span></div><label class="objectFilter"><input type="checkbox" id="showOtherObjects"> 显示接口 / 其他作用域</label><div id="instanceTree" role="tree" aria-label="KDB 实例树"><div id="instanceSpace"></div><div id="instanceRows"></div></div>
+<div class="instanceHeading"><strong>Hierarchy / Instance</strong><span>Module</span></div><div class="instanceFilters"><label class="objectFilter"><input type="checkbox" id="showOtherObjects"> 显示接口 / 其他作用域</label><label class="objectFilter"><input type="checkbox" id="showTreeSignals"> 显示信号</label></div><div id="instanceTree" role="tree" aria-label="KDB 实例树"><div id="instanceSpace"></div><div id="instanceRows"></div></div>
 <div id="sidebarScope" title="当前实例">Signals · 选择实例</div><button id="addScopeSignals">添加选中 → 波形</button><div id="sidebarSignals"><div id="signalSpace"></div><div id="signalRows"></div></div>
+<details id="taggedPanel" open>
+  <summary>已打标签的信号 <span id="taggedCount"></span></summary>
+  <div class="taggedControls">
+    <select id="tagFilter" aria-label="筛选标签"><option value="">所有标签</option></select>
+    <select id="sidebarTagStyle" aria-label="标签样式"><option value="pill">彩色胶囊</option><option value="dot">彩色圆点</option><option value="text">彩色文字</option></select>
+    <input id="tagColor" type="color" aria-label="标签颜色" title="选择一个标签后可修改颜色" disabled>
+  </div>
+  <div id="taggedRows" aria-label="已打标签的信号列表"></div>
+  <button id="taggedMore" type="button" hidden>显示更多</button>
+</details>
 <div class="quick"><button data-script="wvZoomAll">全局</button><button data-script="wvZoomIn">放大</button><button data-script="wvZoomOut">缩小</button><button data-script="wvSearchPrev">上一边沿</button><button data-script="wvSearchNext">下一边沿</button><button data-script="waveHelp">命令帮助</button><button data-action="cacheStats">缓存统计</button></div>
 <form id="form"><label for="input">nWave Tcl 指令</label><textarea id="input" rows="5" spellcheck="false" placeholder="wvSetCursor 3707211701&#10;wvZoom 3707101701 3707371701" aria-label="nWave Tcl 指令"></textarea><div class="submit"><button id="execute" type="submit">执行 Ctrl+Enter</button><button type="button" id="clear">清空输出</button></div></form>
 <label for="history">最近执行</label><select id="history" aria-label="最近执行"><option value="">选择历史指令填入输入框…</option></select>

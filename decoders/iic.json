@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "label": "IIC / I²C",
+  "profiles": [
+    {
+      "id": "iic-address", "label": "IIC 7 位地址与 R/W", "width": 8,
+      "rules": [
+        { "mask": "0x1", "value": "0x0", "label": "写 {7:1:hex}" },
+        { "mask": "0x1", "value": "0x1", "label": "读 {7:1:hex}" }
+      ]
+    }
+  ]
+}

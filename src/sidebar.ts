@@ -4,7 +4,13 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import type * as VSCode from "vscode";
-import type { Signal, Location, SearchResult } from "./shared/protocol";
+import type {
+  Signal,
+  Location,
+  SearchResult,
+  TaggedSignal,
+  TagState,
+} from "./shared/protocol";
 interface Hooks {
   state: () => {
     sessions: unknown[];
@@ -14,14 +20,22 @@ interface Hooks {
     includeOther?: boolean;
     revealScope?: string;
     revealId?: number;
+    tagState?: TagState;
   };
   visibility?: (visible: boolean) => void;
   tree: (scope: string, action: string) => Promise<void>;
   scopeSignals?: (m: {
     scope: string;
     offset?: number;
+    limit?: number;
   }) => Promise<SearchResult>;
-  addSignals?: (signals: Signal[]) => Promise<void>;
+  addSignals?: (signals: Signal[], editAnnotation?: boolean) => Promise<void>;
+  taggedFocus?: (signal: TaggedSignal) => Promise<void>;
+  tagAppearance?: (options: {
+    style?: string;
+    tag?: string;
+    color?: string;
+  }) => Promise<void>;
   select: (id: string) => void;
   execute: (script: string) => Promise<unknown>;
   action: (action: string) => Promise<void>;
@@ -109,16 +123,27 @@ class Sidebar implements VSCode.WebviewViewProvider {
     view.webview.onDidReceiveMessage(async (m) => {
       let executing = false;
       try {
-        if (m.type === "scopePage" && typeof m.scope === "string") {
+        if (
+          ["scopePage", "instanceSignals"].includes(m.type) &&
+          typeof m.scope === "string"
+        ) {
           const result = await this.hooks.scopeSignals?.(m);
           if (result)
             await view.webview.postMessage({
-              type: "scopePage",
+              type: m.type,
               request: m.request,
               ...result,
             });
         } else if (m.type === "addSignals" && Array.isArray(m.signals))
-          await this.hooks.addSignals?.(m.signals);
+          await this.hooks.addSignals?.(m.signals, m.editAnnotation === true);
+        else if (m.type === "taggedFocus" && m.signal)
+          await this.hooks.taggedFocus?.(m.signal);
+        else if (m.type === "tagAppearance")
+          await this.hooks.tagAppearance?.({
+            style: m.style,
+            tag: m.tag,
+            color: m.color,
+          });
         else if (m.type === "ready") await this.refresh();
         else if (m.type === "select" && typeof m.id === "string") {
           this.hooks.select(m.id);
@@ -150,6 +175,13 @@ class Sidebar implements VSCode.WebviewViewProvider {
           await this.refresh();
         }
       } catch (e) {
+        if (m.type === "instanceSignals")
+          await view.webview.postMessage({
+            type: m.type,
+            scope: m.scope,
+            request: m.request,
+            error: true,
+          });
         if (!e.sidebarLogged) this.log("ERROR: " + e.message);
       } finally {
         if (executing) this.executing--;

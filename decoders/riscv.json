@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "label": "RISC-V",
+  "profiles": [
+    { "id": "rv32imfc", "label": "RISC-V RV32IMFC", "builtin": "rv32imfc" },
+    { "id": "rv32-zfinx", "label": "RISC-V RV32IMC + Zfinx · CV32", "builtin": "rv32-zfinx" }
+  ]
+}

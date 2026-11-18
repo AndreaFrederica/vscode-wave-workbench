@@ -6,12 +6,30 @@
 import { getElement as $ } from "./dom";
 import { renderClipImage } from "./clip-image";
 import { drawBusLabel } from "./bus-label";
+import { scaleSeconds } from "../shared/time";
+import { renderTags } from "./tags";
+import {
+  isTagColor,
+  normalizeTagColors,
+  tagStyle,
+  type TagColors,
+} from "../shared/tags";
+import {
+  decodeUart,
+  uartBitTicks,
+  type UartFrame,
+  type UartOptions,
+} from "../shared/uart";
 import * as WaveSignal from "../shared/signals";
 import {
   decodeWord,
   normalizeAnnotation,
   supportsProfile,
   validateProfile,
+  uartFrameLabel,
+  type DecoderCatalog,
+  type DecoderGroup,
+  type DecoderProfile,
   type Rule,
 } from "../shared/decoders";
 import type {
@@ -44,9 +62,15 @@ function readTheme() {
   };
 }
 readTheme();
+interface WaveRead {
+  start: number;
+  end: number;
+  block: Block;
+}
+
 let meta: Metadata,
   chosen: Signal[] = [],
-  data: QueryResult = {},
+  data: Record<string, WaveRead> = {},
   active = 0,
   start = 0,
   end = 1,
@@ -57,8 +81,10 @@ let meta: Metadata,
   displayScale = null,
   displayFactor = 1;
 let generation = 0,
-  inflight = null,
-  neededIds = [],
+  inflight: { request: number; start: number; end: number } | null = null,
+  neededIds: string[] = [],
+  prefetchIds: string[] = [],
+  retainedIds = new Set<string>(),
   dragIndex = null,
   pan = null,
   searchRequest = 0,
@@ -80,18 +106,26 @@ let busLabelMode: BusLabelMode =
   saved.busLabelMode === "full" ? "full" : "auto";
 const showInlineTags = $("showInlineTags");
 const showDecodedValues = $("showDecodedValues");
+const waveTagStyle = $("waveTagStyle");
+let tagColors: TagColors = {};
 function applyValueDisplay(state: Partial<WaveState>) {
   showInlineTags.checked = state.showInlineTags === true;
   showDecodedValues.checked = state.showDecodedValues !== false;
+  waveTagStyle.value = tagStyle(state.tagStyle);
+  tagColors = normalizeTagColors(state.tagColors);
 }
 applyValueDisplay(saved);
-showInlineTags.onchange = showDecodedValues.onchange = () => {
-  persist();
-  if (meta) render();
-};
+showInlineTags.onchange =
+  showDecodedValues.onchange =
+  waveTagStyle.onchange =
+    () => {
+      persist();
+      if (meta) render();
+    };
 let clearWaveHover: () => void;
 let rowHeight = normalizeRowHeight(saved.rowHeight);
 let namesFraction = normalizeNamesFraction(saved.namesFraction);
+let valueFraction = normalizeValueFraction(saved.valueFraction);
 let timelineHeight = DEFAULT_ROW_HEIGHT;
 
 function normalizeRowHeight(value: unknown) {
@@ -102,6 +136,11 @@ function normalizeRowHeight(value: unknown) {
 function normalizeNamesFraction(value: unknown) {
   return typeof value === "number" && Number.isFinite(value)
     ? Math.min(0.75, Math.max(0.1, value))
+    : undefined;
+}
+function normalizeValueFraction(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(1, Math.max(0, value))
     : undefined;
 }
 function applyTrackLayout() {
@@ -184,10 +223,13 @@ function persist() {
         markersVisible,
         tooltipEnabled,
         showInlineTags: showInlineTags.checked,
+        tagStyle: tagStyle(waveTagStyle.value),
+        tagColors,
         showDecodedValues: showDecodedValues.checked,
         busLabelMode,
         rowHeight,
         namesFraction,
+        valueFraction,
         displayScale,
         displayFactor,
         collapsedGroups: [...collapsedGroups],
@@ -409,7 +451,7 @@ function restoreSourceBus() {
   request();
 }
 function eventsForSignal(s) {
-  const events = data[s.id]?.events || [];
+  const events = data[s.id]?.block.events || [];
   if (!Number.isInteger(s.bitOffset)) return events;
   let last;
   return events.filter((e) => {
@@ -478,33 +520,135 @@ function refreshNeeded() {
   const [a, b] = visibleRange();
   firstRow = a;
   lastRow = b;
-  neededIds = [
-    ...new Set(
-      displayRows
-        .slice(a, b)
-        .filter((r) => r.index !== undefined)
-        .map((r) => chosen[r.index].id),
-    ),
-  ];
-  const keep = new Set(neededIds);
-  for (const id of Object.keys(data)) if (!keep.has(id)) delete data[id];
+  const idsInRange = (first: number, last: number) =>
+    displayRows
+      .slice(first, last)
+      .flatMap(({ index }) => (index === undefined ? [] : [chosen[index].id]));
+  neededIds = [...new Set(idsInRange(a, b))];
+  const margin = Math.min(16, Math.ceil(viewportHeight / rowHeight / 2));
+  retainedIds = new Set(neededIds);
+  prefetchIds = [];
+  for (const id of [
+    ...idsInRange(b, b + margin),
+    ...idsInRange(Math.max(0, a - margin), a),
+  ]) {
+    if (retainedIds.has(id)) continue;
+    retainedIds.add(id);
+    prefetchIds.push(id);
+  }
+  for (const id of Object.keys(data)) if (!retainedIds.has(id)) delete data[id];
   for (const id of Object.keys(cursorValues))
-    if (!keep.has(id)) delete cursorValues[id];
+    if (!retainedIds.has(id)) delete cursorValues[id];
   pump();
   pumpCursor();
+  pumpUart();
 }
+const uartReads = new Map<
+  string,
+  {
+    through: number;
+    block: Block;
+    decoded: WeakMap<DecoderProfile, UartFrame[]>;
+  }
+>();
+let uartFlight: { request: string; id: string; through: number } | undefined;
+let uartSequence = 0;
+function pumpUart() {
+  if (!meta || !showDecodedValues.checked || uartFlight) return;
+  const wanted = new Map<string, number>();
+  for (const row of displayRows.slice(firstRow, lastRow)) {
+    const signal = chosen[row.index];
+    if (!signal?.decoder?.uart) continue;
+    const ticks = uartBitTicks(signal.decoder.uart, meta.scale);
+    if (!Number.isFinite(ticks) || ticks < 2) continue;
+    const through = Math.min(
+      Number(meta.end),
+      Math.ceil(Math.max(end, cursorA) + 13 * ticks),
+    );
+    wanted.set(signal.id, Math.max(through, wanted.get(signal.id) || 0));
+  }
+  for (const id of uartReads.keys()) if (!wanted.has(id)) uartReads.delete(id);
+  for (const [id, through] of wanted) {
+    const read = uartReads.get(id);
+    if (read && (read.through >= through || read.block.truncated)) continue;
+    uartFlight = { request: "uart:" + ++uartSequence, id, through };
+    vscode.postMessage({
+      type: "query",
+      request: uartFlight.request,
+      signals: [id],
+      start: Number(meta.start),
+      end: through,
+      limit: 100000,
+    });
+    return;
+  }
+}
+function uartFrames(signal: Signal) {
+  const profile = signal.decoder;
+  const read = uartReads.get(signal.id);
+  if (!showDecodedValues.checked || !profile?.uart || !read) return [];
+  let frames = read.decoded.get(profile);
+  if (!frames) {
+    const { block } = read;
+    const through = block.truncated
+      ? Number(block.events.at(-1)?.[0])
+      : read.through;
+    frames = decodeUart(
+      profile.uart,
+      meta.scale,
+      block.events,
+      through,
+      (raw) => WaveSignal.project(raw, signal),
+    );
+    read.decoded.set(profile, frames);
+  }
+  return frames;
+}
+function firstUartFrameEndingAfter(frames: UartFrame[], tick: number) {
+  let low = 0,
+    high = frames.length;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (frames[mid].end <= tick) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+}
+function uartLabelAt(signal: Signal, tick: number) {
+  const frames = uartFrames(signal);
+  const frame = frames[firstUartFrameEndingAfter(frames, tick)];
+  return frame && frame.start <= tick
+    ? uartFrameLabel(signal.decoder, frame)
+    : undefined;
+}
+function readEnd(read: WaveRead) {
+  return read.block.truncated
+    ? Number(read.block.events.at(-1)?.[0] ?? read.start)
+    : read.end;
+}
+
+function coversTick(read: WaveRead | undefined, tick: number) {
+  return read && tick >= read.start && tick <= readEnd(read);
+}
+
+function needsData(id: string) {
+  const read = data[id];
+  return (
+    !read ||
+    read.start > start ||
+    read.end < end ||
+    (read.start < start && readEnd(read) < end)
+  );
+}
+
 // Values at A must remain correct when A lies outside the displayed time window.
 function pumpCursor() {
   if (!meta || cursorFlight) return;
   const required = neededIds.filter((id) => {
-    const block = data[id],
-      events = block?.events || [];
     return (
-      !(
-        cursorA >= start &&
-        cursorA <= end &&
-        (!block || !block.truncated || cursorA <= Number(events.at(-1)?.[0]))
-      ) && cursorValues[id]?.time !== cursorA
+      cursorValues[id]?.time !== cursorA &&
+      !coversTick(data[id], cursorA) &&
+      (cursorA < start || cursorA > end || !needsData(id))
     );
   });
   if (!required.length) return;
@@ -519,15 +663,13 @@ function pumpCursor() {
   });
 }
 function cursorValue(id) {
-  const block = data[id],
-    events = block?.events || [];
-  if (
-    cursorA >= start &&
-    cursorA <= end &&
-    block &&
-    (!block.truncated || cursorA <= Number(events.at(-1)?.[0]))
-  )
-    return events[valueAt(events, cursorA)]?.[1];
+  const read = data[id];
+  if (coversTick(read, cursorA)) {
+    const events = read.block.events;
+    const value = events[valueAt(events, cursorA)]?.[1];
+    cursorValues[id] = { time: cursorA, value };
+    return value;
+  }
   return cursorValues[id]?.time === cursorA ? cursorValues[id].value : null;
 }
 function activateSignalGroup(signal?: Signal) {
@@ -578,27 +720,41 @@ function request() {
   render();
 }
 function pump() {
-  if (!meta || inflight) return;
-  const missing = neededIds.filter((id) => !Object.hasOwn(data, id));
-  if (!missing.length) {
-    settled();
-    return;
-  }
-  const ids = missing.slice(0, 64);
-  inflight = { request: ++generation, window: `${start}:${end}`, ids };
-  status(
-    `正在读取可见信号… ${chosen.length} 个已添加 / ${neededIds.length} 个视口信号`,
-  );
+  if (!meta) return;
+  const missing = neededIds.filter(needsData);
+  if (!missing.length) settled();
+  if (inflight) return;
+  const ids = missing.length
+    ? missing.slice(0, 64)
+    : prefetchIds.filter(needsData).slice(0, 16);
+  if (!ids.length) return;
+  // Preload neighboring ticks to cover small pans without a backend round trip.
+  // Retry with the exact viewport when a dense signal exhausts the event limit.
+  const padding = ids.some((id) => data[id]?.block.truncated)
+    ? 0
+    : Math.ceil((end - start) / 2);
+  inflight = {
+    request: ++generation,
+    start: Math.max(Number(meta.start), start - padding),
+    end: Math.min(
+      Math.max(Number(meta.start) + 1, Number(meta.end)),
+      end + padding,
+    ),
+  };
+  if (missing.length)
+    status(
+      `正在读取可见信号… ${chosen.length} 个已添加 / ${neededIds.length} 个视口信号`,
+    );
   vscode.postMessage({
     type: "query",
     signals: ids,
-    start: Math.floor(start),
-    end: Math.ceil(end),
+    start: inflight.start,
+    end: inflight.end,
     request: inflight.request,
   });
 }
 function settled() {
-  const clipped = Object.values(data).some((v) => v.truncated);
+  const clipped = neededIds.some((id) => data[id] && readEnd(data[id]) < end);
   status(
     clipped
       ? "可见信号事件超限，阴影区域尚未读取；请缩小时间窗口。"
@@ -622,6 +778,8 @@ function ensureActive() {
     tracks = $("tracks"),
     top = Math.max(0, position) * rowHeight,
     bottom = top + rowHeight;
+  // Update the scroll range before jumping into a newly expanded group.
+  if (bottom + timelineHeight > tracks.scrollHeight) render();
   if (top < tracks.scrollTop) tracks.scrollTop = top;
   else if (bottom > tracks.scrollTop + tracks.clientHeight - timelineHeight)
     tracks.scrollTop = bottom - (tracks.clientHeight - timelineHeight);
@@ -807,24 +965,233 @@ $("catalogPreview").onclick = () => {
   $("search").value = "";
   setCatalog("", false);
 };
-function setWindow(a, b) {
+function setWindow(a: number, b: number, defer = false) {
   const low = Number(meta.start),
     high = Math.max(low + 1, Number(meta.end)),
-    length = Math.min(high - low, Math.max(1, b - a));
-  start = Math.round(Math.max(low, Math.min(a, high - length)));
-  end = Math.min(high, start + Math.round(length));
-  data = {};
-  request();
+    length = Math.min(high - low, Math.max(1, b - a)),
+    nextStart = Math.round(Math.max(low, Math.min(a, high - length))),
+    nextEnd = Math.min(high, nextStart + Math.round(length));
+  if (nextStart === start && nextEnd === end) return;
+  start = nextStart;
+  end = nextEnd;
+  persist();
+  if (defer) scheduleViewport();
+  else render();
 }
-function zoom(factor, anchor = 0.5) {
+function zoom(factor: number, anchor = 0.5, defer = false) {
   const length = (end - start) * factor,
     point = start + (end - start) * anchor;
-  setWindow(point - length * anchor, point + length * (1 - anchor));
+  setWindow(point - length * anchor, point + length * (1 - anchor), defer);
+}
+const timeUnitSelect = $("timeUnitSelect");
+const nativeTimeUnit = timeUnitSelect.options[0];
+const customTimeUnit = new Option();
+timeUnitSelect.onchange = () => {
+  const unit = timeUnitSelect.value;
+  uiAction("timeUnit", {
+    scale: unit || null,
+    factor: unit
+      ? Number((scaleSeconds(unit) / scaleSeconds(meta.scale)).toPrecision(15))
+      : 1,
+  });
+};
+function updateTimeUnit() {
+  if (!meta) return;
+  timeUnitSelect.disabled = false;
+  nativeTimeUnit.textContent = "原始 (" + meta.scale + ")";
+  if (timeUnitSelect.value === (displayScale || "")) return;
+  customTimeUnit.remove();
+  if (
+    displayScale &&
+    ![...timeUnitSelect.options].some((option) => option.value === displayScale)
+  ) {
+    customTimeUnit.value = displayScale;
+    customTimeUnit.textContent = displayScale;
+    timeUnitSelect.append(customTimeUnit);
+  }
+  timeUnitSelect.value = displayScale || "";
+}
+
+const timeScroll = $("timeScroll");
+const timeThumb = $("timeThumb");
+function timeScrollGeometry() {
+  const first = Number(meta.start);
+  const total = Math.max(1, Number(meta.end) - first);
+  const duration = end - start;
+  const ratio = Math.min(1, duration / total);
+  const width = timeScroll.clientWidth;
+  const thumbWidth = Math.min(width, Math.max(14, width * ratio));
+  const maxOffset = Math.max(0, total - duration);
+  return {
+    first,
+    duration,
+    ratio,
+    thumbWidth,
+    travel: width - thumbWidth,
+    maxOffset,
+  };
+}
+
+function updateTimeScroll() {
+  const plot = $("plot");
+  const bars = $("waveScrollbars");
+  bars.style.setProperty("--wave-pan-offset", plot.offsetLeft + "px");
+  bars.style.setProperty("--wave-pan-width", plot.clientWidth + "px");
+  if (!meta) return;
+  const { first, ratio, thumbWidth, travel, maxOffset } = timeScrollGeometry();
+  const offset = Math.max(0, Math.min(start - first, maxOffset));
+  timeThumb.style.width = thumbWidth + "px";
+  timeThumb.style.left = (maxOffset ? (offset / maxOffset) * travel : 0) + "px";
+  timeScroll.setAttribute("aria-valuemin", String(first));
+  timeScroll.setAttribute("aria-valuemax", String(first + maxOffset));
+  timeScroll.setAttribute("aria-valuenow", String(first + offset));
+  timeScroll.setAttribute("aria-disabled", String(maxOffset === 0));
+  const percentage = (ratio * 100).toLocaleString("zh-CN", {
+    maximumSignificantDigits: 3,
+  });
+  const description = `${timeLabel(start)} → ${timeLabel(end)} · 全波形的 ${percentage}%`;
+  timeScroll.setAttribute("aria-valuetext", description);
+  timeScroll.title = description;
+}
+
+let thumbGrabOffset = 0;
+function panByThumb(event: PointerEvent) {
+  const { first, duration, travel, maxOffset } = timeScrollGeometry();
+  if (travel <= 0 || maxOffset === 0) return;
+  const x =
+    event.clientX - timeScroll.getBoundingClientRect().left - thumbGrabOffset;
+  const fraction = Math.min(1, Math.max(0, x / travel));
+  const nextStart = first + Math.round(fraction * maxOffset);
+  setWindow(nextStart, nextStart + duration, true);
+}
+
+timeScroll.onpointerdown = (event) => {
+  if (event.button !== 0 || timeScroll.getAttribute("aria-disabled") === "true")
+    return;
+  timeScroll.focus({ preventScroll: true });
+  const thumb = timeThumb.getBoundingClientRect();
+  const grabbedThumb = event.target === timeThumb;
+  thumbGrabOffset = grabbedThumb ? event.clientX - thumb.left : thumb.width / 2;
+  timeScroll.setPointerCapture(event.pointerId);
+  if (!grabbedThumb) panByThumb(event);
+};
+timeScroll.onpointermove = (event) => {
+  if (timeScroll.hasPointerCapture(event.pointerId)) panByThumb(event);
+};
+timeScroll.onpointerup = timeScroll.onpointermove;
+timeScroll.onkeydown = (event) => {
+  if (!meta) return;
+  const { first, duration, maxOffset } = timeScrollGeometry();
+  const step = Math.max(1, Math.round(duration / 10));
+  const destinations: Record<string, number> = {
+    ArrowLeft: start - step,
+    ArrowRight: start + step,
+    PageUp: start - duration,
+    PageDown: start + duration,
+    Home: first,
+    End: first + maxOffset,
+  };
+  if (!Object.hasOwn(destinations, event.key)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const next = destinations[event.key];
+  setWindow(next, next + duration);
+};
+
+const signalNames = $("names");
+const valueSplit = $("valueSplit");
+function updateValueSplit() {
+  const width = signalNames.clientWidth;
+  const minimum = 56;
+  const maximum = Math.max(minimum, width - 76);
+  const requested =
+    valueFraction === undefined ? 90 : Math.round(width * valueFraction);
+  const valueWidth = Math.min(maximum, Math.max(minimum, requested));
+  signalNames.style.setProperty("--wave-value-width", valueWidth + "px");
+  valueSplit.setAttribute("aria-valuemin", String(minimum));
+  valueSplit.setAttribute("aria-valuemax", String(maximum));
+  valueSplit.setAttribute("aria-valuenow", String(valueWidth));
+  valueSplit.setAttribute("aria-valuetext", "数值列 " + valueWidth + " 像素");
+}
+function setValueFraction(fraction?: number) {
+  valueFraction = normalizeValueFraction(fraction);
+  scheduleViewport();
+  persist();
+}
+let valueDragOffset = 0;
+valueSplit.onpointerdown = (event) => {
+  if (event.button !== 0) return;
+  const bar = valueSplit.getBoundingClientRect();
+  valueDragOffset = event.clientX - (bar.left + bar.width / 2);
+  valueSplit.setPointerCapture(event.pointerId);
+  valueSplit.focus({ preventScroll: true });
+  event.preventDefault();
+};
+valueSplit.onpointermove = (event) => {
+  if (!valueSplit.hasPointerCapture(event.pointerId)) return;
+  const bounds = signalNames.getBoundingClientRect();
+  setValueFraction(
+    (bounds.left +
+      signalNames.clientWidth -
+      8 -
+      event.clientX +
+      valueDragOffset) /
+      signalNames.clientWidth,
+  );
+};
+valueSplit.ondblclick = () => setValueFraction();
+valueSplit.onkeydown = (event) => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  event.stopPropagation();
+  const width = Number(valueSplit.getAttribute("aria-valuenow"));
+  const step = event.key === "ArrowLeft" ? 12 : -12;
+  setValueFraction((width + step) / signalNames.clientWidth);
+};
+const nameScroll = $("nameScroll");
+function applyNameScroll() {
+  signalNames.style.setProperty("--name-scroll", -nameScroll.scrollLeft + "px");
+}
+nameScroll.addEventListener("scroll", applyNameScroll, { passive: true });
+nameScroll.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") e.stopPropagation();
+});
+signalNames.addEventListener(
+  "wheel",
+  (e) => {
+    if (nameScroll.hidden || e.ctrlKey || e.metaKey) return;
+    if (!e.shiftKey && Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
+    e.preventDefault();
+    const delta = e.deltaX || e.deltaY;
+    const unit =
+      e.deltaMode === 1
+        ? rowHeight
+        : e.deltaMode === 2
+          ? nameScroll.clientWidth
+          : 1;
+    nameScroll.scrollLeft += delta * unit;
+  },
+  { passive: false },
+);
+function updateNameScroll(rows: HTMLElement) {
+  let overflow = 0;
+  for (const content of rows.querySelectorAll<HTMLElement>(
+    ".signalNameContent",
+  )) {
+    overflow = Math.max(
+      overflow,
+      content.scrollWidth - content.parentElement.clientWidth,
+    );
+  }
+  nameScroll.style.width = signalNames.offsetWidth + "px";
+  nameScroll.hidden = !overflow;
+  (nameScroll.firstElementChild as HTMLElement).style.width =
+    signalNames.offsetWidth + overflow + "px";
+  applyNameScroll();
 }
 function render() {
   timelineHeight =
-    markersVisible &&
-    markers.some((m) => m.name !== "B" && m.time >= start && m.time <= end)
+    markersVisible && markers.some((m) => m.name !== "B")
       ? 56
       : DEFAULT_ROW_HEIGHT;
   $("names").querySelector<HTMLElement>(".ruler").style.height =
@@ -836,6 +1203,7 @@ function render() {
     "px";
   $("plot").style.height = viewportHeight + "px";
   $("tracks").dataset.total = String(chosen.length);
+  updateValueSplit();
   [firstRow, lastRow] = visibleRange();
   const rows = $("rows");
   rows.style.top = timelineHeight + firstRow * rowHeight + "px";
@@ -960,26 +1328,24 @@ function render() {
     grab.textContent = "⠿";
     const name = document.createElement("span");
     name.className = "name";
-    name.textContent = WaveSignal.label(s);
+    const nameContent = document.createElement("span");
+    nameContent.className = "signalNameContent";
+    nameContent.textContent = WaveSignal.label(s);
+    name.append(nameContent);
     if (s.annotation) {
       const tags = s.annotation.tags.map((tag) => "#" + tag).join(" ");
       const inline = showInlineTags.checked && tags;
       if (inline) {
         const label = document.createElement("span");
         label.className = "signalNameText";
-        label.textContent = name.textContent;
-        const tagText = document.createElement("span");
-        tagText.className = "signalTags";
-        tagText.textContent = tags;
-        name.classList.add("withInlineTags");
-        name.replaceChildren(label, tagText);
-      }
-      if (s.annotation.note || !inline) {
-        const mark = document.createElement("span");
-        mark.className = "signalAnnotation";
-        mark.textContent = "✎";
-        mark.setAttribute("aria-label", "有标签或注释");
-        name.append(mark);
+        label.textContent = nameContent.textContent;
+        const tagText = renderTags(
+          s.annotation.tags,
+          tagColors,
+          tagStyle(waveTagStyle.value),
+        );
+        nameContent.classList.add("withInlineTags");
+        nameContent.replaceChildren(label, tagText);
       }
       row.title += [tags, s.annotation.note]
         .filter(Boolean)
@@ -997,11 +1363,18 @@ function render() {
     const raw = cursorValue(s.id);
     const rawValue = formatSignal(raw, s);
     const decoded =
-      showDecodedValues.checked &&
-      s.decoder &&
-      decodeWord(s.decoder, WaveSignal.project(raw, s), s.width);
+      uartLabelAt(s, cursorA) ||
+      (showDecodedValues.checked &&
+        s.decoder &&
+        decodeWord(s.decoder, WaveSignal.project(raw, s), s.width));
     value.textContent = decoded || rawValue;
     if (decoded) value.title = decoded + " · " + rawValue;
+    else if (s.decoder?.uart && showDecodedValues.checked) {
+      if (uartBitTicks(s.decoder.uart, meta.scale) < 2)
+        value.title = "波形时间精度不足以按此波特率解码";
+      else if (uartReads.get(s.id)?.block.truncated)
+        value.title = "UART 解码所需的历史事件被截断";
+    }
     const toggle = document.createElement("button");
     toggle.className = "busToggle";
     toggle.textContent =
@@ -1017,7 +1390,19 @@ function render() {
     const group = document.createElement("span");
     group.className = "group";
     group.textContent = s.group || "";
-    row.append(grab, group, name, value);
+    const annotation = document.createElement("button");
+    annotation.type = "button";
+    annotation.className = "signalAnnotation";
+    annotation.classList.toggle("hasAnnotation", !!s.annotation);
+    annotation.textContent = "✎";
+    annotation.title = "编辑 " + WaveSignal.label(s) + " 的标签和注释";
+    annotation.setAttribute("aria-label", annotation.title);
+    annotation.onclick = (event) => {
+      event.stopPropagation();
+      window.waveWorkflow?.editAnnotation(s);
+    };
+    annotation.ondblclick = (event) => event.stopPropagation();
+    row.append(grab, group, name, annotation, value);
     row.onclick = (e) => selectRow(i, e);
     row.oncontextmenu = (e) => {
       e.preventDefault();
@@ -1056,17 +1441,20 @@ function render() {
     };
     rows.append(row);
   }
+  updateNameScroll(rows);
+  updateTimeScroll();
+  updateTimeUnit();
   const cursorDetails = `A: ${timeLabel(cursorA)}${cursorB == null ? " · Shift+单击设置 B" : `   B: ${timeLabel(cursorB)}   Δ: ${timeLabel(Math.abs(cursorA - cursorB))}`}`;
   $("cursors").textContent =
-    (cursorB == null
-      ? `单位: ${displayScale || meta?.scale || "tick"}`
-      : `Δ: ${timeLabel(Math.abs(cursorA - cursorB))}`) +
+    (cursorB == null ? "" : `Δ: ${timeLabel(Math.abs(cursorA - cursorB))}`) +
     (cursorA < start || cursorA > end ? " · A 在视窗外" : "");
   $("cursors").classList.toggle("offscreen", cursorA < start || cursorA > end);
   $("cursors").title = cursorDetails;
-  $("cursorAInput").value = String(cursorA / displayFactor);
-  $("cursorBInput").value =
-    cursorB == null ? "" : String(cursorB / displayFactor);
+  if (document.activeElement !== $("cursorAInput"))
+    $("cursorAInput").value = String(cursorA / displayFactor);
+  if (document.activeElement !== $("cursorBInput"))
+    $("cursorBInput").value =
+      cursorB == null ? "" : String(cursorB / displayFactor);
   $("range").textContent =
     `${start / displayFactor} → ${end / displayFactor} × ${displayScale || meta?.scale || "tick"}`;
   $("range").title = `${timeLabel(start)} → ${timeLabel(end)}`;
@@ -1080,12 +1468,14 @@ function draw() {
     width = Math.max(80, plot.clientWidth),
     height = Math.max(1, viewportHeight);
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.round(width * dpr);
-  canvas.height = Math.round(height * dpr);
+  const pixelWidth = Math.round(width * dpr),
+    pixelHeight = Math.round(height * dpr);
+  if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+  if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
   canvas.style.width = width + "px";
   canvas.style.height = height + "px";
   const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = theme.background;
   ctx.fillRect(0, 0, width, height);
   ctx.font = "11px monospace";
@@ -1113,6 +1503,13 @@ function draw() {
     );
   }
   ctx.save();
+  const verticalScale = rowHeight / DEFAULT_ROW_HEIGHT;
+  const waveHalfHeight = 9 * verticalScale;
+  const valueFontSize = Math.round(
+    Math.max(9, Math.min(18, 11 * verticalScale)),
+  );
+  ctx.font = valueFontSize + "px monospace";
+  ctx.textBaseline = "middle";
   ctx.beginPath();
   ctx.rect(0, timelineHeight, width, Math.max(0, height - timelineHeight));
   ctx.clip();
@@ -1123,25 +1520,29 @@ function draw() {
     const i = item.index,
       s = chosen[i];
     const y = timelineHeight + rowHeight * position - top,
-      middle = y + 16,
+      middle = y + rowHeight / 2,
+      high = middle - waveHalfHeight,
+      low = middle + waveHalfHeight,
       events = eventsForSignal(s);
     ctx.strokeStyle = theme.grid;
     ctx.beginPath();
     ctx.moveTo(0, y + rowHeight);
     ctx.lineTo(width, y + rowHeight);
     ctx.stroke();
-    let index = Math.max(0, valueAt(events, start)),
+    const read = data[s.id];
+    const traceStart = Math.max(start, read?.start ?? start);
+    const traceEnd = Math.min(end, read ? readEnd(read) : start);
+    let index = Math.max(0, valueAt(events, traceStart)),
       lastPixel = -2;
     for (; index < events.length; index++) {
       const [t, raw] = events[index];
       const v = WaveSignal.project(raw, s);
-      if (Number(t) > end) break;
-      const left = Math.max(0, x(t));
-      const right = Math.min(
-        width,
-        x(events[index + 1]?.[0] ?? (data[s.id]?.truncated ? t : end)),
+      if (Number(t) > traceEnd) break;
+      const left = x(Math.max(traceStart, Number(t)));
+      const right = x(
+        Math.min(traceEnd, Number(events[index + 1]?.[0] ?? traceEnd)),
       );
-      if (right < 0) continue;
+      if (right < left) continue;
       const invalid = /[xz]/i.test(v),
         color = /x/i.test(v)
           ? theme.error
@@ -1154,19 +1555,19 @@ function draw() {
       lastPixel = Math.floor(left);
       ctx.beginPath();
       if (s.width === 1 && !invalid) {
-        const level = v === "1" ? y + 7 : y + 25;
-        ctx.moveTo(left, y + 7);
-        ctx.lineTo(left, y + 25);
+        const level = v === "1" ? high : low;
+        ctx.moveTo(left, high);
+        ctx.lineTo(left, low);
         ctx.moveTo(left, level);
         ctx.lineTo(right, level);
       } else {
         const bevel = Math.min(4, (right - left) / 2);
         ctx.moveTo(left, middle);
-        ctx.lineTo(left + bevel, y + 7);
-        ctx.lineTo(right - bevel, y + 7);
+        ctx.lineTo(left + bevel, high);
+        ctx.lineTo(right - bevel, high);
         ctx.lineTo(right, middle);
-        ctx.lineTo(right - bevel, y + 25);
-        ctx.lineTo(left + bevel, y + 25);
+        ctx.lineTo(right - bevel, low);
+        ctx.lineTo(left + bevel, low);
         ctx.closePath();
       }
       ctx.stroke();
@@ -1190,15 +1591,41 @@ function draw() {
           value,
           left,
           right,
-          y + 20,
+          middle,
           busLabelMode,
           compact,
           !!decoded,
         );
       }
     }
-    if (data[s.id]?.truncated) {
-      const last = Number(data[s.id]?.events.at(-1)?.[0] ?? start);
+    if (s.decoder?.uart) {
+      const frames = uartFrames(s);
+      for (
+        let index = firstUartFrameEndingAfter(frames, start);
+        index < frames.length;
+        index++
+      ) {
+        const frame = frames[index];
+        if (frame.start >= end) break;
+        const left = Math.max(0, x(frame.start)),
+          right = Math.min(width, x(frame.end));
+        ctx.fillStyle = frame.errors.length
+          ? theme.error
+          : s.highlight || colors[i % colors.length];
+        drawBusLabel(
+          ctx,
+          uartFrameLabel(s.decoder, frame),
+          left,
+          right,
+          middle,
+          busLabelMode,
+          undefined,
+          true,
+        );
+      }
+    }
+    if (read?.block.truncated && read.start <= start && readEnd(read) < end) {
+      const last = readEnd(read);
       ctx.save();
       ctx.globalAlpha = 0.18;
       ctx.fillStyle = theme.warning;
@@ -1394,12 +1821,13 @@ canvas.addEventListener(
       zoom(
         e.deltaY > 0 ? 1.4 : 1 / 1.4,
         (e.clientX - canvas.getBoundingClientRect().left) / canvas.clientWidth,
+        true,
       );
     } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
       e.preventDefault();
       const shift =
         ((end - start) * (dx || delta)) / Math.max(1, canvas.clientWidth);
-      setWindow(start + shift, end + shift);
+      setWindow(start + shift, end + shift, true);
     }
   },
   { passive: false },
@@ -1547,7 +1975,13 @@ new ResizeObserver(() => renderCatalog()).observe($("tree"));
 window.addEventListener("message", async (e) => {
   const msg = e.data;
   if (msg.type === "metadata") {
+    uartReads.clear();
+    uartFlight = undefined;
     meta = msg;
+    data = {};
+    cursorValues = {};
+    inflight = null;
+    cursorFlight = null;
     $("file").textContent = msg.title;
     $("backend").textContent =
       `${msg.backendLabel || msg.backend} · Vide ${msg.vide || "未安装"}`;
@@ -1573,6 +2007,8 @@ window.addEventListener("message", async (e) => {
     renderTree();
     request();
   } else if (msg.type === "backendChanged") {
+    uartReads.clear();
+    uartFlight = undefined;
     meta = msg;
     $("backend").textContent =
       `${msg.backendLabel || msg.backend} · Vide ${msg.vide || "未安装"}`;
@@ -1603,6 +2039,13 @@ window.addEventListener("message", async (e) => {
     add(msg.signal);
   } else if (msg.type === "sidebarAdd") {
     await uiAction("addSignals", { signals: msg.signals });
+    if (msg.editAnnotation && msg.signals.length) {
+      await uiAction("selectSignals", {
+        signals: msg.signals.slice(0, 1),
+        reveal: true,
+      });
+      window.waveWorkflow?.editAnnotation();
+    }
   } else if (msg.type === "scopeSelected") {
     window.waveWorkflow?.scope(msg.scope);
   } else if (msg.type === "commandLog") {
@@ -1653,13 +2096,20 @@ window.addEventListener("message", async (e) => {
       projectTimer ??= window.setTimeout(publishProjectState, 100);
     }
   } else if (msg.type === "data") {
+    if (uartFlight && msg.request === uartFlight.request) {
+      const { id, through } = uartFlight;
+      uartFlight = undefined;
+      const block = msg.result[id] as Block;
+      if (block) uartReads.set(id, { through, block, decoded: new WeakMap() });
+      render();
+      return;
+    }
     if (cursorFlight && msg.request === cursorFlight.request) {
       const flight = cursorFlight;
       cursorFlight = null;
       if (flight.time === cursorA) {
-        const required = new Set(neededIds);
         for (const [id, block] of Object.entries(msg.result as QueryResult))
-          if (required.has(id))
+          if (retainedIds.has(id))
             cursorValues[id] = {
               time: cursorA,
               value: block.events[valueAt(block.events, cursorA)]?.[1],
@@ -1669,14 +2119,25 @@ window.addEventListener("message", async (e) => {
       return;
     }
     if (!inflight || msg.request !== inflight.request) return;
-    if (inflight.window === `${start}:${end}`) {
-      const required = new Set(neededIds);
-      for (const [id, block] of Object.entries(msg.result as QueryResult))
-        if (required.has(id)) data[id] = block;
+    const range = inflight;
+    if (range.start <= end && range.end >= start) {
+      for (const [id, block] of Object.entries(msg.result as QueryResult)) {
+        if (!retainedIds.has(id) || !needsData(id)) continue;
+        data[id] = { start: range.start, end: range.end, block };
+      }
     }
     inflight = null;
-    render();
+    scheduleViewport();
   } else if (msg.type === "error") {
+    if (uartFlight && msg.request === uartFlight.request) {
+      const { id, through } = uartFlight;
+      uartFlight = undefined;
+      uartReads.set(id, {
+        through,
+        block: { events: [], truncated: true },
+        decoded: new WeakMap(),
+      });
+    }
     if (String(msg.request).startsWith("hover:")) return;
     status(msg.message, "error");
     if (!msg.origin || msg.origin === "query" || msg.origin === "ready") {
@@ -1691,7 +2152,7 @@ window.addEventListener("message", async (e) => {
 });
 const dataWaiters = [];
 function waitData() {
-  return inflight || neededIds.some((id) => !Object.hasOwn(data, id))
+  return neededIds.some(needsData)
     ? new Promise((resolve, reject) => dataWaiters.push({ resolve, reject }))
     : Promise.resolve();
 }
@@ -1718,10 +2179,13 @@ function snapshot(): WaveState & { chosen: Signal[] } {
     markersVisible,
     tooltipEnabled,
     showInlineTags: showInlineTags.checked,
+    tagStyle: tagStyle(waveTagStyle.value),
+    tagColors,
     showDecodedValues: showDecodedValues.checked,
     busLabelMode,
     rowHeight,
     namesFraction,
+    valueFraction,
     scrollTop: $("tracks").scrollTop,
     displayScale,
     displayFactor,
@@ -1729,6 +2193,19 @@ function snapshot(): WaveState & { chosen: Signal[] } {
 }
 async function uiAction(name, p) {
   if (name === "snapshot") return snapshot();
+  if (name === "tagAppearance") {
+    if (p.style !== undefined) waveTagStyle.value = tagStyle(p.style);
+    if (
+      typeof p.tag === "string" &&
+      isTagColor(p.color) &&
+      chosen.some((signal) => signal.annotation?.tags.includes(p.tag))
+    ) {
+      tagColors = { ...tagColors, [p.tag]: p.color };
+    }
+    persist();
+    if (meta) render();
+    return 1;
+  }
   if (name === "activeSignal") return chosen[active] || null;
   if (name === "setDecoder" || name === "annotateSignal") {
     const signal = chosen.find((s) => key(s) === key(p.signal));
@@ -1758,6 +2235,10 @@ async function uiAction(name, p) {
     if (p.projectBaseline) projectSignature = undefined;
     virtualDefinitions = p.virtualDefinitions || [];
     chosen = p.chosen;
+    data = {};
+    cursorValues = {};
+    inflight = null;
+    cursorFlight = null;
     expandedBuses = new Set(p.expandedBuses || []);
     groupOrder = p.groupOrder || [];
     collapsedGroups = new Set(p.collapsedGroups || []);
@@ -1775,9 +2256,11 @@ async function uiAction(name, p) {
     setBusLabelMode(p.busLabelMode);
     rowHeight = normalizeRowHeight(p.rowHeight);
     namesFraction = normalizeNamesFraction(p.namesFraction);
+    valueFraction = normalizeValueFraction(p.valueFraction);
     applyTrackLayout();
     active = 0;
     selectedKeys.clear();
+    rebuildRows();
     setWindow(p.start, p.end);
     $("tracks").scrollTop = p.scrollTop || 0;
     render();
@@ -1862,8 +2345,15 @@ async function uiAction(name, p) {
     active = indices[0] ?? 0;
     selectedKeys = keys as Set<string>;
     activateSignalGroup(chosen[active]);
-    persist();
+    if (p.reveal && signalFilter) {
+      rebuildRows();
+      if (!displayRows.some((row) => row.index === active)) {
+        signalFilter = "";
+        $("filterSignals").value = "";
+      }
+    }
     ensureActive();
+    persist();
     return keys.size;
   }
   if (name === "groups") {
@@ -2051,7 +2541,9 @@ vscode.postMessage({ type: "ready" });
   function positionMenu(item: HTMLDetailsElement) {
     const box = item.querySelector("summary").getBoundingClientRect(),
       panel = item.querySelector<HTMLElement>(".menuPanel");
-    panel.style.left = Math.max(4, Math.min(box.left, innerWidth - 240)) + "px";
+    panel.style.left =
+      Math.max(4, Math.min(box.left, innerWidth - panel.offsetWidth - 4)) +
+      "px";
     panel.style.top = box.bottom + 3 + "px";
   }
   for (const item of toolMenus) {
@@ -2763,20 +3255,112 @@ vscode.postMessage({ type: "ready" });
   }
   $("renameSignal").onclick = editAlias;
   let decoderTarget: Signal;
+  let decoderEdit: { group: DecoderGroup; profile: DecoderProfile } | undefined;
+  let decoderCatalog:
+    | (DecoderCatalog & { workspaceAvailable: boolean })
+    | undefined;
+  let decoderSaveRequest = 0;
+  let pendingDecoderSave = 0;
   const ruleFields = ["mask", "value", "label"] as const;
   const ruleLabels = { mask: "掩码", value: "匹配值", label: "显示文本" };
   const decodeMenu = $("decoderMenu");
-  decodeMenu.addEventListener("toggle", () => {
-    if (!decodeMenu.open) return;
+  function renderDecoderGroups(reset = false) {
     const signal = chosen[active];
+    const activeId = signal?.decoder?.id;
+    const listed = decoderCatalog?.groups.some((group) =>
+      group.profiles.some((profile) => profile.id === activeId),
+    );
     $("decoderSelection").textContent = signal
-      ? `${WaveSignal.label(signal)} · ${signal.decoder?.label || "原始值"}`
+      ? `${WaveSignal.label(signal)} · ${activeId && !listed ? "✓ " : ""}${signal.decoder?.label || "原始值"}`
       : "先选中波形信号";
-    decodeMenu.querySelector<HTMLButtonElement>(
-      '[data-action="selectDecoder"]',
-    ).disabled = !signal;
     $("editSignalDecoder").disabled = !signal;
     $("clearSignalDecoder").disabled = !signal?.decoder;
+    const list = $("decoderGroups");
+    const expanded = new Set(
+      reset
+        ? []
+        : [...list.querySelectorAll<HTMLDetailsElement>("details[open]")].map(
+            (node) => node.dataset.group,
+          ),
+    );
+    list.replaceChildren();
+    $("decoderWorkspace").disabled =
+      decoderCatalog?.workspaceAvailable === false;
+    if (!decoderCatalog) return;
+    for (const group of decoderCatalog.groups) {
+      const file = document.createElement("details");
+      file.className = "decoderGroup";
+      file.dataset.group = group.id;
+      const current = group.profiles.some((profile) => profile.id === activeId);
+      file.open = expanded.has(group.id) || current;
+      const summary = document.createElement("summary");
+      summary.textContent = (current ? "✓ " : "") + group.label;
+      const origin = document.createElement("small");
+      origin.textContent =
+        (group.builtin ? "内置" : "工作区") + " · " + group.filename;
+      summary.append(origin);
+      file.append(summary);
+      for (const profile of group.profiles) {
+        const row = document.createElement("div");
+        row.className = "decoderProfile";
+        const label = document.createElement("label");
+        const choice = document.createElement("input");
+        choice.type = "radio";
+        choice.name = "decoderProfile";
+        const compatible = !!signal && supportsProfile(profile, signal.width);
+        choice.checked = profile.id === activeId;
+        choice.disabled = !compatible;
+        choice.onchange = async () => {
+          await uiAction("setDecoder", { signal, profile });
+          renderDecoderGroups();
+        };
+        const caption = document.createElement("span");
+        caption.textContent = profile.label;
+        label.append(choice, caption);
+        const edit = document.createElement("button");
+        edit.textContent = group.builtin ? "编辑副本…" : "编辑…";
+        edit.setAttribute("aria-label", edit.textContent + " " + profile.label);
+        edit.disabled = !compatible || !decoderCatalog.workspaceAvailable;
+        edit.onclick = () => openDecoderEditor(signal, { group, profile });
+        row.append(label, edit);
+        file.append(row);
+      }
+      list.append(file);
+    }
+    for (const message of decoderCatalog.warnings) {
+      const notice = document.createElement("small");
+      notice.className = "decoderWarning";
+      notice.textContent = message;
+      list.append(notice);
+    }
+  }
+  decodeMenu.addEventListener("toggle", (event) => {
+    if (event.target !== decodeMenu || !decodeMenu.open) return;
+    renderDecoderGroups(true);
+    vscode.postMessage({ type: "decoderCatalog" });
+  });
+  window.addEventListener("message", async ({ data: message }) => {
+    if (message.type === "decoderCatalog") {
+      decoderCatalog = message;
+      if (decodeMenu.open) renderDecoderGroups();
+    } else if (
+      message.type === "decoderProfileSaved" &&
+      message.request === pendingDecoderSave
+    ) {
+      pendingDecoderSave = 0;
+      $("applyDecoderRule").disabled = false;
+      if (message.error) {
+        $("decoderError").textContent = message.error;
+        return;
+      }
+      if (chosen.some((signal) => key(signal) === key(decoderTarget)))
+        await uiAction("setDecoder", {
+          signal: decoderTarget,
+          profile: message.profile,
+        });
+      if (!$("decoderForm").hidden) closeEditor();
+      vscode.postMessage({ type: "decoderCatalog" });
+    }
   });
   function appendDecoderRule(rule: Rule) {
     const rows = $("decoderRules");
@@ -2791,6 +3375,23 @@ vscode.postMessage({ type: "ready" });
       input.setAttribute("aria-label", ruleLabels[field]);
       row.insertCell().append(input);
     }
+    const branches = document.createElement("details");
+    branches.className = "ruleBranches";
+    const summary = document.createElement("summary");
+    summary.textContent = rule.branches?.length
+      ? `条件分支 (${rule.branches.length})`
+      : "条件分支";
+    const branchEditor = document.createElement("textarea");
+    branchEditor.setAttribute("aria-label", "条件分支 JSON");
+    branchEditor.rows = 5;
+    branchEditor.spellcheck = false;
+    branchEditor.placeholder =
+      '[{"when":[{"mask":"0x1","value":"0x1"}],"label":"奇数"}]';
+    branchEditor.value = rule.branches?.length
+      ? JSON.stringify(rule.branches, null, 2)
+      : "";
+    branches.append(summary, branchEditor);
+    row.cells[2].append(branches);
     const controls = row.insertCell();
     const up = document.createElement("button");
     up.type = "button";
@@ -2811,27 +3412,55 @@ vscode.postMessage({ type: "ready" });
       $("decoderError").textContent = "最多可添加 256 条解码规则";
       return;
     }
-    const mask = "0x" + ((1n << BigInt(decoderTarget.width)) - 1n).toString(16);
+    const width = $("decoderUart").hidden
+      ? decoderTarget.width
+      : Number($("uartDataBits").value);
+    const mask = "0x" + ((1n << BigInt(width)) - 1n).toString(16);
     appendDecoderRule({ mask, value: "0", label: "" });
   }
-  $("editSignalDecoder").onclick = () => {
-    decoderTarget = chosen[active];
+  function openDecoderEditor(signal: Signal, edit?: typeof decoderEdit) {
+    if (pendingDecoderSave) return;
+    decoderTarget = signal;
+    decoderEdit = edit;
     if (!decoderTarget) return;
-    if (decoderTarget.width < 2 || decoderTarget.width > 256) {
+    const profile = edit?.profile ?? decoderTarget.decoder;
+    if (
+      !profile?.uart &&
+      (decoderTarget.width < 2 || decoderTarget.width > 256)
+    ) {
       status("自定义规则适用于 2–256 位信号", "warn");
       return;
     }
-    const profile = decoderTarget.decoder;
     $("decoderSignal").textContent =
       `${WaveSignal.label(decoderTarget)} · ${decoderTarget.width} 位`;
-    $("decoderLabel").value = profile?.rules ? profile.label : "自定义解码";
+    $("decoderLabel").value = edit?.group.builtin
+      ? (profile.label + " 副本").slice(0, 120)
+      : profile?.rules || profile?.uart || edit
+        ? profile.label
+        : "自定义解码";
+    $("decoderEngine").hidden = !edit?.profile.builtin;
+    $("decoderUart").hidden = $("decoderUart").disabled = !profile?.uart;
+    if (profile?.uart) {
+      $("uartBaud").value = String(profile.uart.baud);
+      $("uartDataBits").value = String(profile.uart.dataBits);
+      $("uartParity").value = profile.uart.parity;
+      $("uartStopBits").value = String(profile.uart.stopBits);
+      $("uartBitOrder").value = profile.uart.bitOrder;
+      $("uartInverted").checked = profile.uart.inverted;
+    }
+    $("applyDecoderRule").textContent = edit
+      ? edit.group.builtin
+        ? "保存副本并应用"
+        : "保存并应用"
+      : "应用到信号";
     $("decoderError").textContent = "";
     $("decoderRules").replaceChildren();
     if (profile?.rules) profile.rules.forEach(appendDecoderRule);
-    else addDefaultDecoderRule();
+    else if (!edit?.profile.builtin && !profile?.uart) addDefaultDecoderRule();
     openEditor($("decoderForm"));
     $("decoderLabel").focus();
-  };
+  }
+  $("editSignalDecoder").onclick = () => openDecoderEditor(chosen[active]);
   $("addDecoderRule").onclick = addDefaultDecoderRule;
   $("cancelSignalDecoder").onclick = closeEditor;
   $("clearSignalDecoder").onclick = async () => {
@@ -2841,31 +3470,66 @@ vscode.postMessage({ type: "ready" });
   $("decoderForm").onsubmit = async (event) => {
     event.preventDefault();
     try {
-      const rules = Array.from($("decoderRules").rows, (row) => {
+      const rules = Array.from($("decoderRules").rows, (row, index) => {
         const [mask, value, label] = Array.from(
           row.querySelectorAll("input"),
           (input) => input.value.trim(),
         );
-        return { mask, value, label };
+        const branches = row.querySelector("textarea").value.trim();
+        try {
+          return {
+            mask,
+            value,
+            label,
+            ...(branches ? { branches: JSON.parse(branches) } : {}),
+          };
+        } catch {
+          throw Error(`第 ${index + 1} 条规则的条件分支不是有效 JSON`);
+        }
       });
-      await uiAction("setDecoder", {
-        signal: decoderTarget,
-        profile: {
-          id: "signal-custom",
-          label: $("decoderLabel").value.trim(),
-          width: decoderTarget.width,
-          rules,
-        },
+      const uart: UartOptions | undefined = $("decoderUart").hidden
+        ? undefined
+        : {
+            baud: Number($("uartBaud").value),
+            dataBits: Number($("uartDataBits").value),
+            parity: $("uartParity").value as UartOptions["parity"],
+            stopBits: Number(
+              $("uartStopBits").value,
+            ) as UartOptions["stopBits"],
+            bitOrder: $("uartBitOrder").value as UartOptions["bitOrder"],
+            inverted: $("uartInverted").checked,
+          };
+      const profile = validateProfile({
+        id: decoderEdit?.profile.id || "signal-custom",
+        label: $("decoderLabel").value.trim(),
+        width: decoderEdit ? decoderEdit.profile.width : decoderTarget.width,
+        builtin: decoderEdit?.profile.builtin,
+        uart,
+        rules,
       });
+      if (decoderEdit) {
+        pendingDecoderSave = ++decoderSaveRequest;
+        $("applyDecoderRule").disabled = true;
+        $("decoderError").textContent = "";
+        vscode.postMessage({
+          type: "saveDecoderProfile",
+          request: pendingDecoderSave,
+          group: decoderEdit.group.id,
+          original: decoderEdit.profile,
+          edited: profile,
+        });
+        return;
+      }
+      await uiAction("setDecoder", { signal: decoderTarget, profile });
       closeEditor();
     } catch (error) {
       $("decoderError").textContent = error.message;
     }
   };
   let annotationTarget: Signal;
-  function editAnnotation() {
-    annotationTarget = chosen[active];
-    if (!annotationTarget) return;
+  function editAnnotation(signal: Signal = chosen[active]) {
+    if (!signal) return;
+    annotationTarget = signal;
     $("annotationSignal").textContent = WaveSignal.label(annotationTarget);
     $("annotationTags").value =
       annotationTarget.annotation?.tags.join(", ") || "";
@@ -2874,7 +3538,7 @@ vscode.postMessage({ type: "ready" });
     openEditor($("annotationForm"));
     $("annotationTags").focus();
   }
-  $("editAnnotation").onclick = editAnnotation;
+  $("editAnnotation").onclick = () => editAnnotation();
   $("cancelAnnotation").onclick = closeEditor;
   $("annotationForm").onsubmit = async (e) => {
     e.preventDefault();
@@ -3133,15 +3797,19 @@ vscode.postMessage({ type: "ready" });
   ] as const)
     $(id).onchange = () => {
       if (!meta) return;
-      const value = Number($(id).value.replace(/[,_]/g, "")) * displayFactor;
+      const ticks = Number($(id).value.replace(/[,_]/g, "")) * displayFactor;
+      const value = Math.round(ticks);
       if (
         !Number.isSafeInteger(value) ||
+        Math.abs(ticks - value) > 1e-5 ||
         value < Number(meta.start) ||
         value > Number(meta.end)
       ) {
-        render();
+        const cursor = isB ? cursorB : cursorA;
+        $(id).value = cursor == null ? "" : String(cursor / displayFactor);
         return;
       }
+      $(id).value = String(value / displayFactor);
       if (isB) cursorB = value;
       else cursorA = value;
       persist();
@@ -3178,7 +3846,18 @@ vscode.postMessage({ type: "ready" });
     if (e.button !== 0) e.preventDefault();
   };
   canvas.onpointermove = (e) => {
-    if (!pointer || pointer.button !== 0 || pointer.shift) return;
+    if (!pointer) return;
+    if (pointer.button === 1 || pointer.button === 2) {
+      const dx = e.clientX - pointer.x;
+      if (Math.abs(dx) > 5 || pointer.panning) {
+        pointer.panning = true;
+        const shift =
+          (-dx / canvas.clientWidth) * (pointer.end - pointer.start);
+        setWindow(pointer.start + shift, pointer.end + shift, true);
+      }
+      return;
+    }
+    if (pointer.button !== 0 || pointer.shift) return;
     const left = canvas.getBoundingClientRect().left,
       a = pointer.x - left,
       b = e.clientX - left;
@@ -3205,7 +3884,7 @@ vscode.postMessage({ type: "ready" });
         persist();
         render();
       }
-    } else if (Math.abs(dx) > 5) {
+    } else if (p.panning || Math.abs(dx) > 5) {
       const shift = (-dx / canvas.clientWidth) * (p.end - p.start);
       setWindow(p.start + shift, p.end + shift);
     } else if (p.button === 2) showMenu(e.clientX, e.clientY);
@@ -3272,12 +3951,10 @@ vscode.postMessage({ type: "ready" });
     };
   }
   function hoverBlock(hit) {
-    const block = data[hit.signal.id];
-    if (
-      block &&
-      (!block.truncated || hit.time < Number(block.events.at(-1)?.[0]))
-    ) {
-      return { raw: block.events[valueAt(block.events, hit.time)]?.[1] };
+    const read = data[hit.signal.id];
+    if (coversTick(read, hit.time)) {
+      const events = read.block.events;
+      return { raw: events[valueAt(events, hit.time)]?.[1] };
     }
     return hoverCache.get(hit.signal.id + ":" + hit.time);
   }
@@ -3333,9 +4010,10 @@ vscode.postMessage({ type: "ready" });
       tooltip.append(empty);
     } else {
       const decoded =
-        showDecodedValues.checked &&
-        signal.decoder &&
-        decodeWord(signal.decoder, projected, signal.width);
+        uartLabelAt(signal, hit.time) ||
+        (showDecodedValues.checked &&
+          signal.decoder &&
+          decodeWord(signal.decoder, projected, signal.width));
       for (const [name, value] of [
         ...(decoded ? [["解码", decoded]] : []),
         ["值", formatSignal(raw, signal)],
@@ -3362,7 +4040,7 @@ vscode.postMessage({ type: "ready" });
         tooltip.append(row);
       }
     }
-    if (data[signal.id]?.truncated) {
+    if (data[signal.id]?.block.truncated && readEnd(data[signal.id]) < end) {
       const warning = document.createElement("div");
       warning.className = "hoverWarning";
       warning.textContent = "图形数据已截断；超出已读范围时单独查询悬停值。";
@@ -3383,7 +4061,10 @@ vscode.postMessage({ type: "ready" });
     hoverLine.style.left = hit.plotX + "px";
     hoverLine.style.top = timelineHeight + "px";
     hoverBand.hidden = false;
-    hoverBand.style.top = hit.rowY + "px";
+    const bandTop = Math.max(timelineHeight, hit.rowY);
+    const bandBottom = Math.min(canvas.clientHeight, hit.rowY + rowHeight);
+    hoverBand.style.top = bandTop + "px";
+    hoverBand.style.height = bandBottom - bandTop + "px";
   }
   function requestHover() {
     if (!hover || hoverFlight || hoverBlock(hover)) return;
@@ -3489,6 +4170,7 @@ vscode.postMessage({ type: "ready" });
     menu: showMenu,
     groupsChanged,
     editGroup,
+    editAnnotation,
     groupMenu,
   };
   groupsChanged();

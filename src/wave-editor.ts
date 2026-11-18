@@ -10,6 +10,7 @@ import * as crypto from "node:crypto";
 import type { Viewer, WaveDocument } from "./viewer";
 import type { Backend } from "./backend";
 import type { Metadata, WaveState } from "./shared/protocol";
+import { loadDecoderCatalog, saveDecoderProfile } from "./decoder-config";
 import { backendPlan, isFsdb, type FsdbBackend } from "./backend-selection";
 import { mapPrefix, type KdbSession } from "./kdb";
 import { registerVirtuals, restoreView } from "./view-state";
@@ -35,6 +36,8 @@ interface EditorActions {
   openRecent(): Promise<void>;
   selectDecoder(viewer: Viewer): Promise<void>;
   editDecoderConfig(viewer: Viewer): Promise<void>;
+  decoderConfigPath(viewer: Viewer): string | undefined;
+  updateSidebarTags(viewer: Viewer, view: WaveState): void;
   saveActiveProject(viewer: Viewer): Promise<unknown>;
   openProject(filename?: string): Promise<unknown>;
   chooseClipExport(viewer: Viewer): Promise<unknown>;
@@ -67,6 +70,8 @@ export function createWaveEditor(
     openRecent,
     selectDecoder,
     editDecoderConfig,
+    decoderConfigPath,
+    updateSidebarTags,
     saveActiveProject,
     openProject,
     chooseClipExport,
@@ -401,6 +406,7 @@ export function createWaveEditor(
             }
           } else if (msg.type === "projectState" && msg.view) {
             document.view = msg.view;
+            updateSidebarTags(viewer, document.view);
             if (msg.baseline) {
               if (!document.dirty) document.savedView = document.view;
             } else {
@@ -426,6 +432,48 @@ export function createWaveEditor(
             await openRecent();
           } else if (msg.type === "selectDecoder") {
             await selectDecoder(viewer);
+          } else if (msg.type === "editDecoderConfig") {
+            await editDecoderConfig(viewer);
+          } else if (msg.type === "decoderCatalog") {
+            const legacy = decoderConfigPath(viewer);
+            await panel.webview.postMessage({
+              type: "decoderCatalog",
+              ...(await loadDecoderCatalog(legacy)),
+              workspaceAvailable: !!legacy,
+            });
+          } else if (msg.type === "saveDecoderProfile") {
+            try {
+              const legacy = decoderConfigPath(viewer);
+              if (!legacy) throw Error("请先打开工作区文件夹");
+              const profile = await saveDecoderProfile(
+                legacy,
+                msg.group,
+                msg.original,
+                msg.edited,
+                (filename) => {
+                  if (
+                    vscode.workspace.textDocuments.some(
+                      (document) =>
+                        document.isDirty && document.uri.fsPath === filename,
+                    )
+                  )
+                    throw Error(
+                      "规则文件在编辑器中有未保存的修改，请先保存该文件",
+                    );
+                },
+              );
+              await panel.webview.postMessage({
+                type: "decoderProfileSaved",
+                request: msg.request,
+                profile,
+              });
+            } catch (error) {
+              await panel.webview.postMessage({
+                type: "decoderProfileSaved",
+                request: msg.request,
+                error: error.message,
+              });
+            }
           } else if (msg.type === "editDecoderConfig") {
             await editDecoderConfig(viewer);
           } else if (msg.type === "saveProject") {
@@ -551,12 +599,16 @@ export function createWaveEditor(
               start: String(msg.start),
               end: String(msg.end),
               limit:
-                msg.report && Number.isSafeInteger(msg.limit)
-                  ? Math.min(
-                      cfg.get<number>("eventsPerSignal") || 20000,
-                      Math.max(2, Math.min(5000, msg.limit)),
-                    )
-                  : cfg.get<number>("eventsPerSignal"),
+                typeof msg.request === "string" &&
+                msg.request.startsWith("uart:") &&
+                msg.signals.length === 1
+                  ? 100000
+                  : msg.report && Number.isSafeInteger(msg.limit)
+                    ? Math.min(
+                        cfg.get<number>("eventsPerSignal") || 20000,
+                        Math.max(2, Math.min(5000, msg.limit)),
+                      )
+                    : cfg.get<number>("eventsPerSignal"),
             });
             await panel.webview.postMessage({
               type: "data",

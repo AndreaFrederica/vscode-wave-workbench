@@ -157,15 +157,18 @@ MCP 客户端可以直接使用两个工具，无需编排 Tcl。
 
 ## 波形解码和信号注释
 
-选中信号后，用顶部「解码 → 选择预设或工作区规则」切换解码器。波形格、游标 A、悬停提示和 PNG 导出会显示解码结果。「显示 → 显示解码值」可以切换到原始数值，「解码 → 清除解码」可以移除当前信号的规则绑定。内置配置包括 RV32IMFC、RV32IMC + Zfinx、TL-UL A/D opcode 和 AXI BRESP/RRESP。内置协议配置解码信号值，观察握手时可同时添加 valid、ready 等信号。
+选中信号后，打开顶部「解码」菜单，展开协议或工作区文件并选中其中一条规则。菜单会勾选当前规则，并展开它所在的文件。内置文件包括 RISC-V、TL-UL、AXI、UART 和 IIC。UART 文件包含数据字节和一位 TX/RX 串行帧预设。IIC 预设读取含 R/W 位的地址字节。波形格、游标 A、悬停提示和 PNG 导出可以显示解码结果。「显示 → 显示解码值」可以切换到原始数值，「解码 → 清除解码」可以移除当前信号的规则绑定。
 
 用「解码 → 编辑此信号的自定义规则」可填写规则名称和每行的掩码、匹配值、显示文本。表格按从上到下的顺序匹配，应用时使用所选信号的位宽校验。当前信号的自定义规则随 `.waveproj` 保存。
 
-「解码 → 编辑工作区规则文件」打开工作区下的 `.vscode/wave-decoders.json`。一个文件可定义多个供不同信号复用的配置。以下示例把内置 Zfinx 解码器作为一个配置，并为一个 8 位自定义命令字添加匹配规则。
+「新建工作区规则文件」在 `.vscode/wave-decoders/` 中创建 JSON 文件。一个文件可定义多个供不同信号复用的规则。旧版的 `.vscode/wave-decoders.json` 仍可读取。内置规则的「编辑副本」会创建独立的工作区文件，随后将副本应用到所选信号。指令解码器副本可添加匹配规则，未匹配的值仍交给内置指令解码器。
+
+下面的文件包含一个 Zfinx 配置和一组用于 8 位命令字的匹配规则。
 
 ```json
 {
   "version": 1,
+  "label": "CV32 指令与请求",
   "profiles": [
     { "id": "cv32-id", "label": "CV32 ID", "builtin": "rv32-zfinx" },
     {
@@ -180,8 +183,22 @@ MCP 客户端可以直接使用两个工具，无需编排 Tcl。
 }
 ```
 
-规则按顺序匹配 `(word & mask) == value`。标签里的位段使用 `{高位:低位:格式}`，格式可选 `hex`、`bin`、`dec`、`signed`。修改配置文件后，重新在选择器里应用该配置即可更新绑定。工程会保存每个信号应用的配置，重开工程可恢复该版本。
+规则按顺序匹配 `(word & mask) == value`。一条规则可以展开「条件分支」。分支按顺序尝试，同一分支的所有 `when` 条件都成立才使用它的显示文本。其余情况使用该规则本身的显示文本。
+
+```json
+{
+  "mask": "0x0", "value": "0x0", "label": "数据 {6:0:dec}",
+  "branches": [
+    { "when": [{ "mask": "0x40", "value": "0x40" }, { "mask": "0x1", "value": "0x1" }],
+      "label": "命令 {6:0:dec}" }
+  ]
+}
+```
+
+对于 UART 串行帧，在一位 TX/RX 行选择预设，点击「编辑副本」调整波特率、数据位、校验、停止位、位序和反相。界面以完整帧标注数据，附带校验或停止位错误。规则和分支匹配的是串行帧的数据字，而掩码的有效位宽来自数据位设置。UART 帧标注从仿真起点追踪起始沿，单次读取最多 100000 条信号事件。波形时间分辨率需要每比特至少两个 tick。
+
+标签里的位段使用 `{高位:低位:格式}`，格式可选 `hex`、`bin`、`dec`、`signed`。修改配置文件后，重新在选择器里应用该配置即可更新绑定。工程会保存每个信号应用的配置，重开工程可恢复该版本。
 
 「信号 → 标签和注释」为选中的信号添加逗号分隔的标签和多行注释。信号行悬停及波形悬停可查看注释。筛选框可输入 `tag:ID` 等标签。标签与注释随 `.waveproj` 保存。
 
-Tcl 和 MCP 的 `wave_tcl` 可使用 `waveDecode list`、`waveDecode set signal decoderId`、`waveDecode clear signal`、`waveDecodeEvents signal start end ?limit?` 和 `waveAnnotate signal ?commaSeparatedTags note?`。`waveDecodeEvents` 的事件项包含时间、原始二进制值和解码结果。
+Tcl 和 MCP 的 `wave_tcl` 可使用 `waveDecode list`、`waveDecode set signal decoderId`、`waveDecode clear signal`、`waveDecodeEvents signal start end ?limit?` 和 `waveAnnotate signal ?commaSeparatedTags note?`。`waveDecodeEvents` 的事件项包含时间、原始二进制值和解码结果。UART 串行配置返回 `frames`，其中包含帧的起止时间、数据字、错误和文本。

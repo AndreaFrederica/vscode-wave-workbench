@@ -8,7 +8,7 @@ async function clickTool(page,selector){const target=page.locator(selector),pare
 const {test,expect}=require('@playwright/test');
 const path=require('node:path'),fs=require('node:fs'),os=require('node:os');
 const {Backend}=require('../dist/backend');const {TclRunner}=require('../dist/tcl');const {WaveCommands,quote}=require('../dist/commands');const {KdbSession}=require('../dist/kdb');
-async function setup(page,filename,kdbPath){
+async function setup(page,filename,kdbPath,decoderConfig){
   const backend=new Backend(path.resolve(__dirname,'../bin/wave-backend'));const pending=new Map();let sequence=0,queryDelay=0;const logs=[],queries=[],catalogRequests=[];
   const viewer={backend,uri:{fsPath:filename},meta:await backend.request('open',{path:filename})};
   const send=m=>page.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),m);
@@ -18,6 +18,19 @@ async function setup(page,filename,kdbPath){
   const runner=new TclRunner((name,args,dir)=>{viewer.scriptDirectory=dir;return engine.execute(name,args);},{log:text=>logs.push(text)});
   await page.exposeFunction('bridge',async m=>{
     if(m.type==='ready'){await send({type:'metadata',...viewer.meta,title:path.basename(filename),vide:'1.2.5'});}
+    else if(m.type==='decoderCatalog'){
+      const {loadDecoderCatalog}=require('../dist/decoder-config');
+      await send({type:'decoderCatalog',...await loadDecoderCatalog(decoderConfig),workspaceAvailable:!!decoderConfig});
+    }
+    else if(m.type==='saveDecoderProfile'){
+      const {saveDecoderProfile}=require('../dist/decoder-config');
+      try {
+        const profile=await saveDecoderProfile(decoderConfig,m.group,m.original,m.edited);
+        await send({type:'decoderProfileSaved',request:m.request,profile});
+      } catch(error) {
+        await send({type:'decoderProfileSaved',request:m.request,error:error.message});
+      }
+    }
     else if(m.type==='uiResult'){const p=pending.get(m.id);if(p){pending.delete(m.id);if(m.error)p.reject(new Error(m.error));else p.resolve(m.result);}}
     else if(m.type==='query'){queries.push(m);if(queryDelay)await new Promise(r=>setTimeout(r,queryDelay));await send({type:'data',request:m.request,result:await backend.request('query',{signals:m.signals,start:String(m.start),end:String(m.end),limit:m.limit||20000})});}
     else if(m.type==='defineVirtual')await send({type:'virtualCreated',...await backend.request('defineVirtual',{definition:m.definition,name:m.name})});
@@ -28,7 +41,7 @@ async function setup(page,filename,kdbPath){
   await page.addInitScript(()=>{window.acquireVsCodeApi=()=>({getState:()=>null,setState(s){window.__savedWaveState=s;},postMessage:m=>window.bridge(m)});});
   await page.route('http://wave.test/**',async route=>{const name=new URL(route.request().url()).pathname.slice(1)||'index.html';if(!['index.html','wave.js','wave.css'].includes(name)){await route.abort();return;}let body=fs.readFileSync(path.resolve(__dirname,name.endsWith('.js')?'../dist/webview':'../media',name),'utf8');if(name==='index.html')body=body.replaceAll('{{csp}}','http://wave.test').replaceAll('{{nonce}}','testnonce').replace('{{css}}','/wave.css').replace('{{script}}','/wave.js');await route.fulfill({body,contentType:name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});});
   await page.goto('http://wave.test/');await expect(page.locator('#backend')).toContainText(viewer.meta.backend);
-  return {viewer,logs,queries,catalogRequests,running:()=>!!runner.pending,setQueryDelay(ms){queryDelay=ms;},run:(script,directory)=>runner.run(script,directory||path.dirname(filename)),dispose(){runner.dispose();backend.dispose();viewer.kdb?.dispose();}};
+  return {viewer,send,logs,queries,catalogRequests,running:()=>!!runner.pending,setQueryDelay(ms){queryDelay=ms;},run:(script,directory)=>runner.run(script,directory||path.dirname(filename)),dispose(){runner.dispose();backend.dispose();viewer.kdb?.dispose();}};
 }
 test('real Tcl and wave UI: groups, units, values, markers, transition, export/replay, errors',async({page})=>{
   const env=await setup(page,path.resolve(__dirname,'../examples/demo.vcd'));
@@ -82,8 +95,19 @@ test('10000 signals: viewport DOM/canvas/query bounds, scroll alignment, Rust ca
     const sizes=await page.evaluate(()=>({canvas:document.querySelector('canvas').clientHeight,viewport:document.querySelector('#tracks').clientHeight,extent:document.querySelector('#tracks').scrollHeight}));
     expect(sizes.canvas).toBeLessThanOrEqual(sizes.viewport+1);expect(sizes.extent).toBeGreaterThan(300000);
     expect(env.queries.every(q=>q.signals.length<=64)).toBe(true);expect(env.queries[0].signals.length).toBeLessThan(50);expect(env.queries.flatMap(q=>q.signals)).not.toContain('v9999');
+    const firstPrefetched = Number(await page.locator('.row').last().getAttribute('data-index')) + 1;
+    await expect.poll(() => env.queries.some(q => q.signals.includes('v' + firstPrefetched))).toBe(true);
+    await env.viewer.backend.request('cacheStats');
+    env.setQueryDelay(1000);
+    await page.locator('#tracks').evaluate(e => { e.scrollTop = 6 * 32; });
+    await expect(page.locator(`.row[data-index="${firstPrefetched}"] .value`)).toHaveText(
+      firstPrefetched.toString(16).padStart(2, '0').toUpperCase(), {timeout: 500},
+    );
+    env.setQueryDelay(0);
     await page.locator('#tracks').evaluate(e=>{e.scrollTop=e.scrollHeight;});
     await expect(page.locator('.row[data-index="9999"] .value')).toHaveText('0F');
+    const prefetchedAbove = Number(await page.locator('.row').first().getAttribute('data-index')) - 1;
+    await expect.poll(() => env.queries.some(q => q.signals.includes('v' + prefetchedAbove))).toBe(true);
     const before=await env.viewer.backend.request('cacheStats');
     await page.locator('#tracks').evaluate(e=>{e.scrollTop=0;});await expect(page.locator('.row[data-index="0"] .value')).toHaveText('00');
     const after=await env.viewer.backend.request('cacheStats');expect(after.hits).toBeGreaterThan(before.hits);expect(after.reads).toBe(before.reads);expect(after.bytes).toBeLessThanOrEqual(after.budget);fs.mkdirSync('test-results',{recursive:true});fs.writeFileSync('test-results/virtual-metrics.json',JSON.stringify({selected:10000,initialRows:await page.locator('.row').count(),...sizes,readsBeforeReturn:before.reads,readsAfterReturn:after.reads,hitsAfterReturn:after.hits,cacheBytes:after.bytes,cacheBudget:after.budget},null,2));
@@ -259,7 +283,7 @@ test('RTL batch delivery adds many signals once and reports existing rows',async
 test('compact controls leave waveform height available; editors float and menus close',async({page})=>{
  const env=await setup(page,path.resolve(__dirname,'../examples/demo.vcd'));try{
   await page.setViewportSize({width:1200,height:480});await page.evaluate(()=>window.dispatchEvent(new MessageEvent('message',{data:{type:'sidebarVisibility',visible:true}})));await env.run('wvAddSignal -group {G1 {/tb/dut/clk} {/tb/dut/data[7:0]} {/tb/dut/valid}}; wvSetCursor 20');
-  const height=()=>page.locator('#tracks').evaluate(e=>e.clientHeight);expect(await height()).toBeGreaterThanOrEqual(390);await expect(page.locator('header')).toHaveCount(0);
+  const height=()=>page.locator('#tracks').evaluate(e=>e.clientHeight+document.querySelector('#waveScrollbars').clientHeight);expect(await height()).toBeGreaterThanOrEqual(390);await expect(page.locator('header')).toHaveCount(0);
   await clickTool(page,'#newGroup');await expect(page.locator('#editPopover')).toBeVisible();expect(await height()).toBeGreaterThanOrEqual(390);await page.keyboard.press('Escape');await expect(page.locator('#editPopover')).toBeHidden();
   await page.locator('#signalMenu summary').click();await expect(page.locator('#expandBus')).toBeVisible();await page.locator('#groupMenu summary').click();await expect(page.locator('#expandBus')).toBeHidden();await page.keyboard.press('Escape');
   await page.screenshot({path:'test-results/compact-waveform.png'});
@@ -304,6 +328,197 @@ test('hover reads truncated tail on demand and drops tooltip on leave',async({pa
  try{await env.run('wvAddSignal {/top/bus[7:0]}');await expect(page.locator('#status')).toContainText('超限');const c=await page.locator('canvas').boundingBox(),r=await page.locator('.row').boundingBox();await page.mouse.move(c.x+c.width*24000/25000,r.y+16);await expect.poll(()=>env.queries.filter(q=>String(q.request).startsWith('hover:')).length).toBe(1);await expect(page.locator('#waveTooltip')).toContainText('24000 × 1ns');await expect(page.locator('#waveTooltip')).toContainText('C0');expect((await env.viewer.ui('snapshot')).cursorA).toBe(0);
  env.setQueryDelay(200);await page.mouse.move(c.x+c.width*24500/25000,r.y+16);await expect.poll(()=>env.queries.filter(q=>String(q.request).startsWith('hover:')).length).toBe(2);await page.mouse.move(0,0);await page.waitForTimeout(300);await expect(page.locator('#waveTooltip')).toBeHidden();
  }finally{env.dispose();fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test('changing row height scales the waveform and its hover band', async ({page}) => {
+  const env = await setup(page, path.resolve(__dirname, '../examples/demo.vcd'));
+  try {
+    await env.run('wvAddSignal {/tb/dut/clk} {/tb/dut/data[7:0]}');
+    await expect(page.locator('.row .value').first()).toHaveText('0');
+    const traceOffsets = () => page.evaluate(() => {
+      const canvas = document.querySelector('canvas');
+      const ctx = canvas.getContext('2d');
+      const bounds = canvas.getBoundingClientRect();
+      const scale = canvas.height / bounds.height;
+      const x = Math.floor(canvas.width * 0.26);
+      return [...document.querySelectorAll('.row')].slice(0, 2).map((row, index) => {
+        const box = row.getBoundingClientRect();
+        const y = Math.round((box.top - bounds.top) * scale);
+        const data = ctx.getImageData(x, y, 1, Math.round(box.height * scale)).data;
+        const offsets = [];
+        for (let p = 0; p < data.length; p += 4) {
+          const [r, g, b] = data.subarray(p, p + 3);
+          if (index === 0 ? g > r + 30 && g > b + 10 : b > r + 40 && b > g + 15)
+            offsets.push(Math.round(p / 4 / scale));
+        }
+        return offsets;
+      });
+    });
+    await expect.poll(async () => {
+      const [clock, bus] = await traceOffsets();
+      return [clock.at(-1), bus[0], bus.at(-1)];
+    }).toEqual([25, 6, 25]);
+    await page.locator('#displayMenu summary').click();
+    await page.locator('#waveRowHeight').fill('64');
+    await page.locator('#displayMenu summary').click();
+    await expect.poll(async () => {
+      const [clock, bus] = await traceOffsets();
+      return [clock.at(-1), bus[0], bus.at(-1)];
+    }).toEqual([50, 13, 50]);
+    const canvas = await page.locator('canvas').boundingBox();
+    const bus = await page.locator('.row').nth(1).boundingBox();
+    await page.mouse.move(canvas.x + canvas.width * 0.26, bus.y + 54);
+    await expect(page.locator('#waveTooltip')).toContainText('data[7:0]');
+    await expect(page.locator('#hoverBand')).toHaveCSS('height', '64px');
+    expect((await page.locator('#hoverBand').boundingBox()).y).toBe(bus.y);
+  } finally {
+    env.dispose();
+  }
+});
+
+test('horizontal pan keeps cached traces visible and signal names scroll independently', async ({page}) => {
+  const env = await setup(page, path.resolve(__dirname, '../examples/demo.vcd'));
+  try {
+    await env.run('wvZoom 10 20; wvAddSignal /tb/dut/clk; wvSetCursor 12');
+    await expect(page.locator('.row .value')).toHaveText('0');
+    const count = env.queries.length;
+    env.setQueryDelay(1000);
+    await page.locator('[data-action="right"]').click();
+    await expect(page.locator('#range')).toContainText('13 → 23');
+    expect(env.queries).toHaveLength(count);
+    await page.locator('[data-action="right"]').click();
+    await expect(page.locator('#range')).toContainText('16 → 26');
+    await expect(page.locator('#status')).toContainText('正在读取');
+    const overlapVisible = await page.locator('canvas').evaluate(canvas => {
+      const row = document.querySelector('.row').getBoundingClientRect();
+      const bounds = canvas.getBoundingClientRect();
+      const scale = canvas.height / bounds.height;
+      const ctx = canvas.getContext('2d');
+      const pixels = ctx.getImageData(
+        Math.round(canvas.width * 0.5),
+        Math.round((row.top - bounds.top) * scale),
+        1,
+        Math.round(row.height * scale),
+      ).data;
+      for (let i = 0; i < pixels.length; i += 4) {
+        const [red, green, blue] = pixels.subarray(i, i + 3);
+        if (green > red + 30 && green > blue + 10) return true;
+      }
+      return false;
+    });
+    expect(overlapVisible).toBe(true);
+    await expect(page.locator('.row .value')).toHaveText('0');
+    await expect(page.locator('#status')).toContainText('1 个信号');
+
+    const bounds = await page.locator('canvas').boundingBox();
+    await page.mouse.move(bounds.x + bounds.width * 0.6, bounds.y + 80);
+    await page.mouse.down({button: 'middle'});
+    await page.mouse.move(bounds.x + bounds.width * 0.3, bounds.y + 80);
+    await expect(page.locator('#range')).toContainText('19 → 29');
+    await page.mouse.up({button: 'middle'});
+
+    await page.locator('.row').click();
+    await clickTool(page, '#renameSignal');
+    await page.locator('#signalAlias').fill('pipeline_stage_'.repeat(10) + 'CLK_TAIL');
+    await page.locator('#renameSignalForm button[type=submit]').click();
+    await expect(page.locator('#nameScroll')).toBeVisible();
+    const valueBefore = await page.locator('.row .value').boundingBox();
+    const name = page.locator('.signalNameContent');
+    const nameBefore = await name.boundingBox();
+    const edit = page.locator('.row .signalAnnotation');
+    const editBefore = await edit.boundingBox();
+    await page.locator('#nameScroll').evaluate(el => { el.scrollLeft = el.scrollWidth; });
+    await expect.poll(async () => (await name.boundingBox()).x).toBeLessThan(nameBefore.x - 100);
+    expect(await edit.boundingBox()).toEqual(editBefore);
+    await edit.click();
+    await expect(page.locator('#annotationForm')).toBeVisible();
+    await page.locator('#cancelAnnotation').click();
+    expect(await page.locator('.row .value').boundingBox()).toEqual(valueBefore);
+    await expect(page.locator('#range')).toContainText('19 → 29');
+  } finally {
+    env.dispose();
+  }
+});
+
+test('full-wave scrollbar reflects the zoomed time range and pans to both bounds', async ({page}) => {
+  const env = await setup(page, path.resolve(__dirname, '../examples/demo.vcd'));
+  try {
+    await env.run('wvAddSignal /tb/dut/clk; wvSetCursor 12');
+    const bar = page.getByRole('scrollbar', {name: '全波形时间轴'});
+    const thumb = page.locator('#timeThumb');
+    await expect(bar).toHaveAttribute('aria-valuetext', /100%/);
+    await expect(bar).toHaveAttribute('aria-disabled', 'true');
+    const divider = page.locator('.valueHeader');
+    expect(await page.locator('#valueSplit').evaluate(el => getComputedStyle(el, '::before').borderLeftWidth)).toBe('1px');
+    expect((await divider.boundingBox()).x).toBeCloseTo(
+      (await page.locator('.row .value').boundingBox()).x, 0,
+    );
+
+    await env.run('wvZoom 10 20');
+    await expect(bar).toHaveAttribute('aria-valuetext', /20%/);
+    await expect(bar).toHaveAttribute('aria-valuenow', '10');
+    const track = await bar.boundingBox();
+    const plot = await page.locator('canvas').boundingBox();
+    const handle = await thumb.boundingBox();
+    expect(track.x).toBeCloseTo(plot.x, 0);
+    expect(track.width).toBeCloseTo(plot.width, 0);
+    expect(handle.width / track.width).toBeCloseTo(0.2, 2);
+    expect((handle.x - track.x) / track.width).toBeCloseTo(0.2, 2);
+
+    await page.mouse.move(handle.x + 5, handle.y + 5);
+    await page.mouse.down();
+    await page.mouse.move(track.x + track.width - 1, handle.y + 5, {steps: 6});
+    await expect(page.locator('#range')).toContainText('40 → 50');
+    await page.mouse.up();
+    await bar.press('Home');
+    await expect(page.locator('#range')).toContainText('0 → 10');
+    await bar.press('ArrowRight');
+    await expect(page.locator('#range')).toContainText('1 → 11');
+    await bar.press('End');
+    await expect(page.locator('#range')).toContainText('40 → 50');
+    await expect(page.locator('#cursorAInput')).toHaveValue('12');
+
+    await page.locator('#waveSplit').press('ArrowRight');
+    await expect.poll(async () => {
+      const [updatedTrack, updatedPlot] = await Promise.all([bar.boundingBox(), page.locator('canvas').boundingBox()]);
+      return Math.abs(updatedTrack.x - updatedPlot.x) + Math.abs(updatedTrack.width - updatedPlot.width);
+    }).toBeLessThan(1);
+    await env.run('wvZoomAll');
+    await expect(bar).toHaveAttribute('aria-disabled', 'true');
+    expect((await thumb.boundingBox()).width).toBeCloseTo((await bar.boundingBox()).width, 0);
+  } finally {
+    env.dispose();
+  }
+});
+
+test('time unit selector and sidebar annotations use the current waveform project', async ({page}) => {
+  const env = await setup(page, path.resolve(__dirname, '../examples/demo.vcd'));
+  try {
+    const units = page.getByRole('combobox', {name:'时间轴单位'});
+    await units.selectOption('1ps');
+    await expect(page.locator('#range')).toContainText('0 → 50000 × 1ps');
+    await env.run('wvSetCursor 12000');
+    await expect(page.locator('#cursorAInput')).toHaveValue('12000');
+    await units.selectOption('1us');
+    await expect(page.locator('#range')).toContainText('0 → 0.05 × 1us');
+    await page.locator('#cursorAInput').fill('0.022');
+    await page.locator('#cursorAInput').press('Tab');
+    expect((await env.viewer.ui('snapshot')).cursorA).toBe(22);
+    await env.run('wvSetWindowTimeUnit 10 ns');
+    await expect(units).toHaveValue('10ns');
+    await units.selectOption('');
+    await expect(page.locator('#cursorAInput')).toHaveValue('22');
+
+    const {signals} = await env.viewer.backend.request('scopeSignals', {query:'tb.dut'});
+    const signal = signals.find((entry) => entry.name === 'data[7:0]');
+    await env.send({type:'sidebarAdd', signals:[signal], editAnnotation:true});
+    await expect(page.locator('#annotationForm')).toBeVisible();
+    await page.locator('#annotationTags').fill('bus');
+    await page.locator('#annotationForm button[type=submit]').click();
+    await expect(page.locator('.row.active')).toHaveAttribute('title', /#bus/);
+  } finally {
+    env.dispose();
+  }
 });
 
 test('narrow bus cells render compact values on the canvas and in PNG', async ({page}) => {
@@ -384,10 +599,19 @@ test('group headers reorder, row selection sets the add target and projects rest
     await page.mouse.move(separator.x + 140, separator.y + 12, {steps: 5});
     await page.mouse.up();
     await expect.poll(async () => (await page.locator('#names').boundingBox()).width).toBeGreaterThan(width + 80);
+    const divider = page.getByRole('separator', {name:'调整信号名与数值列宽度'});
+    const dividerBounds = await divider.boundingBox();
+    await page.mouse.move(dividerBounds.x + 4, dividerBounds.y + 12);
+    await page.mouse.down();
+    await page.mouse.move(dividerBounds.x - 66, dividerBounds.y + 12, {steps:5});
+    await page.mouse.up();
+    await expect(divider).toHaveAttribute('aria-valuenow', '160');
     await env.run('wvZoom 10 40; wvSetCursor 20; wvSetMarker -name Result 30; waveBusLabels full');
     const state = await env.viewer.ui('snapshot');
     const filename = path.join(directory, 'demo.waveproj');
     await saveWaveProject(filename, file, state);
+    await divider.dblclick({position:{x:4,y:12}});
+    await expect(divider).toHaveAttribute('aria-valuenow', '90');
     await env.run('waveGroup move B A after; waveTooltip 1; waveLayout 32 30; waveBusLabels auto; wvZoomAll');
     await expect(tooltipToggle).toBeChecked();
     const project = await readWaveProject(filename);
@@ -401,6 +625,8 @@ test('group headers reorder, row selection sets the add target and projects rest
     await expect(tooltipToggle).not.toBeChecked();
     expect(restored.rowHeight).toBe(48);
     expect(restored.namesFraction).toBe(state.namesFraction);
+    expect(restored.valueFraction).toBe(state.valueFraction);
+    await expect(divider).toHaveAttribute('aria-valuenow', '160');
     expect(restored.markers).toEqual(state.markers);
     expect([restored.start, restored.end, restored.cursorA]).toEqual([10, 40, 20]);
   } finally {
@@ -425,7 +651,12 @@ test('decoder and annotation bindings survive a waveform project round trip', as
     await env.run(`wvAddSignal ${name} /top/valid; wvSelectSignal ${name}; waveDecode set ${name} rv32-zfinx`);
     const row = page.locator('.row').first();
     await expect(row.locator('.value')).toHaveText('fdiv.s x10, x11, x12, rne');
-    await clickTool(page, '#editAnnotation');
+    await env.run('wvSelectSignal /top/valid');
+    const edit = row.getByRole('button', {name:'编辑 instr[31:0] 的标签和注释'});
+    const otherEdit = page.locator('.row').nth(1).getByRole('button', {name:'编辑 valid 的标签和注释'});
+    expect((await edit.boundingBox()).x).toEqual((await otherEdit.boundingBox()).x);
+    await edit.click();
+    await expect(page.locator('#annotationSignal')).toHaveText('instr[31:0]');
     await page.getByLabel('标签（逗号分隔）').fill('CV32, ID, CV32');
     await page.getByLabel('注释', {exact: true}).fill('IF/ID 指令\n参照 valid。');
     await page.getByRole('button', {name:'保存标签和注释'}).click();
@@ -437,11 +668,14 @@ test('decoder and annotation bindings survive a waveform project round trip', as
     await expect(inlineTags).not.toBeChecked();
     await expect(decodedValues).toBeChecked();
     await inlineTags.check();
-    await expect(row.locator('.signalTags')).toHaveText('#CV32 #ID');
+    await expect(row.locator('.signalTags .tagBadge')).toHaveText(['#CV32', '#ID']);
+    await env.viewer.ui('tagAppearance', {style: 'dot', tag: 'CV32', color: '#123456'});
+    await expect(row.locator('.tagStyle-dot')).toBeVisible();
+    await expect(row.locator('.tagBadge').first()).toHaveCSS('--tag-color', '#123456');
     await expect(row.locator('.value')).toHaveText('fdiv.s x10, x11, x12, rne');
     await decodedValues.uncheck();
     await expect(row.locator('.value')).toHaveText('18C58553');
-    await expect(row.locator('.signalTags')).toHaveText('#CV32 #ID');
+    await expect(row.locator('.signalTags .tagBadge')).toHaveText(['#CV32', '#ID']);
     await page.locator('#displayMenu summary').click();
     await page.locator('#toggleFilter').click();
     await page.locator('#filterSignals').fill('tag:ID');
@@ -460,7 +694,9 @@ test('decoder and annotation bindings survive a waveform project round trip', as
     const view = await restoreView(env.viewer.backend, (await readWaveProject(project)).view, env.viewer.meta);
     await env.viewer.ui('restoreView', view);
     await expect(row.locator('.value')).toHaveText('18C58553');
-    await expect(row.locator('.signalTags')).toHaveText('#CV32 #ID');
+    await expect(row.locator('.signalTags .tagBadge')).toHaveText(['#CV32', '#ID']);
+    await expect(row.locator('.tagStyle-dot')).toBeVisible();
+    await expect(row.locator('.tagBadge').first()).toHaveCSS('--tag-color', '#123456');
     await expect(row).toHaveAttribute('title', /参照 valid。/);
     await page.locator('#displayMenu summary').click();
     await expect(inlineTags).toBeChecked();
@@ -468,7 +704,7 @@ test('decoder and annotation bindings survive a waveform project round trip', as
     await decodedValues.check();
     await expect(row.locator('.value')).toHaveText('fdiv.s x10, x11, x12, rne');
 
-    await page.locator('#decoderMenu summary').click();
+    await page.locator('#decoderMenu > summary').click();
     await expect(page.locator('#decoderSelection')).toContainText('Zfinx');
     await page.getByRole('button', {name: '编辑此信号的自定义规则…'}).click();
     const editor = page.locator('#decoderForm');
@@ -491,10 +727,115 @@ test('decoder and annotation bindings survive a waveform project round trip', as
     await saveWaveProject(project, filename, await env.viewer.ui('snapshot'));
     const savedRules = (await readWaveProject(project)).view.chosen[0].decoder.rules;
     expect(savedRules.map(rule => rule.label)).toEqual(['除法 rd={11:7:dec}', '未知操作']);
-    await page.locator('#decoderMenu summary').click();
+    await page.locator('#decoderMenu > summary').click();
     await expect(page.locator('#decoderSelection')).toContainText('自定义指令');
     await page.getByRole('button', {name: '清除解码'}).click();
     await expect(row.locator('.value')).toHaveText('18C58553');
+  } finally {
+    env.dispose();
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
+});
+
+test('decoder menu lists rule files and applies edited copies of built-in rules', async ({page}) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wave-decoder-files-'));
+  const config = path.join(directory, 'wave-decoders.json');
+  const groupDirectory = path.join(directory, 'wave-decoders');
+  fs.mkdirSync(groupDirectory);
+  const workspaceFile = path.join(groupDirectory, 'example.json');
+  fs.writeFileSync(workspaceFile, JSON.stringify({
+    version: 1, label: '工作区字节', profiles: [{
+      id: 'workspace-data', label: '工作区数据', width: 8,
+      rules: [{mask:'0x0', value:'0x0', label:'通道 {3:0:dec}'}],
+    }],
+  }));
+  const env = await setup(page, path.resolve(__dirname, '../examples/demo.vcd'), undefined, config);
+  try {
+    await env.run('wvAddSignal {/tb/dut/data[7:0]}; wvSetCursor 20');
+    const menu = page.locator('#decoderMenu');
+    await menu.locator('summary').first().click();
+    const uart = menu.locator('details[data-group="builtin/uart"]');
+    await uart.locator('summary').click();
+    await uart.getByRole('radio', {name:'UART 数据字节'}).check();
+    await expect(uart.getByRole('radio', {name:'UART 数据字节'})).toBeChecked();
+    await expect(page.locator('.row .value')).toHaveText('UART 0x2a');
+
+    await uart.getByRole('button', {name:'编辑副本… UART 数据字节'}).click();
+    const form = page.locator('#decoderForm');
+    await form.getByLabel('规则名称').fill('串口副本');
+    await form.getByLabel('显示文本').last().fill('串口 {7:0:hex}');
+    await form.getByRole('button', {name:'保存副本并应用'}).click();
+    await expect(form).toBeHidden();
+    await expect(page.locator('.row .value')).toHaveText('串口 0x2a');
+    const files = fs.readdirSync(groupDirectory);
+    const copy = files.find(name => /^uart-byte-copy-/.test(name));
+    expect(copy).toBeTruthy();
+    await menu.locator('summary').first().click();
+    await expect(menu.locator(`details[data-group="workspace/${copy}"]`).getByRole('radio', {name:'串口副本'})).toBeChecked();
+    await uart.locator('summary').click();
+    await uart.getByRole('radio', {name:'UART 数据字节'}).check();
+    await expect(page.locator('.row .value')).toHaveText('UART 0x2a');
+
+    const workspace = menu.locator('details[data-group="workspace/example.json"]');
+    await workspace.locator('summary').click();
+    await workspace.getByRole('button', {name:'编辑… 工作区数据'}).click();
+    await form.getByLabel('显示文本').fill('数据 {3:0:dec}');
+    await form.getByRole('button', {name:'保存并应用'}).click();
+    await expect(page.locator('.row .value')).toHaveText('数据 10');
+    expect(JSON.parse(fs.readFileSync(workspaceFile)).profiles[0].rules[0].label).toBe('数据 {3:0:dec}');
+  } finally {
+    env.dispose();
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
+});
+
+test('UART frame parameters and rule branches decode a serial waveform', async ({page}) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wave-uart-'));
+  const filename = path.join(directory, 'uart.vcd');
+  const events = ['$timescale 1 ns $end', '$scope module top $end', '$var wire 1 u tx $end',
+    '$upscope $end', '$enddefinitions $end', '#0', '0u'];
+  function frame(start, word, parity) {
+    const bits = [0, ...Array.from({length: 7}, (_, i) => (word >> (6 - i)) & 1), parity, 1, 1];
+    bits.forEach((bit, i) => events.push('#' + (start + i * 1000), (1 - bit) + 'u'));
+  }
+  frame(1000, 0x53, 0);
+  frame(12000, 0x52, 0);
+  events.push('#25000', '');
+  fs.writeFileSync(filename, events.join('\n'));
+  const env = await setup(page, filename, undefined, path.join(directory, 'wave-decoders.json'));
+  try {
+    await env.run('wvAddSignal {/top/tx}; wvZoom 4000 22000; wvSetCursor 4500');
+    const menu = page.locator('#decoderMenu');
+    await menu.locator('summary').first().click();
+    const uart = menu.locator('details[data-group="builtin/uart"]');
+    await uart.locator('summary').click();
+    await uart.getByRole('button', {name:'编辑副本… UART 串行帧 · 115200 8N1'}).click();
+    const form = page.locator('#decoderForm');
+    await form.getByLabel('波特率').fill('1000000');
+    await form.getByLabel('数据位').selectOption('7');
+    await form.getByLabel('校验').selectOption('even');
+    await form.getByLabel('停止位').selectOption('2');
+    await form.getByLabel('位序').selectOption('msb');
+    await form.getByRole('checkbox', {name:'反相'}).check();
+    await form.getByRole('button', {name:'添加规则'}).click();
+    await form.getByLabel('掩码').fill('0');
+    await form.getByLabel('显示文本').fill('数据');
+    await form.getByText('条件分支', {exact:true}).click();
+    await form.getByLabel('条件分支 JSON').fill(JSON.stringify([{
+      when:[{mask:'0x40',value:'0x40'},{mask:'0x1',value:'0x1'}],
+      label:'命令 {6:0:dec}',
+    }]));
+    await form.getByRole('button', {name:'保存副本并应用'}).click();
+    await expect(page.locator('.row .value')).toHaveText('命令 83');
+    const result = JSON.parse(await env.run('waveDecodeEvents {/top/tx} 4000 22000'));
+    expect(result.frames).toEqual([
+      {start:'1000',end:'12000',word:83,errors:[],label:'命令 83'},
+      {start:'12000',end:'23000',word:82,errors:['parity'],label:'数据 · 校验错误'},
+    ]);
+    expect(result.truncated).toBe(false);
+    const project = (await env.viewer.ui('snapshot')).chosen[0].decoder;
+    expect(project.uart).toEqual({baud:1000000,dataBits:7,parity:'even',stopBits:2,bitOrder:'msb',inverted:true});
+    expect(project.rules[0].branches).toHaveLength(1);
   } finally {
     env.dispose();
     fs.rmSync(directory, {recursive: true, force: true});

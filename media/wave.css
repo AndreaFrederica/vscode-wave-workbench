@@ -116,7 +116,7 @@ body.sidebar-connected main>aside{display:none}
 
 #markerLayer{position:absolute;top:30px;left:0;right:0;height:24px;z-index:5;pointer-events:none;overflow:hidden}.timeMarker{position:absolute;top:0;height:22px;padding:1px 3px;font:10px var(--vscode-editor-font-family,monospace);background:transparent;border:0;text-align:left;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;pointer-events:auto;cursor:ew-resize}.timeMarker:hover{background:var(--hover)}#markerManager{position:fixed;z-index:100;top:66px;right:12px;width:min(560px,calc(100vw - 24px));max-height:65vh;overflow:auto;border:1px solid var(--line);border-radius:6px;padding:10px;background:var(--vscode-menu-background,var(--panel));box-shadow:0 4px 18px #0005}#markerManager[hidden]{display:none}.markerManagerHeader{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}.markerManagerHeader strong{font-size:12px}.markerItem{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);padding:5px 0;font-size:11px}.markerItem>span:first-child{flex:1;min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.markerItem>span:nth-child(2){font-family:monospace;white-space:nowrap}.markerItem button{padding:3px 6px;font-size:11px}#markerError{font-size:11px;color:var(--error)}#editPopover input[type=color]{height:26px;padding:2px}.ruler{align-items:center}
 
-#waveTooltip{position:fixed;z-index:110;max-width:min(440px,calc(100vw - 12px));max-height:70vh;overflow:hidden;padding:9px 11px;border:1px solid var(--vscode-editorHoverWidget-border,var(--line));border-radius:5px;background:var(--vscode-editorHoverWidget-background,var(--panel));color:var(--vscode-editorHoverWidget-foreground,var(--text));box-shadow:0 3px 14px #0005;font-size:11px;line-height:1.6;pointer-events:none;overflow-wrap:anywhere}#waveTooltip[hidden]{display:none}#waveTooltip strong{font-size:12px}.hoverPath{color:var(--muted);font:10px var(--vscode-editor-font-family,monospace);margin:2px 0 5px}.hoverValue{display:flex;gap:8px;align-items:baseline}.hoverKey{color:var(--muted);min-width:60px;font-size:10px}.hoverValue code{white-space:pre-wrap;word-break:break-all;font:11px var(--vscode-editor-font-family,monospace)}.hoverWarning{color:var(--warning);margin-top:4px}#hoverLine{position:absolute;bottom:0;width:0;border-left:1px dashed var(--vscode-editorHoverWidget-highlightForeground,var(--muted));pointer-events:none;z-index:3}#hoverBand{position:absolute;left:0;right:0;height:32px;background:var(--vscode-list-hoverBackground,#80808012);opacity:.35;pointer-events:none;z-index:2}#hoverLine[hidden],#hoverBand[hidden]{display:none}
+#waveTooltip{position:fixed;z-index:110;max-width:min(440px,calc(100vw - 12px));max-height:70vh;overflow:hidden;padding:9px 11px;border:1px solid var(--vscode-editorHoverWidget-border,var(--line));border-radius:5px;background:var(--vscode-editorHoverWidget-background,var(--panel));color:var(--vscode-editorHoverWidget-foreground,var(--text));box-shadow:0 3px 14px #0005;font-size:11px;line-height:1.6;pointer-events:none;overflow-wrap:anywhere}#waveTooltip[hidden]{display:none}#waveTooltip strong{font-size:12px}.hoverPath{color:var(--muted);font:10px var(--vscode-editor-font-family,monospace);margin:2px 0 5px}.hoverValue{display:flex;gap:8px;align-items:baseline}.hoverKey{color:var(--muted);min-width:60px;font-size:10px}.hoverValue code{white-space:pre-wrap;word-break:break-all;font:11px var(--vscode-editor-font-family,monospace)}.hoverWarning{color:var(--warning);margin-top:4px}#hoverLine{position:absolute;bottom:0;width:0;border-left:1px dashed var(--vscode-editorHoverWidget-highlightForeground,var(--muted));pointer-events:none;z-index:3}#hoverBand{position:absolute;left:0;right:0;background:var(--vscode-list-hoverBackground,#80808012);opacity:.35;pointer-events:none;z-index:2}#hoverLine[hidden],#hoverBand[hidden]{display:none}
 
 #rows .groupRow.dropBefore { box-shadow: inset 0 2px var(--accent); }
 #rows .groupRow.dropAfter { box-shadow: inset 0 -2px var(--accent); }
@@ -127,13 +127,106 @@ body.sidebar-connected main>aside{display:none}
 #waveSplit:hover, #waveSplit:focus-visible { background: var(--accent); }
 #displayMenu input[type="range"] { min-width: 130px; }
 
-.signalAnnotation { margin-inline-start: .4em; color: var(--muted); }
+button.signalAnnotation {
+  flex: 0 0 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+button.signalAnnotation:not(.hasAnnotation):not(:hover):not(:focus-visible) { opacity: .65; }
+.row.active button.signalAnnotation { color: inherit; }
+button.signalAnnotation:hover, button.signalAnnotation:focus-visible {
+  color: var(--text);
+  background: var(--hover);
+}
 #displayMenu input[type="checkbox"] { margin: 0; accent-color: var(--accent); }
-.row .name.withInlineTags { display: flex; align-items: center; gap: .35em; min-width: 0; }
-.signalNameText, .signalTags { overflow: hidden; text-overflow: ellipsis; }
-.signalTags { max-width: 45%; color: var(--muted); font-size: 10px; }
+#names {
+  --wave-value-width: 90px;
+  --wave-value-divider: var(--vscode-contrastBorder, color-mix(in srgb, var(--muted) 55%, transparent));
+}
+#valueSplit {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: calc(8px + var(--wave-value-width) - 4px);
+  width: 8px;
+  z-index: 4;
+  cursor: col-resize;
+  touch-action: none;
+}
+#valueSplit::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 4px;
+  border-left: 1px solid var(--wave-value-divider);
+}
+#valueSplit:hover::before, #valueSplit:active::before, #valueSplit:focus-visible::before {
+  border-left: 2px solid var(--accent);
+}
+#names .ruler { padding: 0 8px; }
+.valueHeader {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  align-self: stretch;
+  width: var(--wave-value-width);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.row .value { min-width: var(--wave-value-width); max-width: var(--wave-value-width); }
+#waveScrollbars {
+  display: grid;
+  grid-template-columns: var(--wave-pan-offset, 280px) var(--wave-pan-width, 1fr);
+  flex: 0 0 17px;
+  min-height: 0;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+#timeScroll {
+  position: relative;
+  grid-column: 2;
+  min-width: 0;
+  height: 16px;
+  background: var(--bg);
+  cursor: pointer;
+  touch-action: none;
+}
+#timeScroll:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+#timeThumb {
+  position: absolute;
+  top: 3px;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--vscode-scrollbarSlider-background, #79797999);
+  cursor: grab;
+}
+#timeThumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground, #949494bb); }
+#timeScroll:active #timeThumb {
+  background: var(--vscode-scrollbarSlider-activeBackground, #a9a9a9cc);
+  cursor: grabbing;
+}
+#timeScroll[aria-disabled="true"], #timeScroll[aria-disabled="true"] #timeThumb { cursor: default; }
+#nameScroll {
+  grid-column: 1;
+  overflow: auto hidden;
+  height: 16px;
+  background: var(--panel);
+}
+#timeUnitSelect { flex: none; height: 23px; padding: 2px 4px; font-size: 11px; }
+#nameScroll[hidden] { display: none; }
+#nameScroll > div { height: 1px; }
+.row .name { min-width: 0; text-overflow: clip; }
+.signalNameContent {
+  display: inline-flex;
+  align-items: center;
+  gap: .35em;
+  width: max-content;
+  transform: translateX(var(--name-scroll, 0px));
+}
+.signalTags { color: var(--muted); font-size: 10px; }
 .row.active .signalTags { color: inherit; }
-.withInlineTags .signalAnnotation { flex: none; margin-inline-start: 0; }
 .hoverAnnotation { white-space: pre-wrap; margin-block: 4px; color: var(--muted); }
 #annotationSignal { overflow-wrap: anywhere; }
 #annotationNote { font: inherit; color: var(--input-fg); background: var(--input-bg); border: 1px solid var(--input-border); resize: vertical; }
@@ -160,3 +253,42 @@ body.sidebar-connected main>aside{display:none}
 .decoderRuleList td:last-child button + button { margin-inline-start: 4px; }
 #decoderError:empty { display: none; }
 #decoderError { font-size: 11px; color: var(--error); }
+#decoderMenu .menuPanel { width: min(370px, calc(100vw - 12px)); max-width: calc(100vw - 12px); }
+.decoderGroup { border-block-start: 1px solid var(--line); }
+.decoderGroup > summary { padding: 6px 8px; cursor: pointer; }
+.decoderGroup > summary small { margin-inline-start: .7em; color: var(--muted); overflow-wrap: anywhere; }
+.decoderProfile { display: flex; align-items: center; }
+.decoderProfile label { flex: 1; min-width: 0; }
+.decoderProfile label span { overflow-wrap: anywhere; }
+.decoderProfile input { margin: 0; accent-color: var(--accent); flex: none; }
+.decoderProfile button { flex: none; }
+.decoderWarning { display: block; padding: 4px 8px; color: var(--warning); overflow-wrap: anywhere; }
+#decoderUart:not([hidden]) { display: grid; grid-template-columns: max-content minmax(75px, 1fr) max-content minmax(75px, 1fr); align-items: center; gap: 7px; }
+#decoderUart[hidden] { display: none; }
+#decoderUart { border: 1px solid var(--line); min-width: 0; }
+#decoderUart .uartInvert { grid-column: span 2; }
+#decoderUart .uartInvert input { width: auto; margin: 0; }
+.ruleBranches { padding-block: 2px; }
+.ruleBranches summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+.ruleBranches textarea { display: block; width: 100%; resize: vertical; }
+@media(max-width: 480px) { #decoderUart:not([hidden]) { grid-template-columns: max-content 1fr; } }
+
+
+.signalTags { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 10px; }
+.tagBadge { flex: none; line-height: 1.2; }
+.tagStyle-pill .tagBadge {
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--tag-color) 52%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--tag-color) 15%, transparent);
+}
+.tagStyle-text .tagBadge { color: color-mix(in srgb, var(--tag-color) 70%, currentColor); }
+.tagStyle-dot .tagBadge {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tag-color);
+  color: transparent;
+  font-size: 0;
+}
+.tagOverflow { color: var(--vscode-descriptionForeground, inherit); flex: none; }

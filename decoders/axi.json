@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "label": "AXI",
+  "profiles": [
+    {
+      "id": "axi-resp", "label": "AXI BRESP / RRESP", "width": 2,
+      "rules": [
+        { "mask": "0x3", "value": "0x0", "label": "OKAY" },
+        { "mask": "0x3", "value": "0x1", "label": "EXOKAY" },
+        { "mask": "0x3", "value": "0x2", "label": "SLVERR" },
+        { "mask": "0x3", "value": "0x3", "label": "DECERR" }
+      ]
+    }
+  ]
+}

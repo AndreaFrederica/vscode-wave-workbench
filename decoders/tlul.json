@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "label": "TL-UL",
+  "profiles": [
+    {
+      "id": "tlul-a", "label": "TL-UL A opcode", "width": 3,
+      "rules": [
+        { "mask": "0x7", "value": "0x0", "label": "PutFullData" },
+        { "mask": "0x7", "value": "0x1", "label": "PutPartialData" },
+        { "mask": "0x7", "value": "0x4", "label": "Get" }
+      ]
+    },
+    {
+      "id": "tlul-d", "label": "TL-UL D opcode", "width": 3,
+      "rules": [
+        { "mask": "0x7", "value": "0x0", "label": "AccessAck" },
+        { "mask": "0x7", "value": "0x1", "label": "AccessAckData" }
+      ]
+    }
+  ]
+}

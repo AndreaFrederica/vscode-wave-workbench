@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "label": "UART",
+  "profiles": [
+    {
+      "id": "uart-serial",
+      "label": "UART 串行帧 · 115200 8N1",
+      "width": 1,
+      "uart": {
+        "baud": 115200,
+        "dataBits": 8,
+        "parity": "none",
+        "stopBits": 1,
+        "bitOrder": "lsb",
+        "inverted": false
+      }
+    },
+    {
+      "id": "uart-byte",
+      "label": "UART 数据字节",
+      "width": 8,
+      "rules": [
+        {
+          "mask": "0xff",
+          "value": "0xa",
+          "label": "LF"
+        },
+        {
+          "mask": "0xff",
+          "value": "0xd",
+          "label": "CR"
+        },
+        {
+          "mask": "0x0",
+          "value": "0x0",
+          "label": "UART {7:0:hex}"
+        }
+      ]
+    }
+  ]
+}

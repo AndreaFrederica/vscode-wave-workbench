@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import type { Annotation, DecoderProfile } from "./decoders";
+import type { TagColors, TagStyle } from "./tags";
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -70,6 +71,18 @@ export interface Location {
 }
 export type SavedSignal = Pick<Signal, "id" | "scope" | "name"> &
   Partial<Signal>;
+export type TaggedSignal = Pick<
+  SavedSignal,
+  "id" | "scope" | "name" | "displayName" | "bitOffset"
+> & {
+  instanceScope: string;
+  tags: string[];
+};
+export interface TagState {
+  taggedSignals: TaggedSignal[];
+  tagColors: TagColors;
+  tagStyle: TagStyle;
+}
 export interface WaveState {
   chosen: SavedSignal[];
   start: number;
@@ -80,10 +93,13 @@ export interface WaveState {
   markersVisible?: boolean;
   tooltipEnabled?: boolean;
   showInlineTags?: boolean;
+  tagColors?: TagColors;
+  tagStyle?: TagStyle;
   showDecodedValues?: boolean;
   busLabelMode?: BusLabelMode;
   rowHeight?: number;
   namesFraction?: number;
+  valueFraction?: number;
   radix: Radix;
   displayScale: string | null;
   displayFactor: number;

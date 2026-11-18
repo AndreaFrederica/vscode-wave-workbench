@@ -14,7 +14,7 @@ const baseKey = (s: Pick<Signal, "id" | "scope" | "name">) =>
 const key = (s: Pick<Signal, "id" | "scope" | "name" | "bitOffset">) =>
   baseKey(s) +
   (Number.isInteger(s.bitOffset) ? "\u0000bit:" + s.bitOffset : "");
-function label(s: Signal) {
+function label(s: Pick<Signal, "name" | "displayName" | "bitOffset">) {
   if (s.displayName) return s.displayName;
   if (typeof s.bitOffset !== "number" || !Number.isInteger(s.bitOffset))
     return s.name;

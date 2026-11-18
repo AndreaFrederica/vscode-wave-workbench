@@ -10,7 +10,10 @@ import type {
   Location,
   Metadata,
   WaveClip,
+  TagState,
+  WaveState,
 } from "./shared/protocol";
+import { normalizeTagColors, tagStyle } from "./shared/tags";
 import * as vscode from "vscode";
 import * as path from "node:path";
 import * as fs from "node:fs";
@@ -25,7 +28,7 @@ import {
 } from "./rtl-selection";
 import { restoreView } from "./view-state";
 import { readWaveProject, saveWaveProject } from "./project";
-import { loadDecoderProfiles } from "./decoder-config";
+import { createDecoderGroup, loadDecoderProfiles } from "./decoder-config";
 import {
   builtinProfiles,
   decodeWord,
@@ -69,6 +72,38 @@ function activate(context: vscode.ExtensionContext) {
     syncGeneration = 0,
     suppressEditorSync = 0;
   const sourceFiles = new SourceFiles();
+  const sidebarTags = new WeakMap<
+    Viewer,
+    { signature: string; state: TagState }
+  >();
+  function updateSidebarTags(viewer: Viewer, view: WaveState) {
+    const mappings = vscode.workspace
+      .getConfiguration("waveWorkbench", viewer.uri)
+      .get<Record<string, string>>("hierarchyMappings");
+    const state: TagState = {
+      tagStyle: tagStyle(view.tagStyle),
+      tagColors: normalizeTagColors(view.tagColors),
+      taggedSignals: view.chosen.flatMap((signal) => {
+        if (!signal.annotation?.tags.length) return [];
+        const { id, scope, name, displayName, bitOffset } = signal;
+        return [
+          {
+            id,
+            scope,
+            name,
+            displayName,
+            bitOffset,
+            instanceScope: mapPrefix(scope, mappings),
+            tags: signal.annotation.tags,
+          },
+        ];
+      }),
+    };
+    const signature = JSON.stringify(state);
+    if (sidebarTags.get(viewer)?.signature === signature) return;
+    sidebarTags.set(viewer, { signature, state });
+    if (viewer === current) sidebar.refresh();
+  }
   function dumpScope(viewer: Viewer, scope: string) {
     const mappings =
       vscode.workspace
@@ -588,6 +623,7 @@ function activate(context: vscode.ExtensionContext) {
         title: path.basename(v.uri.fsPath),
         ready: !!v.meta,
         kdb: v.kdb?.path || "",
+        backend: v.backendKind,
         running: !!v.running,
       })),
       activeId: current?.uri.toString() || "",
@@ -596,18 +632,53 @@ function activate(context: vscode.ExtensionContext) {
       includeOther: !!current?.includeOther,
       revealScope: current?.revealScope || "",
       revealId: current?.revealId || 0,
+      tagState: current && sidebarTags.get(current)?.state,
     }),
     tree: sidebarTree,
     scopeSignals: async (m) => {
-      if (!current?.meta)
+      const viewer = current;
+      if (!viewer?.meta)
         return { scope: m.scope, total: 0, signals: [], offset: 0 };
-      return current.backend.request("scopeSignals", {
-        query: m.scope,
+      const result = await viewer.backend.request("scopeSignals", {
+        query: dumpScope(viewer, m.scope),
         offset: Math.max(0, m.offset || 0),
-        limit: 512,
+        limit: Number.isInteger(m.limit)
+          ? Math.max(1, Math.min(512, m.limit))
+          : 512,
       });
+      return { ...result, scope: m.scope };
     },
-    addSignals: async (signals) => {
+    taggedFocus: async (reference) => {
+      const viewer = current;
+      const signal =
+        viewer &&
+        sidebarTags
+          .get(viewer)
+          ?.state.taggedSignals.find(
+            (entry) => WaveSignal.key(entry) === WaveSignal.key(reference),
+          );
+      if (!signal) return;
+      viewer.panel.reveal(vscode.ViewColumn.Two ?? 2, true);
+      await viewer.ui("selectSignals", { signals: [signal], reveal: true });
+      if (
+        viewer.kdb &&
+        signal.instanceScope &&
+        !signal.instanceScope.startsWith("$")
+      )
+        await revealScope(
+          viewer,
+          signal.instanceScope,
+          () => current === viewer && !viewer.disposed,
+        );
+    },
+    tagAppearance: async (options) => {
+      const viewer = current;
+      if (!viewer?.meta) return;
+      if (!viewer.panel.visible)
+        viewer.panel.reveal(vscode.ViewColumn.Two ?? 2, true);
+      await viewer.ui("tagAppearance", options);
+    },
+    addSignals: async (signals, editAnnotation) => {
       const viewer = current;
       if (!viewer) return;
       const resolved = await viewer.backend.request("describe", {
@@ -616,8 +687,9 @@ function activate(context: vscode.ExtensionContext) {
       await viewer.panel.webview.postMessage({
         type: "sidebarAdd",
         signals: resolved.filter((s) => s.supported),
+        editAnnotation,
       });
-      viewer.panel.reveal(vscode.ViewColumn.Two ?? 2, true);
+      viewer.panel.reveal(vscode.ViewColumn.Two ?? 2, !editAnnotation);
     },
     visibility: (visible) => {
       for (const viewer of viewers)
@@ -880,33 +952,9 @@ function activate(context: vscode.ExtensionContext) {
     return root ? path.join(root, ".vscode", "wave-decoders.json") : undefined;
   }
   async function editDecoderConfig(viewer: Viewer) {
-    const filename = decoderConfigPath(viewer);
-    if (!filename) throw Error("请先打开工作区文件夹");
-    await fs.promises.mkdir(path.dirname(filename), { recursive: true });
-    const example = {
-      version: 1,
-      profiles: [
-        { id: "cv32-id", label: "CV32 · ID 指令", builtin: "rv32-zfinx" },
-        {
-          id: "request-state",
-          label: "请求状态",
-          width: 2,
-          rules: [
-            { mask: "0x3", value: "0x0", label: "Idle" },
-            { mask: "0x3", value: "0x1", label: "Request" },
-            { mask: "0x3", value: "0x2", label: "Wait" },
-            { mask: "0x3", value: "0x3", label: "Done" },
-          ],
-        },
-      ],
-    };
-    await fs.promises
-      .writeFile(filename, JSON.stringify(example, null, 2) + "\n", {
-        flag: "wx",
-      })
-      .catch((error) => {
-        if (error.code !== "EEXIST") throw error;
-      });
+    const legacy = decoderConfigPath(viewer);
+    if (!legacy) throw Error("请先打开工作区文件夹");
+    const filename = await createDecoderGroup(legacy);
     await vscode.window.showTextDocument(
       await vscode.workspace.openTextDocument(filename),
     );
@@ -1195,6 +1243,8 @@ function activate(context: vscode.ExtensionContext) {
       openRecent,
       selectDecoder,
       editDecoderConfig,
+      decoderConfigPath,
+      updateSidebarTags,
       saveActiveProject,
       openProject,
       chooseClipExport,

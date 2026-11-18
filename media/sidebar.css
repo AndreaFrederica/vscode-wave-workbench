@@ -5,6 +5,61 @@ body.vscode-light,body.vscode-high-contrast-light{color-scheme:light}body.vscode
 
 .instanceRow.selected .moduleName{color:inherit}
 
-#sidebarScope{font-weight:600;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;padding:6px 0}#sidebarSignals{position:relative;height:20vh;min-height:96px;overflow:auto;margin:6px 0 12px;overflow-anchor:none}#signalRows{position:absolute;left:0;right:0;overflow:hidden}#signalRows button{position:absolute;left:0;right:0;width:100%;height:24px;padding:0 4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;border:0;background:transparent}#signalRows button.selected{background:var(--vscode-list-activeSelectionBackground,#094771);color:var(--vscode-list-activeSelectionForeground,white)}
+#sidebarScope{font-weight:600;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;padding:6px 0}#sidebarSignals{position:relative;height:20vh;min-height:96px;overflow:auto;margin:6px 0 12px;overflow-anchor:none}#signalRows{position:absolute;left:0;display:grid;width:max-content;min-width:100%}#signalRows button{min-width:max-content;height:24px;padding:0 4px;white-space:nowrap;text-align:left;border:0;background:transparent}#signalRows button.selected{background:var(--vscode-list-activeSelectionBackground,#094771);color:var(--vscode-list-activeSelectionForeground,white)}
 
 .objectFilter{font-size:11px;font-weight:normal;display:flex;align-items:center;gap:4px}.objectFilter input{margin:0}.objectIcon{width:16px;height:16px;flex:0 0 16px;margin-inline:2px;overflow:visible;color:var(--vscode-symbolIcon-moduleForeground,#9cdcfe)}.objectIcon path{fill:none;stroke:currentColor;stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.objectIcon.interface{color:var(--vscode-symbolIcon-interfaceForeground,#75beff)}.objectIcon.generate{color:var(--vscode-symbolIcon-folderForeground,#dcb67a)}.objectIcon.package{color:var(--vscode-symbolIcon-namespaceForeground,#c586c0)}.objectIcon.function,.objectIcon.task{color:var(--vscode-symbolIcon-functionForeground,#c586c0)}.objectIcon.scope{color:var(--vscode-symbolIcon-variableForeground,#9cdcfe)}.instanceRow.selected .objectIcon{color:inherit}.instanceRow{border-bottom:1px solid var(--vscode-tree-tableColumnsBorder,#8882)}.instanceRow .moduleName{border-left:1px solid var(--vscode-tree-tableColumnsBorder,#8882);padding-left:4px}.instanceRow .expand{width:16px}.instanceRow .instanceName{font-size:12px}
+
+
+.signalTags { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 10px; }
+.tagBadge { flex: none; line-height: 1.2; }
+.tagStyle-pill .tagBadge {
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--tag-color) 52%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--tag-color) 15%, transparent);
+}
+.tagStyle-text .tagBadge { color: color-mix(in srgb, var(--tag-color) 70%, currentColor); }
+.tagStyle-dot .tagBadge {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tag-color);
+  color: transparent;
+  font-size: 0;
+}
+.tagOverflow { color: var(--vscode-descriptionForeground, inherit); flex: none; }
+
+#taggedPanel { border-block: 1px solid var(--vscode-panel-border, #8885); padding-block: 8px; margin-block: 10px 14px; }
+#taggedPanel > summary { cursor: pointer; font-weight: 600; }
+#taggedCount { color: var(--vscode-descriptionForeground, inherit); font-size: 11px; font-weight: normal; margin-inline-start: 6px; }
+.taggedControls { display: flex; align-items: center; gap: 5px; margin-block: 8px; }
+.taggedControls select { flex: 1; min-width: 0; padding: 4px; font-size: 11px; }
+#tagColor { flex: 0 0 28px; width: 28px; height: 27px; padding: 0; }
+#tagColor:disabled { opacity: .4; }
+#taggedRows { max-height: 28vh; overflow: auto; }
+.taggedSignal { width: 100%; text-align: start; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 5px 4px; background: transparent; border: 0; }
+.taggedSignal:hover { background: var(--vscode-list-hoverBackground, #8882); }
+.taggedSignalName, .taggedSignalScope { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.taggedSignalScope { color: var(--vscode-descriptionForeground, inherit); font-size: 10px; }
+.taggedEmpty { padding: 5px 4px; color: var(--vscode-descriptionForeground, inherit); font-size: 11px; }
+#taggedMore { display: block; margin: 4px auto 0; padding: 3px 6px; font-size: 11px; }
+#taggedMore[hidden] { display: none; }
+.instanceRow .instanceTags { max-width: 36%; flex: 0 1 auto; }
+#signalRows button { display: flex; align-items: center; gap: 5px; }
+#signalRows .scopeSignalName { flex: 1; }
+
+
+.instanceFilters { display: flex; flex-wrap: wrap; column-gap: 12px; }
+.treeSignal .instanceName { padding-inline-start: 0; }
+.treeSignal .signalTags { max-width: 52%; }
+.treeSignal .treeSignalIcon {
+  flex: 0 0 16px;
+  text-align: center;
+  color: var(--vscode-symbolIcon-variableForeground, #9cdcfe);
+}
+.treeSignal .treeSignalEdit {
+  flex: 0 0 24px;
+  margin-inline-end: 4px;
+  color: var(--vscode-descriptionForeground, inherit);
+}
+.treeSignalMore .instanceName { color: var(--vscode-descriptionForeground, inherit); }
