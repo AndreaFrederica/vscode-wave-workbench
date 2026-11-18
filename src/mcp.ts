@@ -342,7 +342,7 @@ async function stdio(workspace: string) {
           ? version
           : supportedVersions[0],
         capabilities: { tools: {} },
-        serverInfo: { name: "wave-workbench", version: "0.9.5" },
+        serverInfo: { name: "wave-workbench", version: "0.9.6" },
       };
     } else if (request.method === "ping") response.result = {};
     else if (request.method === "tools/list")

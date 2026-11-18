@@ -15,12 +15,17 @@ import * as vscode from "vscode";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as crypto from "node:crypto";
-import { identifiers, resolveSelection, codeOnly } from "./rtl-selection";
+import {
+  identifiers,
+  resolveSelection,
+  codeOnly,
+  portConnection,
+} from "./rtl-selection";
 import { registerVirtuals, restoreView } from "./view-state";
 import { readWaveProject, saveWaveProject } from "./project";
 import { loadDecoderProfiles } from "./decoder-config";
 import { decodeWord, supportsProfile } from "./shared/decoders";
-import { findSignal, readSignalAt } from "./signal-lookup";
+import { findRtlSignals, readSignalsAt } from "./signal-lookup";
 import { serveWaveMcp } from "./mcp";
 import {
   clipFormats,
@@ -36,6 +41,15 @@ import { Sidebar } from "./sidebar";
 import { WaveCommands, HELP, formatValue, quote } from "./commands";
 import { moduleAt, commonScope, SourceFiles } from "./source-sync";
 import { TclRunner } from "./tcl";
+
+function rtlValue(raw: string, width: number) {
+  const shown =
+    width > 1 && /^[01xz]+$/i.test(raw)
+      ? "0x" + formatValue(raw, width, "Hex", true)
+      : raw;
+  return shown.length > 256 ? shown.slice(0, 256) + "…" : shown;
+}
+
 function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel("Wave Workbench");
   context.subscriptions.push(output);
@@ -126,6 +140,64 @@ function activate(context: vscode.ExtensionContext) {
     vscode.TextDocument,
     { version: number; text: string; code: string }
   >();
+  async function connectedInstance(
+    viewer: Viewer,
+    parent: string,
+    name: string,
+    file: string,
+    line: number,
+    valid: () => boolean,
+  ) {
+    const session = viewer.kdb;
+    const mappings = vscode.workspace
+      .getConfiguration("waveWorkbench", viewer.uri)
+      .get<Record<string, string>>("sourcePathMappings");
+    async function matches(fullname: string) {
+      const record = await session.resolve(fullname).catch((error) => {
+        if (!String(error.message).startsWith("KDB object not found:"))
+          throw error;
+        return undefined;
+      });
+      return (
+        valid() &&
+        record?.fullname === fullname &&
+        ["npiModule", "npiInterface"].includes(record.kind) &&
+        record.line === line &&
+        !!record.file &&
+        sourceFiles.same(
+          file,
+          path.resolve(
+            path.dirname(session.path),
+            mapPrefix(record.file, mappings),
+          ),
+        )
+      );
+    }
+    const direct = parent + "." + name;
+    if (await matches(direct)) return direct;
+    const scopes = [parent];
+    const candidates: string[] = [];
+    for (const scope of scopes) {
+      if (!valid()) return;
+      for (const child of await session.children(scope, true)) {
+        if (child.kind === "npiGenScope") scopes.push(child.fullname);
+        else if (
+          child.fullname !== direct &&
+          child.fullname.endsWith("." + name) &&
+          ["npiModule", "npiInterface"].includes(child.kind) &&
+          (await matches(child.fullname))
+        )
+          candidates.push(child.fullname);
+      }
+    }
+    return candidates.length === 1
+      ? candidates[0]
+      : candidates.find(
+          (scope) =>
+            viewer.selectedScope === scope ||
+            viewer.selectedScope.startsWith(scope + "."),
+        );
+  }
   async function provideRtlHover(
     document: vscode.TextDocument,
     position: vscode.Position,
@@ -163,11 +235,15 @@ function activate(context: vscode.ExtensionContext) {
       return;
     const line = document.lineAt(position.line).text;
     const before = line.slice(0, nameRange.start.character).trimEnd();
-    if (/(?:[.`\\]|::)$/.test(before)) return;
     const after = line.slice(nameRange.end.character);
-    if (/^\s*(?:::|\.|\()/.test(after)) return;
-    const index = /^\s*\[\s*(-?\d+)\s*\]/.exec(after);
-    const target = index ? `${name}[${index[1]}]` : name;
+    const connection = portConnection(source.text, source.code, start, end);
+    if (
+      !connection?.portAtCursor &&
+      (/(?:[.`\\]|::)$/.test(before) || /^\s*(?:::|\.|\()/.test(after))
+    )
+      return;
+    const indices = /^(?:\s*\[\s*-?\d+\s*\])*/.exec(after)[0];
+    const target = name + indices.replace(/\s/g, "");
     const module = moduleAt(source.text, position.line);
     if (!module) return;
 
@@ -199,35 +275,73 @@ function activate(context: vscode.ExtensionContext) {
       );
 
     const scope = dumpScope(viewer, instance.fullname);
-    const signal = await findSignal(viewer.backend, `${scope}.${target}`);
-    if (!valid() || !signal.supported) return;
-    const raw = await readSignalAt(viewer.backend, signal, cursor.tick);
-    if (!valid() || raw === undefined) return;
+    const child =
+      connection &&
+      (await connectedInstance(
+        viewer,
+        instance.fullname,
+        connection.instance,
+        file,
+        document.positionAt(connection.instanceOffset).line + 1,
+        valid,
+      ));
+    if (!valid() || (connection?.portAtCursor && !child)) return;
+    const targets =
+      connection && child
+        ? [
+            { scope: dumpScope(viewer, child), name: connection.port },
+            ...(connection.actual ? [{ scope, name: connection.actual }] : []),
+          ]
+        : [{ scope, name: target }];
+    if (connection && !connection.portAtCursor) targets.reverse();
+    const groups = await Promise.all(
+      targets.map(async (target) => ({
+        ...target,
+        ...(await findRtlSignals(viewer.backend, target.scope, target.name)),
+      })),
+    );
+    const signals = groups.flatMap((group) => group.signals);
+    if (!valid() || !signals.length) return;
+    const values = await readSignalsAt(viewer.backend, signals, cursor.tick);
+    if (!valid() || values.every((value) => value === undefined)) return;
     const unit = cursor.displayScale || viewer.meta.scale;
     const time = Number((cursor.tick / cursor.displayFactor).toPrecision(15));
-    const style = viewer.document.view?.chosen.find(
-      (entry) => WaveSignal.key(entry) === WaveSignal.key(signal),
-    );
-    const decoded =
-      style?.decoder && decodeWord(style.decoder, raw, signal.width);
     const markdown = new vscode.MarkdownString();
     markdown.appendMarkdown("**Wave Workbench · 游标 A**\n\n");
     markdown.appendText(
       `${time} × ${unit} · ${path.basename(viewer.uri.fsPath)}`,
     );
     markdown.appendMarkdown("\n\n");
+    const [signal] = signals;
+    if (groups.length > 1 || signals.length > 1 || groups[0].partial) {
+      let offset = 0;
+      for (const group of groups) {
+        const rows = group.signals.map((member, index) => {
+          const value = values[offset + index];
+          return `${member.name} = ${value === undefined ? "—" : rtlValue(value, member.width)}`;
+        });
+        offset += group.signals.length;
+        if (!rows.length) continue;
+        markdown.appendCodeblock(
+          [`${group.scope}.${group.name}`, ...rows].join("\n"),
+          "text",
+        );
+        if (group.partial) markdown.appendText("仅显示部分已记录元素");
+      }
+      return new vscode.Hover(markdown, nameRange);
+    }
+    const [raw] = values;
+    const style = viewer.document.view?.chosen.find(
+      (entry) => WaveSignal.key(entry) === WaveSignal.key(signal),
+    );
+    const decoded =
+      style?.decoder && decodeWord(style.decoder, raw, signal.width);
     markdown.appendCodeblock(
       `${signal.scope}.${WaveSignal.label(signal)}`,
       "text",
     );
     const bits = /^[01xz]+$/i.test(raw);
-    const shown =
-      bits && signal.width > 1
-        ? "0x" + formatValue(raw, signal.width, "Hex", true)
-        : raw;
-    markdown.appendText(
-      `值  ${shown.length > 256 ? shown.slice(0, 256) + "…" : shown}`,
-    );
+    markdown.appendText(`值  ${rtlValue(raw, signal.width)}`);
     if (bits && signal.width > 1 && signal.width <= 128) {
       markdown.appendMarkdown("\n\n");
       markdown.appendText(

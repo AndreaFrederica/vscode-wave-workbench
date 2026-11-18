@@ -49,6 +49,47 @@ function identifiers(text: string) {
   }
   return out;
 }
+
+function portConnection(
+  text: string,
+  code: string,
+  start: number,
+  end: number,
+) {
+  const statementStart = code.lastIndexOf(";", start - 1) + 1;
+  const prefix = code.slice(statementStart, start);
+  const portAtCursor = /\.\s*$/.test(prefix) && /^\s*\(/.test(code.slice(end));
+  const openings: number[] = [];
+  for (const match of prefix.matchAll(/[()]/g)) {
+    if (match[0] === "(") openings.push(statementStart + match.index);
+    else openings.pop();
+  }
+
+  const argument = portAtCursor ? code.indexOf("(", end) : openings.pop();
+  const list = openings.pop();
+  if (argument === undefined || list === undefined) return;
+  const instance = /([a-zA-Z_$][\w$]*)\s*$/.exec(
+    code.slice(statementStart, list),
+  );
+  if (!instance) return;
+  const port = /(?:^\s*|,\s*)\.\s*([a-zA-Z_$][\w$]*)\s*$/.exec(
+    code.slice(list + 1, argument),
+  );
+  if (!port) return;
+
+  // Only a complete direct signal connection can stand in for the other endpoint.
+  const direct = /^\s*([a-zA-Z_$][\w$]*(?:\s*\[\s*-?\d+\s*\])*)\s*\)/.exec(
+    text.slice(argument + 1),
+  );
+  if (!portAtCursor && (!direct || end > argument + direct[0].length)) return;
+  return {
+    instance: instance[1],
+    instanceOffset: statementStart + instance.index,
+    port: port[1],
+    actual: direct?.[1].replace(/\s/g, ""),
+    portAtCursor,
+  };
+}
 async function resolveSelection(backend: Backend, names: string[], scope = "") {
   const lookups = new Set(names);
   for (const name of names) {
@@ -111,4 +152,4 @@ async function resolveSelection(backend: Backend, names: string[], scope = "") {
     truncated: result.truncated,
   };
 }
-export { identifiers, resolveSelection, codeOnly };
+export { identifiers, resolveSelection, codeOnly, portConnection };

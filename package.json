@@ -1,7 +1,7 @@
 {
   "name": "wave-workbench",
   "displayName": "Wave Workbench — FSDB / KDB / nWave",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "publisher": "local-hdl",
   "description": "Native FSDB/KDB waveform viewer with nWave Tcl commands and Vide interoperability.",
   "license": "MPL-2.0",
