@@ -53,6 +53,8 @@ WAVE_TEST_BACKEND="$PWD/independent_backend/backend.py" \
 
 Rust 的第一步是读取 FSDB 文件头、声明快照、时间窗口、块索引和字典位置。可用 `fsdb-inspect` 将这些字段与 Python 读取器逐项对照。
 
+`native/src/fsdb_container/` 中，`mod.rs` 提供容器入口，`header.rs` 校验文件头，`directory.rs` 解析声明快照、时间窗口和块目录，`reader.rs` 负责带边界检查的字节读取。
+
 ```sh
 cargo build --locked --manifest-path native/Cargo.toml --bin fsdb-inspect
 python3 test/compare-fsdb-container.py native/target/debug/fsdb-inspect /path/to/simulation.fsdb
