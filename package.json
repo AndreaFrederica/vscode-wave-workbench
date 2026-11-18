@@ -151,10 +151,6 @@
         "command": "waveWorkbench.selectBackend",
         "title": "Wave Workbench: 选择 FSDB 后端…",
         "icon": "$(server-process)"
-      },
-      {
-        "command": "waveWorkbench.compareBackends",
-        "title": "Wave Workbench: 调试对比 Verdi 与独立后端…"
       }
     ],
     "menus": {
@@ -200,11 +196,6 @@
           "command": "waveWorkbench.addSelection",
           "when": "editorLangId == systemverilog || editorLangId == verilog",
           "group": "navigation@3"
-        },
-        {
-          "command": "waveWorkbench.compareBackends",
-          "when": "activeCustomEditorId == waveWorkbench.viewer && resourceExtname == .fsdb",
-          "group": "waveDebug@1"
         }
       ],
       "view/title": [

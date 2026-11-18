@@ -35,7 +35,7 @@ Queries use integer ticks and can include a prior event to seed the value at the
 
 ## How FSDB and KDB are decoded
 
-WaveBench Reader infers FSDB and KDB record layouts from observations of files produced by controlled RTL simulations. The project checks those interpretations against sample files. Some differential tests compare the resulting values and source locations with outputs from Verdi's Reader and NPI APIs.
+WaveBench Reader infers FSDB and KDB record layouts from observations of files produced by controlled RTL simulations. The project checks those interpretations against sample files.
 
 The default Cargo build is independent of Verdi code and the Verdi SDK. The opt-in `verdi-sdk` Cargo feature builds the C++ bridge against a locally installed SDK.
 

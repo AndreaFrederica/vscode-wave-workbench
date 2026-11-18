@@ -16,6 +16,3 @@ dist/**/*.map
 type-tests/**
 .github/**
 **/__pycache__/**
-
-independent_backend/**
-!independent_backend/README.md

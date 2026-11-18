@@ -4,7 +4,6 @@
 
 - Rust：VCD 指令/总线/别名/同 tick 更新、窗口初值、截断、非法时间等 3 项单元测试。
 - Node：VCD 协议、真实 FSDB 原生读取、前缀映射、真实 KDB 层次与定位、宿主适配层打开真实源码等 5 项测试。
-- 原生 FSDB 与转换参考逐项比较：1195 个数字信号通过，包括总线位序及各事件时间上的稳定值。
 - 浏览器：VCD 操作；真实 FSDB + NPI/KDB 接入、层次浏览、信号声明解析。测试桥接取代 VS Code 消息通道，不代表已在真实 IDE 中完成所有联调。
 
 实际匹配数据：`build/cv32e40p_mac_trace_vcs/latest/{waves.fsdb,simv.daidir}`。KDB 返回的位置经读取源码行验证：
