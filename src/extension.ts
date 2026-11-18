@@ -10,7 +10,9 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import * as crypto from "node:crypto";
 import { identifiers, resolveSelection, codeOnly } from "./rtl-selection";
-import { registerVirtuals } from "./view-state";
+import { registerVirtuals, restoreView } from "./view-state";
+import { readWaveProject, saveWaveProject } from "./project";
+import { serveWaveMcp } from "./mcp";
 import * as WaveSignal from "./shared/signals";
 import { Backend } from "./backend";
 import { KdbSession, mapPrefix } from "./kdb";
@@ -23,6 +25,7 @@ function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(output);
   const viewers = new Set<Viewer>();
   let current: Viewer, sidebar: Sidebar;
+  const tclOutput = new Map<Viewer, string[]>();
   let syncTimer: ReturnType<typeof setTimeout>,
     syncGeneration = 0,
     suppressEditorSync = 0;
@@ -446,6 +449,8 @@ function activate(context: vscode.ExtensionContext) {
               .getConfiguration("waveWorkbench")
               .get<string>("tclshPath") || "/usr/bin/tclsh",
           log: (text) => {
+            const lines = tclOutput.get(viewer);
+            if (lines && lines.length < 500) lines.push(text.slice(0, 4096));
             output.appendLine(text);
             logTcl(viewer, text);
           },
@@ -470,6 +475,55 @@ function activate(context: vscode.ExtensionContext) {
       viewer.running = false;
       sidebar.refresh();
     }
+  }
+  async function saveProject(viewer: Viewer, filename?: string) {
+    if (!viewer) throw new Error("先打开波形");
+    await viewer.ready;
+    filename ||= (
+      await vscode.window.showSaveDialog({
+        defaultUri: vscode.Uri.file(
+          viewer.uri.fsPath.replace(/\.[^.]+$/, "") + ".waveproj",
+        ),
+        filters: { "Wave Workbench": ["waveproj"] },
+      })
+    )?.fsPath;
+    if (!filename) return;
+    if (!filename.endsWith(".waveproj")) filename += ".waveproj";
+    await saveWaveProject(
+      filename,
+      viewer.uri.fsPath,
+      await viewer.ui("snapshot"),
+      viewer.kdb?.path,
+    );
+    return filename;
+  }
+  async function openProject(filename?: string) {
+    filename ||= (
+      await vscode.window.showOpenDialog({
+        filters: { "Wave Workbench": ["waveproj"] },
+        canSelectMany: false,
+      })
+    )?.[0]?.fsPath;
+    if (!filename) return;
+    const project = await readWaveProject(filename);
+    if (
+      !/\.(fsdb|vcd)$/i.test(project.waveform) ||
+      !fs.existsSync(project.waveform)
+    )
+      throw Error("Waveform not found: " + project.waveform);
+    const viewer = await openWaveform(project.waveform);
+    if (!viewer) throw Error("无法打开工程的波形");
+    const view = await restoreView(viewer.backend, project.view, viewer.meta);
+    if (
+      project.kdb &&
+      (!viewer.kdb || path.resolve(viewer.kdb.path) !== project.kdb)
+    ) {
+      if (fs.existsSync(project.kdb)) await viewer.attachKdb(project.kdb);
+      else output.appendLine("Wave project KDB not found: " + project.kdb);
+    }
+    await viewer.ui("restoreView", view);
+    current = viewer;
+    return viewer;
   }
   async function runScript(uri?: vscode.Uri) {
     uri ||= (
@@ -734,9 +788,11 @@ function activate(context: vscode.ExtensionContext) {
                 "simv.daidir",
               );
               const database =
-                cfg.get<string>("kdbPath") ||
-                context.workspaceState.get(`kdb:${document.uri.toString()}`) ||
-                (fs.existsSync(sibling) ? sibling : null);
+                context.workspaceState.get<string>(
+                  `kdb:${document.uri.toString()}`,
+                ) ||
+                (fs.existsSync(sibling) ? sibling : null) ||
+                cfg.get<string>("kdbPath");
               try {
                 if (database && !viewer.kdb) await viewer.attachKdb(database);
               } finally {
@@ -757,6 +813,10 @@ function activate(context: vscode.ExtensionContext) {
               await executeTcl(viewer, msg.script);
             } else if (msg.type === "openWaveform") {
               await openWaveform(undefined, { picker: true });
+            } else if (msg.type === "saveProject") {
+              await saveProject(viewer);
+            } else if (msg.type === "openProject") {
+              await openProject();
             } else if (msg.type === "runScript") {
               await runScript();
             } else if (msg.type === "attachKdb") {
@@ -958,6 +1018,8 @@ function activate(context: vscode.ExtensionContext) {
     openPicker: () => openWaveform(undefined, { picker: true }),
     openLast: () => openWaveform(),
     runScript: (uri) => runScript(uri),
+    saveProject: () => saveProject(current),
+    openProject: (uri) => openProject(uri?.fsPath),
     runTcl: async () => {
       if (!current) await openWaveform();
       if (!current) return;
@@ -1193,6 +1255,66 @@ function activate(context: vscode.ExtensionContext) {
       }
     }),
   );
+  const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (
+    workspace &&
+    process.platform !== "win32" &&
+    vscode.workspace
+      .getConfiguration("waveWorkbench")
+      .get<boolean>("mcpEnabled")
+  ) {
+    try {
+      context.subscriptions.push(
+        serveWaveMcp(
+          workspace,
+          async (name, args) => {
+            if (name === "wave_list")
+              return {
+                selected: current?.uri.fsPath ?? null,
+                views: [...viewers].map((v) => v.uri.fsPath),
+              };
+            if (name === "wave_open") {
+              const filename = path.resolve(workspace, String(args.path));
+              if (
+                !/\.(fsdb|vcd|waveproj)$/i.test(filename) ||
+                !fs.existsSync(filename)
+              )
+                throw Error("Waveform or project not found: " + filename);
+              const viewer = /\.waveproj$/i.test(filename)
+                ? await openProject(filename)
+                : await openWaveform(filename);
+              if (!viewer) throw Error("Unable to open waveform");
+              return { waveform: viewer.uri.fsPath, scale: viewer.meta.scale };
+            }
+            const viewer = args.waveform
+              ? [...viewers].find((v) => v.uri.fsPath === args.waveform)
+              : current;
+            if (!viewer) throw Error("Open a waveform first");
+            if (name === "wave_save_project") {
+              const filename = await saveProject(
+                viewer,
+                path.resolve(workspace, String(args.path)),
+              );
+              return { path: filename };
+            }
+            if (viewer.running || tclOutput.has(viewer))
+              throw Error("A Tcl script is running in this view");
+            const logs: string[] = [];
+            tclOutput.set(viewer, logs);
+            try {
+              const result = await executeTcl(viewer, String(args.script));
+              return { result, logs };
+            } finally {
+              tclOutput.delete(viewer);
+            }
+          },
+          (message) => output.appendLine(String(message)),
+        ),
+      );
+    } catch (error) {
+      output.appendLine(String(error));
+    }
+  }
   context.subscriptions.push({
     dispose() {
       for (const v of viewers) {

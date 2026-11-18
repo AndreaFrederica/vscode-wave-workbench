@@ -98,3 +98,34 @@ source /absolute/path/to/doc/cv32e40p_mac_trace/verdi_cv32e40p_mac.tcl
 `waveRestoreView json` 是 Wave Workbench 自有的 Tcl 重放扩展。带位行或虚拟信号的 `wvSaveSignal` 使用该扩展保留位下标、Bus 折叠和组/显示设置；原生 Verdi 不认识这个命令。超过现有 1 MiB Tcl 脚本限制时会拒绝保存。
 
 虚拟定义通过界面创建，当前尚无 Verdi 逻辑表达式命令兼容层。waveRestoreView 会先校验并注册虚拟依赖，再恢复信号；脚本需要原始输入 ID/名称/层级与当前波形一致。
+
+## 波形工程、布局与 MCP（0.9.0）
+
+「文件 → 保存波形工程」将波形和 KDB 路径、信号、分组、标记、游标、时间范围和显示设置保存到 `.waveproj`。工程通过相对路径引用波形与 KDB。「文件 → 打开波形工程」可恢复视图，也可以在资源管理器中右键工程文件打开。
+
+拖动分组标题到另一个标题的上半或下半可调整顺序。选中信号会将它所属的分组设为后续添加的目标，显式指定的分组优先。工具栏的「悬停提示」可关闭波形提示，「显示」菜单可调行高。拖动信号栏与波形画布之间的分隔线可调宽度，双击恢复默认。
+
+| Tcl 命令 | 用途 |
+| --- | --- |
+| `waveView` | 返回当前视图 JSON |
+| `waveFindSignals query ?offset? ?limit?` | 搜索波形信号，返回分页 JSON |
+| `waveGetEvents signal start end ?limit?` | 提取范围内的信号事件，含范围起点的初始值与截断标志，时间使用当前单位，值为二进制字符串 |
+| `waveGroup list` | 查看分组顺序、目标组与折叠状态 |
+| `waveGroup create/target/remove/collapse/expand name` | 管理分组。目标组使用空名称时，新增信号落入未分组区域 |
+| `waveGroup move name target before/after` | 调整分组顺序 |
+| `waveGroup rename name newName` | 重命名分组 |
+| `waveGroup assign name signal...` | 移动已显示的信号 |
+| `waveTooltip ?0/1?` | 查询或设置悬停提示 |
+| `waveLayout ?rowHeight signalColumnPercent?` | 查询或设置行高和信号栏占比 |
+
+打开工作区后，启用 `waveWorkbench.mcpEnabled` 并重新加载 VS Code。MCP 客户端在运行 VS Code 工作区扩展宿主的机器上，通过 stdio 启动 `node <插件路径>/dist/mcp.js <工作区绝对路径>`。该进程连接当前工作区的用户私有 Unix socket。Remote SSH 使用远端扩展宿主与远端 MCP 进程。
+
+MCP 提供 `wave_list`、`wave_open`、`wave_save_project` 和 `wave_tcl`。`wave_tcl` 运行与侧边栏共用的 Tcl 解释器，返回脚本结果与 `puts` 输出。可使用 Tcl 的变量、过程、循环、表达式和 `source`，可执行的波形命令见 `waveHelp`。命令覆盖范围沿用上文所述的 Wave Workbench 兼容范围。
+
+```tcl
+waveGroup create FPU
+wvAddSignal /tb/dut/apu_req /tb/dut/apu_rvalid
+waveLayout 44 32
+wvZoom 400000 700000
+waveGetEvents /tb/dut/apu_rvalid 400000 700000
+```

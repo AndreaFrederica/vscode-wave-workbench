@@ -16,7 +16,7 @@ import type {
 /* global acquireVsCodeApi */
 const vscode = acquireVsCodeApi<Partial<WaveState>>();
 
-const ROW = 32;
+const DEFAULT_ROW_HEIGHT = 32;
 let colors: string[] = [],
   theme: Record<string, string> = {};
 function readTheme() {
@@ -65,7 +65,36 @@ let signalFilter = saved.signalFilter || "";
 let expandedBuses = new Set(saved.expandedBuses || []);
 let virtualDefinitions = saved.virtualDefinitions || [];
 let markersVisible = saved.markersVisible !== false;
-let timelineHeight = ROW;
+let tooltipEnabled = saved.tooltipEnabled !== false;
+let clearWaveHover: () => void;
+let rowHeight = normalizeRowHeight(saved.rowHeight);
+let namesFraction = normalizeNamesFraction(saved.namesFraction);
+let timelineHeight = DEFAULT_ROW_HEIGHT;
+
+function normalizeRowHeight(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.round(Math.min(80, Math.max(24, value)))
+    : DEFAULT_ROW_HEIGHT;
+}
+function normalizeNamesFraction(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(0.75, Math.max(0.1, value))
+    : undefined;
+}
+function applyTrackLayout() {
+  const tracks = $("tracks");
+  tracks.style.setProperty("--wave-row-height", rowHeight + "px");
+  tracks.style.setProperty(
+    "--wave-names-width",
+    namesFraction === undefined ? "280px" : namesFraction * 100 + "%",
+  );
+  ($("waveRowHeight") as HTMLInputElement).value = String(rowHeight);
+  $("waveSplit").setAttribute(
+    "aria-valuenow",
+    String(Math.round(100 * (namesFraction ?? 0.3))),
+  );
+}
+applyTrackLayout();
 let persistTimer;
 let cursorValues = {},
   cursorFlight = null,
@@ -95,6 +124,9 @@ function persist() {
         radix,
         markers,
         markersVisible,
+        tooltipEnabled,
+        rowHeight,
+        namesFraction,
         displayScale,
         displayFactor,
         collapsedGroups: [...collapsedGroups],
@@ -358,14 +390,19 @@ function selectRow(index: number, event: Partial<MouseEvent> = {}) {
     selectionAnchor = index;
   }
   active = index;
+  activeGroup = chosen[index]?.group || "";
+  persist();
   render();
 }
 function visibleRange() {
   const height = Math.max(1, $("tracks").clientHeight - timelineHeight),
     top = $("tracks").scrollTop;
   return [
-    Math.max(0, Math.floor(top / ROW) - OVERSCAN),
-    Math.min(displayRows.length, Math.ceil((top + height) / ROW) + OVERSCAN),
+    Math.max(0, Math.floor(top / rowHeight) - OVERSCAN),
+    Math.min(
+      displayRows.length,
+      Math.ceil((top + height) / rowHeight) + OVERSCAN,
+    ),
   ];
 }
 function refreshNeeded() {
@@ -424,6 +461,36 @@ function cursorValue(id) {
     return events[valueAt(events, cursorA)]?.[1];
   return cursorValues[id]?.time === cursorA ? cursorValues[id].value : null;
 }
+function activateSignalGroup(signal?: Signal) {
+  if (!signal) return;
+  activeGroup = signal.group || "";
+  if (activeGroup) collapsedGroups.delete(activeGroup);
+}
+function moveGroup(name: string, target: string, after: boolean) {
+  if (!groupOrder.includes(name) || !groupOrder.includes(target))
+    throw Error("分组不存在");
+  if (name === target) return;
+  const order = groupOrder.filter((group) => group !== name);
+  order.splice(order.indexOf(target) + Number(after), 0, name);
+  groupOrder = order;
+  activeGroup = name;
+  request();
+}
+function removeGroup(name: string) {
+  for (const signal of chosen)
+    if (signal.group === name) signal.group = undefined;
+  groupOrder = groupOrder.filter((group) => group !== name);
+  collapsedGroups.delete(name);
+  if (activeGroup === name) activeGroup = "";
+  request();
+}
+function setTooltip(enabled: boolean) {
+  tooltipEnabled = enabled;
+  const button = $("toggleTooltip");
+  button.setAttribute("aria-pressed", String(enabled));
+  if (!enabled) clearWaveHover?.();
+  persist();
+}
 function add(signal) {
   if (chosen.some((s) => key(s) === key(signal))) return;
   if (chosen.length >= MAX_SIGNALS) {
@@ -432,6 +499,7 @@ function add(signal) {
   }
   if (!signal.group && activeGroup) signal.group = activeGroup;
   chosen.push(signal);
+  activateSignalGroup(signal);
   active = chosen.length - 1;
   selectedKeys = new Set([key(signal)]);
   request();
@@ -484,8 +552,8 @@ function ensureActive() {
   rebuildRows();
   const position = displayRows.findIndex((r) => r.index === active),
     tracks = $("tracks"),
-    top = Math.max(0, position) * ROW,
-    bottom = top + ROW;
+    top = Math.max(0, position) * rowHeight,
+    bottom = top + rowHeight;
   if (top < tracks.scrollTop) tracks.scrollTop = top;
   else if (bottom > tracks.scrollTop + tracks.clientHeight - timelineHeight)
     tracks.scrollTop = bottom - (tracks.clientHeight - timelineHeight);
@@ -690,18 +758,19 @@ function render() {
     markersVisible &&
     markers.some((m) => m.name !== "B" && m.time >= start && m.time <= end)
       ? 56
-      : ROW;
+      : DEFAULT_ROW_HEIGHT;
   $("names").querySelector<HTMLElement>(".ruler").style.height =
     timelineHeight + "px";
   $("zoomBox")?.style.setProperty("top", timelineHeight + "px");
   viewportHeight = Math.max(1, $("tracks").clientHeight);
   $("trackContent").style.height =
-    Math.max(viewportHeight, ROW * displayRows.length + timelineHeight) + "px";
+    Math.max(viewportHeight, rowHeight * displayRows.length + timelineHeight) +
+    "px";
   $("plot").style.height = viewportHeight + "px";
   $("tracks").dataset.total = String(chosen.length);
   [firstRow, lastRow] = visibleRange();
   const rows = $("rows");
-  rows.style.top = timelineHeight + firstRow * ROW + "px";
+  rows.style.top = timelineHeight + firstRow * rowHeight + "px";
   rows.replaceChildren();
   for (let position = firstRow; position < lastRow; position++) {
     const item = displayRows[position];
@@ -720,7 +789,23 @@ function render() {
         "aria-expanded",
         String(!collapsedGroups.has(item.group)),
       );
-      group.title = "点击折叠/展开 · 双击重命名 · 可拖入信号";
+      group.title = "拖动排序 · 点击折叠/展开 · 双击重命名";
+      group.draggable = true;
+      const groupDragType = "application/x-wave-group";
+      const dropAfter = (event: DragEvent) => {
+        const bounds = group.getBoundingClientRect();
+        return event.clientY >= bounds.top + bounds.height / 2;
+      };
+      const clearDropStyle = () =>
+        group.classList.remove("dropTarget", "dropBefore", "dropAfter");
+      group.ondragstart = (event) => {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData(groupDragType, item.group);
+      };
+      group.ondragend = () =>
+        rows
+          .querySelectorAll(".dropBefore,.dropAfter")
+          .forEach((row) => row.classList.remove("dropBefore", "dropAfter"));
       group.onclick = () => {
         activeGroup = item.group;
         if (collapsedGroups.has(item.group)) collapsedGroups.delete(item.group);
@@ -734,15 +819,38 @@ function render() {
         window.waveWorkflow?.groupMenu(e.clientX, e.clientY, item.group);
       };
       group.ondragover = (e) => {
+        const types = e.dataTransfer.types;
+        if (
+          !types.some((type) =>
+            [
+              groupDragType,
+              "application/x-wave-reorder",
+              "application/x-wave-signals",
+            ].includes(type),
+          )
+        )
+          return;
         e.preventDefault();
-        group.classList.add("dropTarget");
+        clearDropStyle();
+        if (types.includes(groupDragType)) {
+          e.dataTransfer.dropEffect = "move";
+          group.classList.add(dropAfter(e) ? "dropAfter" : "dropBefore");
+        } else group.classList.add("dropTarget");
       };
-      group.ondragleave = () => group.classList.remove("dropTarget");
+      group.ondragleave = clearDropStyle;
       group.ondrop = async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        group.classList.remove("dropTarget");
-        if (e.dataTransfer.types.includes("application/x-wave-reorder")) {
+        clearDropStyle();
+        if (e.dataTransfer.types.includes(groupDragType)) {
+          moveGroup(
+            e.dataTransfer.getData(groupDragType),
+            item.group,
+            dropAfter(e),
+          );
+        } else if (
+          e.dataTransfer.types.includes("application/x-wave-reorder")
+        ) {
           assignGroup(item.group);
           dragIndex = null;
         } else {
@@ -752,7 +860,11 @@ function render() {
             );
             if (!Array.isArray(signals)) return;
             const keys = new Set(signals.map(key));
-            for (const s of chosen) if (keys.has(key(s))) s.group = item.group;
+            assignGroup(
+              item.group,
+              chosen.filter((s) => keys.has(key(s))),
+            );
+            collapsedGroups.delete(item.group);
             await uiAction("addSignals", {
               signals: signals.map((s) => ({ ...s, group: item.group })),
             });
@@ -837,6 +949,7 @@ function render() {
         for (const v of moving) v.group = s.group;
         chosen.splice(target, 0, ...moving);
         active = target;
+        activateSignalGroup(s);
         dragIndex = null;
         request();
       }
@@ -890,7 +1003,7 @@ function draw() {
   for (let t = Math.ceil(start / step) * step; t <= end; t += step) {
     const px = x(t);
     ctx.beginPath();
-    ctx.moveTo(px, ROW);
+    ctx.moveTo(px, DEFAULT_ROW_HEIGHT);
     ctx.lineTo(px, height);
     ctx.stroke();
     ctx.fillText(
@@ -909,13 +1022,13 @@ function draw() {
     if (item.index === undefined) continue;
     const i = item.index,
       s = chosen[i];
-    const y = timelineHeight + ROW * position - top,
+    const y = timelineHeight + rowHeight * position - top,
       middle = y + 16,
       events = eventsForSignal(s);
     ctx.strokeStyle = theme.grid;
     ctx.beginPath();
-    ctx.moveTo(0, y + ROW);
-    ctx.lineTo(width, y + ROW);
+    ctx.moveTo(0, y + rowHeight);
+    ctx.lineTo(width, y + rowHeight);
     ctx.stroke();
     let index = Math.max(0, valueAt(events, start)),
       lastPixel = -2;
@@ -960,7 +1073,7 @@ function draw() {
       if (s.width > 1 && right - left > 28) {
         ctx.save();
         ctx.beginPath();
-        ctx.rect(left + 5, y, right - left - 10, ROW);
+        ctx.rect(left + 5, y, right - left - 10, rowHeight);
         ctx.clip();
         ctx.fillText(formatSignal(raw, s), left + 8, y + 20);
         ctx.restore();
@@ -971,7 +1084,12 @@ function draw() {
       ctx.save();
       ctx.globalAlpha = 0.18;
       ctx.fillStyle = theme.warning;
-      ctx.fillRect(Math.max(0, x(last)), y, width - Math.max(0, x(last)), ROW);
+      ctx.fillRect(
+        Math.max(0, x(last)),
+        y,
+        width - Math.max(0, x(last)),
+        rowHeight,
+      );
       ctx.restore();
     }
   }
@@ -1029,7 +1147,9 @@ function source(target = "declaration") {
     });
 }
 function action(name) {
-  if (["openWaveform", "runScript"].includes(name)) {
+  if (
+    ["openWaveform", "runScript", "saveProject", "openProject"].includes(name)
+  ) {
     vscode.postMessage({ type: name });
     return;
   }
@@ -1139,7 +1259,7 @@ canvas.addEventListener(
   (e) => {
     if (!meta) return;
     const factor =
-        e.deltaMode === 1 ? ROW : e.deltaMode === 2 ? viewportHeight : 1,
+        e.deltaMode === 1 ? rowHeight : e.deltaMode === 2 ? viewportHeight : 1,
       delta = e.deltaY * factor,
       dx = e.deltaX * factor;
     if (e.ctrlKey || e.metaKey) {
@@ -1246,6 +1366,45 @@ $("tracks").addEventListener(
   { passive: true },
 );
 new ResizeObserver(scheduleViewport).observe($("tracks"));
+function setRowHeight(height: number) {
+  const tracks = $("tracks");
+  const topRow = tracks.scrollTop / rowHeight;
+  rowHeight = normalizeRowHeight(height);
+  clearWaveHover?.();
+  applyTrackLayout();
+  if (meta) {
+    render();
+    tracks.scrollTop = topRow * rowHeight;
+  }
+  persist();
+}
+$("waveRowHeight").oninput = (event) =>
+  setRowHeight(Number((event.target as HTMLInputElement).value));
+const waveSplit = $("waveSplit");
+function setNamesFraction(value: number | undefined) {
+  namesFraction = normalizeNamesFraction(value);
+  clearWaveHover?.();
+  applyTrackLayout();
+  scheduleViewport();
+  persist();
+}
+waveSplit.onpointerdown = (event) => {
+  if (event.button !== 0) return;
+  waveSplit.setPointerCapture(event.pointerId);
+  event.preventDefault();
+};
+waveSplit.onpointermove = (event) => {
+  if (!waveSplit.hasPointerCapture(event.pointerId)) return;
+  const bounds = $("trackContent").getBoundingClientRect();
+  setNamesFraction((event.clientX - bounds.left) / bounds.width);
+};
+waveSplit.ondblclick = () => setNamesFraction(undefined);
+waveSplit.onkeydown = (event) => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  const ratio = $("names").clientWidth / $("trackContent").clientWidth;
+  setNamesFraction(ratio + (event.key === "ArrowRight" ? 0.025 : -0.025));
+};
 new ResizeObserver(() => renderCatalog()).observe($("tree"));
 window.addEventListener("message", async (e) => {
   const msg = e.data;
@@ -1391,6 +1550,10 @@ function snapshot() {
     cursorB,
     markers,
     markersVisible,
+    tooltipEnabled,
+    rowHeight,
+    namesFraction,
+    scrollTop: $("tracks").scrollTop,
     displayScale,
     displayFactor,
   };
@@ -1412,9 +1575,15 @@ async function uiAction(name, p) {
     displayFactor = p.displayFactor || 1;
     markers = p.markers || [];
     markersVisible = p.markersVisible !== false;
+    setTooltip(p.tooltipEnabled !== false);
+    rowHeight = normalizeRowHeight(p.rowHeight);
+    namesFraction = normalizeNamesFraction(p.namesFraction);
+    applyTrackLayout();
     active = 0;
     selectedKeys.clear();
     setWindow(p.start, p.end);
+    $("tracks").scrollTop = p.scrollTop || 0;
+    render();
     return 1;
   }
 
@@ -1437,18 +1606,27 @@ async function uiAction(name, p) {
     }
     const next = p.clear ? [] : [...chosen],
       keys = new Set(next.map(key));
+    let lastAdded: Signal;
+    const targetGroup = activeGroup;
     for (const signal of p.signals) {
       if (!keys.has(key(signal))) {
-        if (!signal.group && activeGroup) signal.group = activeGroup;
-        next.push(signal);
-        keys.add(key(signal));
+        const entry = {
+          ...signal,
+          group: signal.group ?? (targetGroup || undefined),
+        };
+        next.push(entry);
+        keys.add(key(entry));
+        lastAdded = entry;
       }
     }
     if (next.length > MAX_SIGNALS)
       throw new Error("已达到 100000 个已添加信号的会话上限");
     chosen = next;
-    active = Math.max(0, chosen.length - 1);
-    selectedKeys = new Set(chosen[active] ? [key(chosen[active])] : []);
+    if (lastAdded || p.clear) {
+      active = Math.max(0, chosen.length - 1);
+      selectedKeys = new Set(chosen[active] ? [key(chosen[active])] : []);
+      activateSignalGroup(lastAdded);
+    }
     request();
     return 1;
   }
@@ -1485,8 +1663,55 @@ async function uiAction(name, p) {
       throw new Error("Signal is not displayed");
     active = indices[0] ?? 0;
     selectedKeys = keys as Set<string>;
+    activateSignalGroup(chosen[active]);
+    persist();
     ensureActive();
     return keys.size;
+  }
+  if (name === "groups") {
+    if (p.operation === "list")
+      return {
+        activeGroup,
+        order: [...groupOrder],
+        collapsed: [...collapsedGroups],
+      };
+    if (p.operation === "target" || p.operation === "create") {
+      if (p.operation === "create" && !p.group) throw Error("分组名称为空");
+      if (p.operation === "create" && !groupOrder.includes(p.group))
+        groupOrder.push(p.group);
+      if (p.group && !groupOrder.includes(p.group)) throw Error("分组不存在");
+      activeGroup = p.group;
+      request();
+    } else {
+      if (p.operation !== "assign" && !groupOrder.includes(p.group))
+        throw Error("分组不存在");
+      if (p.operation === "assign") {
+        if (
+          p.signals.some(
+            (signal) => !chosen.some((row) => key(row) === key(signal)),
+          )
+        )
+          throw Error("信号尚未添加到波形");
+        assignGroup(p.group, p.signals);
+      } else if (p.operation === "move") moveGroup(p.group, p.target, p.after);
+      else if (p.operation === "rename") renameGroup(p.group, p.target);
+      else if (p.operation === "remove") removeGroup(p.group);
+      else if (p.operation === "collapse" || p.operation === "expand") {
+        if (p.operation === "collapse") collapsedGroups.add(p.group);
+        else collapsedGroups.delete(p.group);
+        request();
+      } else throw Error("未知分组操作");
+    }
+    return 1;
+  }
+  if (name === "trackLayout") {
+    if (p.rowHeight !== undefined) setRowHeight(p.rowHeight);
+    if (p.namesFraction !== undefined) setNamesFraction(p.namesFraction);
+    return { rowHeight, namesFraction };
+  }
+  if (name === "tooltip") {
+    if (p.enabled !== undefined) setTooltip(p.enabled);
+    return Number(tooltipEnabled);
   }
   if (name === "cursor") {
     cursorA = p.time;
@@ -1613,7 +1838,7 @@ for (const node of [document.documentElement, document.body])
 window.addEventListener("wave-rebuild", () => request());
 vscode.postMessage({ type: "ready" });
 
-/* global meta, $, vscode, chosen, key, ROW, active, start, end, cursorA, cursorB, displayFactor, selectedKeys, collapsedGroups, selectedSignals, uiAction, action, source, persist, render, setWindow, add */
+/* global meta, $, vscode, chosen, key, rowHeight, active, start, end, cursorA, cursorB, displayFactor, selectedKeys, collapsedGroups, selectedSignals, uiAction, action, source, persist, render, setWindow, add */
 (() => {
   const toolMenus = [
     ...document.querySelectorAll<HTMLDetailsElement>(".toolMenu"),
@@ -1978,16 +2203,7 @@ vscode.postMessage({ type: "ready" });
     for (const [label, run] of [
       ["重命名分组", () => editGroup(name)],
       ["选中信号移入此组", () => assignGroup(name)],
-      [
-        "移除分组（保留信号）",
-        () => {
-          for (const s of chosen) if (s.group === name) s.group = undefined;
-          groupOrder = groupOrder.filter((g) => g !== name);
-          collapsedGroups.delete(name);
-          if (activeGroup === name) activeGroup = "";
-          requestRows();
-        },
-      ],
+      ["移除分组（保留信号）", () => removeGroup(name)],
     ] as const) {
       const button = document.createElement("button");
       button.textContent = label;
@@ -2685,13 +2901,17 @@ vscode.postMessage({ type: "ready" });
     hoverLine.hidden = true;
     hoverBand.hidden = true;
   }
+  clearWaveHover = hideHover;
+  $("toggleTooltip").setAttribute("aria-pressed", String(tooltipEnabled));
+  $("toggleTooltip").onclick = () => setTooltip(!tooltipEnabled);
   function hoverHit(e) {
-    if (!meta || e.buttons || pointer || draggingMarker) return null;
+    if (!tooltipEnabled || !meta || e.buttons || pointer || draggingMarker)
+      return null;
     const rect = canvas.getBoundingClientRect(),
       y = e.clientY - rect.top;
     if (y < timelineHeight || y >= canvas.clientHeight) return null;
     const position = Math.floor(
-        (y - timelineHeight + $("tracks").scrollTop) / ROW,
+        (y - timelineHeight + $("tracks").scrollTop) / rowHeight,
       ),
       item = displayRows[position];
     if (item?.index === undefined) return null;
@@ -2709,7 +2929,7 @@ vscode.postMessage({ type: "ready" });
       x: e.clientX,
       y: e.clientY,
       plotX: e.clientX - rect.left,
-      rowY: timelineHeight + position * ROW - $("tracks").scrollTop,
+      rowY: timelineHeight + position * rowHeight - $("tracks").scrollTop,
       window: start + ":" + end,
     };
   }

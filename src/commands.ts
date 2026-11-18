@@ -22,7 +22,12 @@ wvGetSigValueByTime signal [-format Bin|Oct|Hex|UDec|2Com] [-time time] [-lz]
 wvIsSignalExistInWaveform -signal signal
 wvSetWindowTimeUnit number s|ms|us|ns|ps|fs; wvGetWindowTimeUnit
 wvSearchNext / wvSearchPrev (current loaded window, transition search)
-waveRestoreView json (Wave Workbench view replay extension)
+waveRestoreView json; waveView
+waveFindSignals query ?offset? ?limit?
+waveGetEvents signal start end ?limit?
+waveGroup list | create name | target name | move name target before|after
+waveGroup rename name newName | remove name | expand name | collapse name | assign name signal...
+waveTooltip ?0|1?; waveLayout ?rowHeight signalColumnPercent?
 wvSaveSignal file.tcl; wvRestoreSignal file.tcl; source file.tcl
 srcGetFileName full.name; srcSetScope full.name
 All wv commands except wvCreateWindow accept -win 1. Unsupported commands/options raise errors.
@@ -170,7 +175,17 @@ class WaveCommands {
       return "1";
     }
     if (!viewer?.meta) throw new Error("Open a waveform first");
-    if (!this.windowScale)
+    if (
+      !this.windowScale ||
+      [
+        "wvGetWindowTimeUnit",
+        "waveGetEvents",
+        "wvSetCursor",
+        "wvSetMarker",
+        "wvZoom",
+        "wvGetSigValueByTime",
+      ].includes(command)
+    )
       this.windowScale =
         (await viewer.ui("snapshot")).displayScale || viewer.meta.scale;
     const scale = this.windowScale;
@@ -368,6 +383,132 @@ class WaveCommands {
           factor: scaleSeconds(next) / scaleSeconds(viewer.meta.scale),
         });
         return "1";
+      }
+      case "waveView":
+        count(0);
+        return JSON.stringify(await ui("snapshot"));
+      case "waveFindSignals": {
+        count(1, 3);
+        const offset = Number(args[1] ?? 0);
+        const limit = Number(args[2] ?? 100);
+        if (
+          !Number.isSafeInteger(offset) ||
+          offset < 0 ||
+          !Number.isSafeInteger(limit) ||
+          limit < 1 ||
+          limit > 512
+        )
+          throw Error("Invalid signal search page");
+        const result = await viewer.backend.request("search", {
+          query: normalName(args[0]),
+          offset,
+          limit,
+        });
+        return JSON.stringify(result);
+      }
+      case "waveGetEvents": {
+        count(3, 4);
+        const signal = await find(args[0]);
+        const start = ticks(args[1]),
+          end = ticks(args[2]);
+        const limit = Number(args[3] ?? 1000);
+        if (
+          end < start ||
+          !Number.isSafeInteger(limit) ||
+          limit < 1 ||
+          limit > 10000
+        )
+          throw Error("Invalid event window or limit");
+        const block = (
+          await viewer.backend.request("query", {
+            signals: [signal.id],
+            start: String(start),
+            end: String(end),
+            limit,
+          })
+        )[signal.id];
+        return JSON.stringify({
+          signal: args[0],
+          unit: scale,
+          truncated: block.truncated,
+          events: block.events.map(([tick, raw]) => [
+            time(Number(tick)),
+            WaveSignal.project(raw, signal),
+          ]),
+        });
+      }
+      case "waveLayout": {
+        count(0, 2);
+        if (args.length === 1)
+          throw Error("Expected row height and signal column percentage");
+        const rowHeight = args.length ? Number(args[0]) : undefined;
+        const namesFraction = args.length ? Number(args[1]) / 100 : undefined;
+        if (
+          args.length &&
+          (!Number.isInteger(rowHeight) ||
+            rowHeight < 24 ||
+            rowHeight > 80 ||
+            !Number.isFinite(namesFraction) ||
+            namesFraction < 0.1 ||
+            namesFraction > 0.75)
+        )
+          throw Error("Layout values must be 24–80 px and 10–75 percent");
+        return JSON.stringify(
+          await ui("trackLayout", { rowHeight, namesFraction }),
+        );
+      }
+      case "waveTooltip":
+        count(0, 1);
+        if (args.length && !["0", "1"].includes(args[0]))
+          throw Error("waveTooltip expects 0 or 1");
+        return String(
+          await ui("tooltip", {
+            enabled: args.length ? args[0] === "1" : undefined,
+          }),
+        );
+      case "waveGroup": {
+        count(1, 100000);
+        const [operation, group, target, side] = args;
+        switch (operation) {
+          case "list":
+            count(1);
+            return JSON.stringify(await ui("groups", { operation }));
+          case "target":
+          case "create":
+          case "remove":
+          case "collapse":
+          case "expand":
+            count(2);
+            break;
+          case "rename":
+            count(3);
+            if (!target) throw Error("Group name is empty");
+            break;
+          case "move":
+            count(4);
+            if (!["before", "after"].includes(side))
+              throw Error("Expected before or after");
+            break;
+          case "assign":
+            count(3, 100000);
+            return String(
+              await ui("groups", {
+                operation,
+                group,
+                signals: await Promise.all(names(a.slice(2)).map(find)),
+              }),
+            );
+          default:
+            throw Error("Unknown waveGroup operation");
+        }
+        return String(
+          await ui("groups", {
+            operation,
+            group,
+            target,
+            after: side === "after",
+          }),
+        );
       }
       case "waveRestoreView": {
         count(1);

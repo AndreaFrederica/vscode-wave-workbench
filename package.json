@@ -1,7 +1,7 @@
 {
   "name": "wave-workbench",
   "displayName": "Wave Workbench — FSDB / KDB / nWave",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "publisher": "local-hdl",
   "description": "Native FSDB/KDB waveform viewer with nWave Tcl commands and Vide interoperability.",
   "license": "MPL-2.0",
@@ -129,6 +129,14 @@
         "command": "waveWorkbench.debugLayout",
         "title": "Wave Workbench: 上方代码 / 下方波形",
         "icon": "$(layout)"
+      },
+      {
+        "command": "waveWorkbench.saveProject",
+        "title": "Wave Workbench: 保存波形工程…"
+      },
+      {
+        "command": "waveWorkbench.openProject",
+        "title": "Wave Workbench: 打开波形工程…"
       }
     ],
     "menus": {
@@ -149,6 +157,10 @@
           "command": "waveWorkbench.runScript",
           "when": "resourceExtname == .tcl || resourceExtname == .rc",
           "group": "navigation@91"
+        },
+        {
+          "command": "waveWorkbench.openProject",
+          "when": "resourceExtname == .waveproj"
         }
       ],
       "editor/title": [
@@ -255,6 +267,12 @@
           "minimum": 0,
           "maximum": 512,
           "description": "Rust decoded waveform LRU cache budget in MiB per waveform backend. Reopen waveform to apply. Does not bound SDK or total process memory."
+        },
+        "waveWorkbench.mcpEnabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "Enable the same-user local Wave Workbench MCP bridge. Reload the VS Code window after changing this setting."
         }
       }
     },

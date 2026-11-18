@@ -73,6 +73,9 @@ export interface WaveState {
   cursorB: number | null;
   markers: Marker[];
   markersVisible?: boolean;
+  tooltipEnabled?: boolean;
+  rowHeight?: number;
+  namesFraction?: number;
   radix: Radix;
   displayScale: string | null;
   displayFactor: number;

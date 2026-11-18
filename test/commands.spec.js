@@ -305,3 +305,52 @@ test('hover reads truncated tail on demand and drops tooltip on leave',async({pa
  env.setQueryDelay(200);await page.mouse.move(c.x+c.width*24500/25000,r.y+16);await expect.poll(()=>env.queries.filter(q=>String(q.request).startsWith('hover:')).length).toBe(2);await page.mouse.move(0,0);await page.waitForTimeout(300);await expect(page.locator('#waveTooltip')).toBeHidden();
  }finally{env.dispose();fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+test('group headers reorder, row selection sets the add target and projects restore the view', async ({page}) => {
+  const file = path.resolve(__dirname, '../examples/demo.vcd');
+  const env = await setup(page, file);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wave-project-test-'));
+  const {saveWaveProject, readWaveProject} = require('../dist/project');
+  const {restoreView} = require('../dist/view-state');
+  try {
+    await env.run('wvAddSignal -group {A {/tb/dut/clk}}; wvAddSignal -group {B {/tb/dut/valid}}');
+    await page.locator('.groupRow[data-group="B"]').dragTo(
+      page.locator('.groupRow[data-group="A"]'), {targetPosition: {x: 10, y: 4}}
+    );
+    await expect.poll(async () => (await env.viewer.ui('snapshot')).groupOrder).toEqual(['B', 'A']);
+    await page.getByText('clk', {exact: true}).first().click();
+    await env.run('wvAddSignal {/tb/dut/data[7:0]}');
+    await expect(page.locator('.groupRow[data-group="A"]')).toContainText('A (2)');
+    await page.locator('#toggleTooltip').click();
+    await expect(page.locator('#toggleTooltip')).toHaveAttribute('aria-pressed', 'false');
+    await page.locator('#displayMenu summary').click();
+    await page.locator('#waveRowHeight').fill('48');
+    await expect.poll(() => page.locator('.row').first().evaluate(row => row.getBoundingClientRect().height)).toBe(48);
+    const separator = await page.locator('#waveSplit').boundingBox();
+    const width = (await page.locator('#names').boundingBox()).width;
+    await page.mouse.move(separator.x + 3, separator.y + 12);
+    await page.mouse.down();
+    await page.mouse.move(separator.x + 140, separator.y + 12, {steps: 5});
+    await page.mouse.up();
+    await expect.poll(async () => (await page.locator('#names').boundingBox()).width).toBeGreaterThan(width + 80);
+    await env.run('wvZoom 10 40; wvSetCursor 20; wvSetMarker -name Result 30');
+    const state = await env.viewer.ui('snapshot');
+    const filename = path.join(directory, 'demo.waveproj');
+    await saveWaveProject(filename, file, state);
+    await env.run('waveGroup move B A after; waveTooltip 1; waveLayout 32 30; wvZoomAll');
+    const project = await readWaveProject(filename);
+    expect(project.waveform).toBe(file);
+    await env.viewer.ui('restoreView', await restoreView(env.viewer.backend, project.view, env.viewer.meta));
+    const restored = await env.viewer.ui('snapshot');
+    expect(restored.groupOrder).toEqual(['B', 'A']);
+    expect(restored.activeGroup).toBe('A');
+    expect(restored.tooltipEnabled).toBe(false);
+    expect(restored.rowHeight).toBe(48);
+    expect(restored.namesFraction).toBe(state.namesFraction);
+    expect(restored.markers).toEqual(state.markers);
+    expect([restored.start, restored.end, restored.cursorA]).toEqual([10, 40, 20]);
+  } finally {
+    env.dispose();
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
+});
