@@ -33,15 +33,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Queries use integer ticks and can include a prior event to seed the value at the start of a window. The second return value indicates whether the event limit truncated the result. FSDB and KDB use the system LZO 2 shared library. VCD works without LZO. [Platform and dependency setup](../README.md#从源码构建)
 
-## Format research and validation
+## How FSDB and KDB are decoded
 
-The project-authored parser was developed by examining FSDB and KDB files emitted by controlled RTL simulations. Differential tests use Verdi's Reader and NPI APIs as a reference. The default Cargo build is independent of Verdi code and the Verdi SDK. The opt-in `verdi-sdk` Cargo feature builds the C++ bridge against a locally installed SDK.
+WaveBench Reader infers FSDB and KDB record layouts from observations of files produced by controlled RTL simulations. The project checks those interpretations against sample files. Some differential tests compare the resulting values and source locations with outputs from Verdi's Reader and NPI APIs.
 
-Validated fixtures include VCS T-2022.06-SP2 FSDB version 86 and `kdb.elab++` databases. FSDB/KDB format coverage depends on the encoding emitted by the simulator. The current waveform API targets digital values and supports four-state bits. VCD files are parsed in memory with a 128 MiB file limit, 200,000 declaration limit, and 2 million transition limit. [Wave Workbench validation notes](../VALIDATION.md)
+The default Cargo build is independent of Verdi code and the Verdi SDK. The opt-in `verdi-sdk` Cargo feature builds the C++ bridge against a locally installed SDK.
+
+## Experimental status
+
+The readers and their documentation are still under development.
+
+- The inferred layouts may be incomplete or incorrect, and different simulator versions and settings can emit different layouts.
+- Validation covers specific samples, including VCS T-2022.06-SP2 FSDB version 86 and `kdb.elab++` databases. Compatibility with other files varies. [Wave Workbench validation notes](../VALIDATION.md)
+- The library makes no guarantees about API stability, data accuracy or completeness, or suitability for a particular purpose.
+
+The waveform API focuses on digital four-state values. VCD files are parsed in memory with a 128 MiB file limit, a 200,000-declaration limit, and a 2-million-transition limit.
+
+## Warranty and liability
+
+WaveBench Reader is provided **as is**, without express, implied, or statutory warranties, including warranties of merchantability or fitness for a particular purpose. Users bear the risk as to the software's quality and performance. The applicable warranty disclaimer and limits of liability are set out in sections 6 and 7 of the MPL-2.0 license. [Project license](../LICENSE)
+
+## Running the tests
 
 ```sh
 cargo test --locked --manifest-path native/Cargo.toml
 cargo test --locked --manifest-path native/Cargo.toml -- --ignored
 ```
 
-The ignored test checks both LZO formats and requires the shared library. [Project license](../LICENSE)
+The ignored test checks both LZO formats and requires the shared library.
