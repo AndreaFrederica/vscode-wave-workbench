@@ -1,6 +1,6 @@
 # 独立 FSDB / KDB 后端
 
-Wave Workbench 0.9.18 的独立后端用 Rust 直接读取 FSDB 和 VCS 的 `simv.daidir`。源码在 `native/src/independent/`，发布包通过 `bin/wave-backend-independent --independent` 启动。支持 Linux、macOS 和 Windows 的 x64 与 ARM64，FSDB/KDB 需要安装目标架构的 LZO 2 共享库。 [安装及构建](../README.md#从源码构建)本目录的 Python 实现留作差分测试的参考，打包时排除。 [项目许可](../LICENSE)
+Wave Workbench 的独立后端 WaveBench Reader 用 Rust 直接读取 FSDB 和 VCS 的 `simv.daidir`。源码在 `native/src/independent/`，发布包通过 `bin/wave-backend-independent --independent` 启动。支持 Linux、macOS 和 Windows 的 x64 与 ARM64，FSDB/KDB 需要安装目标架构的 LZO 2 共享库。 [安装及构建](../README.md#从源码构建)本目录的 Python 实现留作差分测试的参考，打包时排除。 [库的 API 与来源](../native/README.md) · [项目许可](../LICENSE)
 
 在波形编辑器标题栏、侧栏标题栏或命令面板运行「Wave Workbench: 选择 FSDB 后端…」。选择「独立后端」后，当前 FSDB 和已接入的 KDB 一起切换，工作区记住选项。可用 `waveWorkbench.independentBackendPath` 指定自定义可执行文件。Remote SSH 使用远端路径和库。
 

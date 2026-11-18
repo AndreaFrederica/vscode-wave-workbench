@@ -11,7 +11,7 @@ export const backendChoices = [
   {
     value: "auto",
     label: "自动",
-    description: "优先使用自定义独立后端，启用 Verdi SDK 的构建可使用 Verdi",
+    description: "优先使用 Verdi，启动或读盘失败时尝试 WaveBench Reader",
   },
   {
     value: "independent",
@@ -47,11 +47,10 @@ export function backendPlan(
     process.platform === "linux" &&
     process.arch === "x64" &&
     existsSync(context.asAbsolutePath("bin/verdi-sdk"));
+  const verdiConfigured = Boolean(binary || (home && useBundledVerdi));
   if (
     isFsdb(filename) &&
-    (choice === "independent" ||
-      (choice === "auto" &&
-        (independent || !(home && (binary || useBundledVerdi)))))
+    (choice === "independent" || (choice === "auto" && !verdiConfigured))
   ) {
     const binary =
       independent ||

@@ -1,5 +1,6 @@
 node_modules/**
 native/**
+!native/README.md
 test/**
 .vscode/**
 .gitignore

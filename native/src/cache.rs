@@ -3,9 +3,9 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use crate::{window, Events};
 use serde::Serialize;
 use std::{collections::HashMap, sync::Arc};
+use wavebench_reader::vcd::{window, Events};
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct Key {
     pub signal: String,

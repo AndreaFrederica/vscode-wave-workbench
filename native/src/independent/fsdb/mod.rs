@@ -120,6 +120,9 @@ impl Session {
         end: u64,
         limit: usize,
     ) -> io::Result<(Events, bool)> {
+        if start > end || !(1..=100_000).contains(&limit) {
+            return Err(invalid("Invalid FSDB query bounds"));
+        }
         let &(width, supported) = self
             .widths
             .get(&id)

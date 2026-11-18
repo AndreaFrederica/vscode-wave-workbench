@@ -15,9 +15,9 @@ Wave Workbench 是 VS Code 的数字波形调试扩展。它直接打开 FSDB �
 
 | 选项 | 读取方式 | 运行要求 |
 | --- | --- | --- |
-| 独立后端 | 扩展随附的 Rust 后端直接读取 FSDB 和 KDB | Linux、macOS、Windows 的 x64 和 ARM64，需安装 LZO 2 |
+| 独立后端 | WaveBench Reader 直接读取 FSDB 和 KDB | Linux、macOS、Windows 的 x64 和 ARM64，需安装 LZO 2 |
 | Verdi 后端 | Rust 后端调用 Verdi Reader 和 NPI | Linux x86-64、与后端兼容的 Verdi 库及相应许可 |
-| 自动 | 优先使用自定义独立后端，其次使用已配置的 Verdi 后端，最后使用随附 Rust 后端 | 取决于选中的后端 |
+| 自动 | 优先尝试已配置的 Verdi 后端，启动或打开失败时回退至 WaveBench Reader | 取决于选中的后端 |
 
 也可以在工作区设置里直接设置 `waveWorkbench.fsdbBackend`。例如将新打开的 FSDB 默认交给随附的独立后端。
 
@@ -27,9 +27,11 @@ Wave Workbench 是 VS Code 的数字波形调试扩展。它直接打开 FSDB �
 }
 ```
 
-打开波形后，展开顶部「文件」菜单，查看文件名下方显示的实际后端。切换失败时，原会话仍可使用，诊断信息在「输出 → Wave Workbench」。 [独立后端的格式支持与对照验证](independent_backend/README.md)
+打开波形后，展开顶部「文件」菜单，查看文件名下方显示的实际后端。切换失败时，原会话仍可使用，诊断信息在「输出 → Wave Workbench」。 [WaveBench Reader 库与对照验证](native/README.md)
 
 `waveWorkbench.independentBackendPath` 指向自定义独立后端可执行文件，留空时启动随附的 `bin/wave-backend-independent --independent`。`waveWorkbench.backendPath` 用于覆盖 Verdi/VCD 的 `wave-backend` 二进制。`waveWorkbench.verdiHome` 指向 Verdi 安装目录，留空时依次读取 `VERDI_HOME` 和 `NOVAS_HOME`。Remote SSH 环境使用远端设置、可执行文件和系统库。VCD 使用 Rust 读取路径。
+
+同时装有两个后端时，可以在 FSDB 中选择信号，运行「Wave Workbench: 调试对比 Verdi 与独立后端…」，按当前视窗或 A/B 范围生成报告。报告列出两端的文件元数据、首个不同的 tick、截断状态，以及已接入 KDB 的声明位置。未选信号时使用当前显示的物理信号，每次最多 32 个。
 
 ## 浏览波形与 RTL
 
@@ -69,7 +71,7 @@ CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
   npm run package:native -- --target linux-arm64
 ```
 
-GitHub Actions 在对应系统上构建并运行测试，标签对应的六个 VSIX 发布到 GitHub Releases。远程窗口使用远端扩展宿主对应的包。
+GitHub Actions 在六种系统与架构对应的原生 runner 上分别构建、测试并打包 WaveBench Reader。每个 VSIX 通过 `vsce --target` 标明平台，标签构建完成后上传到 GitHub Releases。远程窗口使用远端扩展宿主对应的包。
 
 | 系统 | VSIX 目标 | 独立 FSDB/KDB 的 LZO 2 |
 | --- | --- | --- |
@@ -79,7 +81,7 @@ GitHub Actions 在对应系统上构建并运行测试，标签对应的六个 V
 
 VCD 可直接打开。Tcl 命令需要 Tcl 8.6+，默认从 `PATH` 查找 `tclsh`。Windows 主机上的 MCP 本地桥仍依赖 Unix socket，可在 Linux 扩展宿主（例如 Remote SSH 或 WSL）使用。
 
-有 Verdi SDK 的 Linux x64 环境可通过 `npm run package:native -- --verdi` 生成含 Verdi 桥的本地 VSIX。该构建需要 `VERDI_HOME`、C++ 编译器、Verdi Reader 和 NPI 开发文件。 [实现结构](ARCHITECTURE.md) · [验证记录](VALIDATION.md)
+Verdi 的 C++ 桥只在原生 Linux x64 上通过 `npm run package:native -- --verdi` 构建。该构建启用 Cargo 的 `verdi-sdk` 功能，需要 `VERDI_HOME`、C++ 编译器以及兼容的 Verdi Reader 和 NPI 开发文件。GitHub 的六平台发布包使用默认 Cargo 构建，运行时由 WaveBench Reader 加载目标平台的 LZO 2 共享库。 [实现结构](ARCHITECTURE.md) · [验证记录](VALIDATION.md)
 
 ## 支持范围
 

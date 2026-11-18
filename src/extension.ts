@@ -19,7 +19,13 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import { createWaveDocuments } from "./wave-documents";
 import { createWaveEditor } from "./wave-editor";
-import { backendChoices, isFsdb, type FsdbBackend } from "./backend-selection";
+import {
+  backendChoices,
+  backendPlan,
+  isFsdb,
+  type FsdbBackend,
+} from "./backend-selection";
+import { compareBackends } from "./backend-comparison";
 import {
   identifiers,
   resolveSelection,
@@ -1268,6 +1274,55 @@ function activate(context: vscode.ExtensionContext) {
     open: (uri) => openWaveform(uri),
     openPicker: () => openWaveform(undefined, { picker: true }),
     openRecent,
+    compareBackends: async () => {
+      const viewer = current;
+      if (!viewer || !isFsdb(viewer.uri.fsPath))
+        throw Error("先打开 FSDB 波形");
+      await viewer.ready;
+      if (!viewer.meta) throw Error("波形未加载成功");
+      const view: ClipContext = await viewer.ui("clipContext");
+      const selection = await vscode.window.showQuickPick(
+        [
+          { label: "当前视窗", range: "view" as const },
+          ...(view.cursorB !== null && view.cursorB !== view.cursorA
+            ? [{ label: "游标 A 到 B", range: "cursors" as const }]
+            : []),
+        ],
+        { placeHolder: "选择后端对比的时间范围" },
+      );
+      if (!selection) return;
+      const cfg = vscode.workspace.getConfiguration(
+        "waveWorkbench",
+        viewer.uri,
+      );
+      const log = (message: string) => output.append(message);
+      const plans = [
+        backendPlan(context, cfg, viewer.uri.fsPath, log, "verdi"),
+        backendPlan(context, cfg, viewer.uri.fsPath, log, "independent"),
+      ] as const;
+      const content = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "正在对比 FSDB 后端",
+        },
+        () =>
+          compareBackends(
+            plans,
+            viewer.uri.fsPath,
+            view,
+            selection.range,
+            viewer.kdb?.path,
+            cfg.get<Record<string, string>>("hierarchyMappings"),
+          ),
+      );
+      const doc = await vscode.workspace.openTextDocument({
+        language: "markdown",
+        content,
+      });
+      await vscode.window.showTextDocument(doc, {
+        viewColumn: vscode.ViewColumn.Beside,
+      });
+    },
     selectBackend: async () => {
       const viewer = current;
       const cfg = vscode.workspace.getConfiguration(

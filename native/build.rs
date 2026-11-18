@@ -11,13 +11,14 @@ fn main() {
     println!("cargo:rerun-if-changed=bridge.cpp");
     println!("cargo:rerun-if-changed=kdb_bridge.cpp");
     println!("cargo:rustc-check-cfg=cfg(fsdb)");
-    let Ok(home) = env::var("VERDI_HOME") else {
+    if env::var_os("CARGO_FEATURE_VERDI_SDK").is_none() {
         return;
-    };
+    }
+    let home = env::var("VERDI_HOME").expect("verdi-sdk requires VERDI_HOME");
     if env::var("TARGET").as_deref() != Ok("x86_64-unknown-linux-gnu")
         || env::var("HOST").as_deref() != Ok("x86_64-unknown-linux-gnu")
     {
-        return;
+        panic!("verdi-sdk requires a native Linux x64 build");
     }
     let sdk = PathBuf::from(home).join("share/FsdbReader");
     let lib = env::var("FSDB_LIB_DIR")

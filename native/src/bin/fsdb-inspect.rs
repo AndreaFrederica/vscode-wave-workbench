@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use std::{env, error::Error, io, path::PathBuf};
-use wave_backend::fsdb_container::Container;
+use wavebench_reader::fsdb_container::Container;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut paths = env::args_os().skip(1).map(PathBuf::from);

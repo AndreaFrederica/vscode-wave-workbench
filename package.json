@@ -1,7 +1,7 @@
 {
   "name": "wave-workbench",
   "displayName": "Wave Workbench — FSDB / KDB / nWave",
-  "version": "0.9.18",
+  "version": "0.9.19",
   "publisher": "andreafrederica",
   "description": "Native FSDB/KDB waveform viewer with nWave Tcl commands and Vide interoperability.",
   "license": "MPL-2.0",
@@ -151,6 +151,10 @@
         "command": "waveWorkbench.selectBackend",
         "title": "Wave Workbench: 选择 FSDB 后端…",
         "icon": "$(server-process)"
+      },
+      {
+        "command": "waveWorkbench.compareBackends",
+        "title": "Wave Workbench: 调试对比 Verdi 与独立后端…"
       }
     ],
     "menus": {
@@ -196,6 +200,11 @@
           "command": "waveWorkbench.addSelection",
           "when": "editorLangId == systemverilog || editorLangId == verilog",
           "group": "navigation@3"
+        },
+        {
+          "command": "waveWorkbench.compareBackends",
+          "when": "activeCustomEditorId == waveWorkbench.viewer && resourceExtname == .fsdb",
+          "group": "waveDebug@1"
         }
       ],
       "view/title": [
@@ -256,7 +265,7 @@
             "verdi"
           ],
           "enumDescriptions": [
-            "Use a custom independent backend if configured, or Verdi when a Verdi-enabled binary and SDK are configured. Otherwise use bundled Rust.",
+            "Prefer a configured Verdi backend. Fall back to WaveBench Reader if Verdi cannot open the file.",
             "Read FSDB and KDB with the independent backend.",
             "Read FSDB and KDB with Verdi Reader and NPI."
           ],

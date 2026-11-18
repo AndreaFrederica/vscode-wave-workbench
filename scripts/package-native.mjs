@@ -63,7 +63,13 @@ function run(command, args, env = process.env) {
 
 run(cargo, cargoArgs, sdkFreeEnv);
 if (values.verdi) {
-  run(cargo, [...cargoArgs, "--target-dir", verdiDirectory]);
+  run(cargo, [
+    ...cargoArgs,
+    "--features",
+    "verdi-sdk",
+    "--target-dir",
+    verdiDirectory,
+  ]);
 }
 mkdirSync("bin", { recursive: true });
 for (const name of [

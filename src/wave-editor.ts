@@ -162,7 +162,8 @@ export function createWaveEditor(
         vscode.Uri.joinPath(context.extensionUri, "dist", "webview"),
       ],
     };
-    let metaPromise;
+    let preference = cfg.get<FsdbBackend>("fsdbBackend") ?? "auto";
+    let initialOpen: ReturnType<typeof readWithFallback> | undefined;
     const sendError = (e, origin, request) =>
       panel.webview.postMessage({
         type: "error",
@@ -182,6 +183,30 @@ export function createWaveEditor(
       });
     }
     viewer.showHierarchy = showHierarchy;
+    const openKdb = async (
+      database: string,
+      selected: ReturnType<typeof choosePlan>,
+      choice: FsdbBackend,
+    ) => {
+      const session = selected.createKdb();
+      try {
+        await session.open(database);
+        return session;
+      } catch (error) {
+        session.dispose();
+        if (choice !== "auto" || selected.kind !== "verdi" || viewer.disposed)
+          throw error;
+        log(`Verdi KDB open failed; trying WaveBench Reader: ${error}\n`);
+        const fallback = choosePlan("independent").createKdb();
+        try {
+          await fallback.open(database);
+          return fallback;
+        } catch (fallbackError) {
+          fallback.dispose();
+          throw Error(`Verdi: ${error}\nWaveBench Reader: ${fallbackError}`);
+        }
+      }
+    };
     viewer.attachKdb = async (suggested, edited = !suggested) => {
       if (viewer.attaching) return viewer.attaching;
       viewer.attaching = (async () => {
@@ -196,9 +221,8 @@ export function createWaveEditor(
           database = selection?.[0]?.fsPath;
         }
         if (!database) return false;
-        const session = plan.createKdb();
+        const session = await openKdb(database, plan, preference);
         try {
-          await session.open(database);
           if (viewer.disposed) {
             session.dispose();
             return false;
@@ -243,6 +267,32 @@ export function createWaveEditor(
       });
       return meta;
     };
+    const readWithFallback = async (
+      preferred: ReturnType<typeof choosePlan>,
+      backend: Backend,
+      choice: FsdbBackend,
+    ) => {
+      try {
+        return { plan: preferred, backend, meta: await readMetadata(backend) };
+      } catch (verdiError) {
+        if (choice !== "auto" || preferred.kind !== "verdi" || viewer.disposed)
+          throw verdiError;
+        log(`Verdi open failed; trying WaveBench Reader: ${verdiError}\n`);
+        backend.dispose();
+        const fallback = choosePlan("independent");
+        const reader = fallback.createWave();
+        try {
+          return {
+            plan: fallback,
+            backend: reader,
+            meta: await readMetadata(reader),
+          };
+        } catch (readerError) {
+          reader.dispose();
+          throw Error(`Verdi: ${verdiError}\nWaveBench Reader: ${readerError}`);
+        }
+      }
+    };
     const metadataMessage = (meta: Metadata) => ({
       ...meta,
       backendLabel: plan.label,
@@ -251,8 +301,7 @@ export function createWaveEditor(
         vscode.extensions.getExtension("pascal-lab.vide-code-extension")
           ?.packageJSON.version || null,
     });
-    const initialize = async (backend: Backend, prepared?: Metadata) => {
-      const meta = prepared ?? (await (metaPromise ??= readMetadata(backend)));
+    const initialize = async (backend: Backend, meta: Metadata) => {
       if (viewer.disposed || backend !== viewer.backend) return;
       viewer.meta = meta;
       refreshSidebar();
@@ -290,13 +339,15 @@ export function createWaveEditor(
     };
     let switching = false;
     viewer.switchBackend = async (choice) => {
-      const next = choosePlan(choice);
+      let next = choosePlan(choice);
       if (
         viewer.meta &&
         !viewer.backend.closed &&
         next.kind === viewer.backendKind
-      )
+      ) {
+        preference = choice;
         return next.label;
+      }
       if (switching || viewer.running || viewer.attaching)
         throw Error("当前波形正在切换后端、执行 Tcl 或接入 KDB，请稍后再试");
       switching = true;
@@ -306,7 +357,10 @@ export function createWaveEditor(
         await viewer.ready;
         if (viewer.disposed) throw Error("波形窗口已关闭");
         candidate = next.createWave();
-        const meta = await readMetadata(candidate);
+        const opened = await readWithFallback(next, candidate, choice);
+        candidate = opened.backend;
+        next = opened.plan;
+        const { meta } = opened;
         const previousMeta = viewer.meta;
         if (
           previousMeta &&
@@ -321,8 +375,7 @@ export function createWaveEditor(
           Awaited<ReturnType<KdbSession["children"]>>
         >();
         if (attached) {
-          candidateKdb = next.createKdb();
-          await candidateKdb.open(attached.path);
+          candidateKdb = await openKdb(attached.path, next, choice);
           const scopes = new Set(["", ...viewer.treeExpanded]);
           for (const scope of scopes) {
             roots.set(
@@ -351,7 +404,7 @@ export function createWaveEditor(
         viewer.backend = candidate;
         viewer.backendKind = next.kind;
         plan = next;
-        metaPromise = Promise.resolve(meta);
+        preference = choice;
         candidate = undefined;
         previousBackend.dispose();
         if (candidateKdb) {
@@ -382,10 +435,27 @@ export function createWaveEditor(
     };
     panel.webview.onDidReceiveMessage(
       async (msg) => {
-        const backend = viewer.backend;
+        let backend = viewer.backend;
         try {
           if (msg.type === "ready") {
-            await initialize(backend);
+            if (viewer.meta) {
+              await initialize(backend, viewer.meta);
+              return;
+            }
+            const opened = await (initialOpen ??= readWithFallback(
+              plan,
+              backend,
+              preference,
+            ));
+            if (viewer.disposed) {
+              opened.backend.dispose();
+              return;
+            }
+            plan = opened.plan;
+            backend = opened.backend;
+            viewer.backend = backend;
+            viewer.backendKind = plan.kind;
+            await initialize(backend, opened.meta);
           } else if (msg.type === "rtlCursor") {
             if (
               viewer.meta &&
