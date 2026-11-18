@@ -252,8 +252,42 @@ mod native {
         }
     }
 }
+struct IndependentFsdb {
+    session: std::cell::RefCell<wave_backend::independent::fsdb::Session>,
+    signals: Vec<Signal>,
+    start: u64,
+    end: u64,
+    scale: String,
+}
+
+impl IndependentFsdb {
+    fn open(path: &str) -> Result<Self, String> {
+        let session =
+            wave_backend::independent::fsdb::Session::open(path).map_err(|err| err.to_string())?;
+        let signals = session
+            .declarations
+            .iter()
+            .map(|row| Signal {
+                id: row.native_id.to_string(),
+                scope: row.scope.clone(),
+                name: row.name.clone(),
+                width: row.width,
+                supported: row.supported,
+            })
+            .collect();
+        Ok(Self {
+            signals,
+            start: session.container().start,
+            end: session.container().end,
+            scale: session.container().timescale.clone(),
+            session: std::cell::RefCell::new(session),
+        })
+    }
+}
+
 enum Database {
     Vcd(Vcd),
+    IndependentFsdb(IndependentFsdb),
     #[cfg(fsdb)]
     Fsdb(native::Fsdb),
 }
@@ -261,12 +295,16 @@ impl Database {
     fn signals(&self) -> &Vec<Signal> {
         match self {
             Self::Vcd(v) => &v.signals,
+            Self::IndependentFsdb(v) => &v.signals,
             #[cfg(fsdb)]
             Self::Fsdb(v) => &v.signals,
         }
     }
-    fn open(path: &str) -> Result<Self, String> {
+    fn open(path: &str, independent: bool) -> Result<Self, String> {
         if path.to_lowercase().ends_with(".fsdb") {
+            if independent {
+                return IndependentFsdb::open(path).map(Self::IndependentFsdb);
+            }
             #[cfg(fsdb)]
             {
                 return native::Fsdb::open(path).map(Self::Fsdb);
@@ -284,6 +322,7 @@ impl Database {
     fn meta(&self) -> Value {
         let (start, end, scale, backend) = match self {
             Self::Vcd(v) => (0, v.end, &v.scale, "rust-vcd"),
+            Self::IndependentFsdb(v) => (v.start, v.end, &v.scale, "rust-independent-fsdb"),
             #[cfg(fsdb)]
             Self::Fsdb(v) => (v.start, v.end, &v.scale, "native-fsdb"),
         };
@@ -299,6 +338,16 @@ impl Database {
             )),
             #[cfg(fsdb)]
             Self::Fsdb(v) => v.query(id, start, end, limit),
+            Self::IndependentFsdb(v) => v
+                .session
+                .borrow_mut()
+                .query(
+                    id.parse().map_err(|_| "Invalid FSDB signal ID")?,
+                    start,
+                    end,
+                    limit,
+                )
+                .map_err(|err| err.to_string()),
         }
     }
 }
@@ -615,8 +664,36 @@ struct Request {
     name: Option<String>,
     names: Option<Vec<String>>,
 }
-fn run(r: Request, db: &mut Option<Store>) -> Result<Value, String> {
+fn run(
+    r: Request,
+    db: &mut Option<Store>,
+    independent_kdb: Option<&mut Option<wave_backend::independent::kdb::Session>>,
+) -> Result<Value, String> {
+    let independent = independent_kdb.is_some();
     match r.method.as_str() {
+        method if independent && method.starts_with("kdb") => {
+            let session = independent_kdb.unwrap();
+            if method == "kdbOpen" {
+                if session.is_some() {
+                    return Err("KDB already attached".into());
+                }
+                let path = r.path.ok_or("Missing KDB directory")?;
+                let opened = wave_backend::independent::kdb::Session::open(&path)
+                    .map_err(|err| err.to_string())?;
+                *session = Some(opened);
+                return Ok(json!({"attached":true, "backend":"rust-independent-kdb"}));
+            }
+            let query = if method == "kdbResolve" {
+                r.query.ok_or("Missing KDB hierarchy")?
+            } else {
+                r.query.unwrap_or_default()
+            };
+            session
+                .as_mut()
+                .ok_or("No KDB attached")?
+                .lookup(method, &query)
+                .map_err(|err| err.to_string())
+        }
         #[cfg(fsdb)]
         "kdbOpen" => kdb::open(&r.path.ok_or("Missing KDB directory")?),
         #[cfg(fsdb)]
@@ -630,7 +707,7 @@ fn run(r: Request, db: &mut Option<Store>) -> Result<Value, String> {
         #[cfg(fsdb)]
         "kdbChildren" => kdb::lookup(&r.query.unwrap_or_default(), "children"),
         "open" => {
-            let new = Database::open(&r.path.ok_or("Missing path")?)?;
+            let new = Database::open(&r.path.ok_or("Missing path")?, independent)?;
             let result = new.meta();
             let budget = db
                 .as_ref()
@@ -746,7 +823,11 @@ fn run(r: Request, db: &mut Option<Store>) -> Result<Value, String> {
     }
 }
 fn main() {
+    let independent = std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--independent");
     let mut db = None;
+    let mut kdb = None;
     let stdin = io::stdin();
     let mut stdout = io::BufWriter::new(io::stdout().lock());
     for line in stdin.lock().lines() {
@@ -754,7 +835,7 @@ fn main() {
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(r) => {
                 let id = r.id.clone();
-                match run(r, &mut db) {
+                match run(r, &mut db, independent.then_some(&mut kdb)) {
                     Ok(result) => json!({"id":id,"result":result}),
                     Err(e) => json!({"id":id,"error":e}),
                 }

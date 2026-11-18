@@ -7,7 +7,8 @@ const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 test('extension host adapter: real FSDB + KDB opens declaration / instantiation / definition',{skip:!process.env.WAVE_TEST_KDB},async t=>{
   const root=path.resolve(__dirname,'..'),messages=[],opened=[],disposable={dispose(){}};let provider,receive,sidebarProvider,sidebarReceive;const commands=new Map(),stored=new Map(),openedWaves=[];let editorChanged;let dialogs=0;const layoutCalls=[];let clipboard='';const batchExisting=new Set();
-  let backendChoice='auto', nextBackend, snapshot, backendOverride=process.env.WAVE_TEST_BACKEND;
+  let backendChoice=process.env.WAVE_TEST_INDEPENDENT ? 'independent' : 'auto';
+  let nextBackend, snapshot, backendOverride=process.env.WAVE_TEST_BACKEND;
   const uri=file=>({fsPath:file,toString(){return file;}});
   class Position{constructor(line,character){this.line=line;this.character=character;}}
   class Range{constructor(start,end){this.start=start;this.end=end;}}
@@ -52,6 +53,7 @@ test('extension host adapter: real FSDB + KDB opens declaration / instantiation 
 
   await receive({type:'copyPaths',text:'tb.dut.clk'});assert.equal(clipboard,'tb.dut.clk');
   const meta=messages.find(m=>m.type==='metadata');const scope='cv32e40p_mac_trace_tb.dut.u_core.u_core.core_i';await receive({type:'search',query:scope+'.clk_i',request:1});const signal=messages.findLast(m=>m.type==='searchResult').signals.find(s=>s.scope===scope&&s.name==='clk_i');assert.ok(signal);
+  if (process.env.WAVE_TEST_INDEPENDENT) assert.equal(meta.backend, 'rust-independent-fsdb');
   for(const [target,line,file] of [['declaration',45,'cv32e40p_core.sv'],['instance',112,'cv32e40p_top.sv'],['definition',31,'cv32e40p_core.sv']]){
     await receive({type:'source',id:signal.id,scope:signal.scope,name:signal.name,target});
     const editor=opened.at(-1);assert.equal(editor.selection.start.line,line-1);assert.equal(path.basename(editor.doc.uri.fsPath),file);assert.equal(messages.findLast(m=>m.type==='scopeSelected').scope,target==='instance'?scope.slice(0,scope.lastIndexOf('.')):scope);
@@ -93,6 +95,7 @@ test('extension host adapter: real FSDB + KDB opens declaration / instantiation 
       assert.equal(backendChoice, key);
       const changed = messages.findLast(m => m.type === 'backendChanged');
       assert.equal(changed.backendLabel, label);
+      if (key === 'independent') assert.equal(changed.backend, 'rust-independent-fsdb');
       assert.equal(changed.view.chosen[0].displayName, 'test clock');
       assert.equal(changed.view.chosen[0].group, 'CPU');
       assert.deepEqual(changed.view.markers, snapshot.markers);

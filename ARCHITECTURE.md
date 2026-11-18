@@ -1,6 +1,6 @@
-# TypeScript 架构（0.8.0）
+# Wave Workbench 实现结构
 
-扩展宿主、Tcl 命令适配和 Webview 源码使用 TypeScript。FSDB 和 KDB 可以通过独立 Python 读取器或 Rust 与 C++ 封装的 Verdi SDK 读取，两套后端共用 JSON 协议。
+扩展宿主、Tcl 命令适配和 Webview 源码使用 TypeScript。FSDB 和 KDB 由 Rust 独立实现和 Verdi SDK 提供两条读取路径，共用逐行 JSON 协议。
 
 | 路径 | 职责 |
 | --- | --- |
@@ -20,7 +20,9 @@
 | `src/webview/sidebar.ts`、`src/webview/dom.ts` | 侧边栏交互及按元素 ID 推导 DOM 类型 |
 | `media/` | HTML、CSS、SVG 静态资源 |
 | `src/tcl/bridge.tcl` | Tcl 运行时桥，构建时复制到 `dist/tcl/` |
-| `native/` | Rust/C++ 原生组件；本次未迁移 |
+| `native/src/independent/fsdb/` | FSDB 声明、值页、索引、波形事件和连接求值 |
+| `native/src/independent/kdb/` | KDB 归档、设计层次、信号声明和 RTL 来源 |
+| `native/src/main.rs` | 两套后端的协议入口、波形查询、缓存和虚拟信号 |
 
 原先相互依赖全局变量的波形和工作流脚本合为一个浏览器入口，共享工具通过模块导入。esbuild 为扩展宿主生成 CommonJS 模块，为两个 Webview 分别生成独立浏览器包。Webview 资源根目录包含 `media/` 和 `dist/webview/`；浏览器包不依赖 Node 或运行时 npm 模块。
 
@@ -56,6 +58,6 @@ VSIX 包含 `dist/`、`media/`、Tcl 桥与原生二进制，不分发 TypeScrip
 
 插件运行不依赖原 OpenTitan 目录。可选 MAC/FPU 脚本与完整芯片层次测试通过 `WAVE_TEST_PROJECT_ROOT` 定位外部工程，搭配 `WAVE_TEST_KDB`、`WAVE_TEST_FSDB`、`WAVE_TEST_FPU_RUN` 选择数据。仓库不包含仿真数据或 Verdi SDK。
 
-## 后续 MCP 接入
+## MCP
 
-0.8.0 只完成 TypeScript 迁移，尚未注册 MCP 服务或启动监听端口。后续 MCP 工具可复用后端协议与会话模型，提供层次查询、信号查找、指定时刻取值等能力；具体工具与连接方式在下一步实现。
+`src/mcp.ts` 提供 MCP 入口，通过扩展宿主的会话访问已打开的波形。切换波形后端后，MCP 工具使用同一个会话。 [接口与配置](COMMANDS.md#波形工程布局与-mcp090)

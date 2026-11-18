@@ -28,7 +28,11 @@ class KdbSession {
     binary: string,
     home: string | undefined,
     log: (text: string) => void = () => {},
-    launch: { args?: string[]; useVerdiLibraries?: boolean } = {},
+    launch: {
+      args?: string[];
+      useVerdiLibraries?: boolean;
+      env?: NodeJS.ProcessEnv;
+    } = {},
   ) {
     this.childrenCache = new Map();
     this.locationCache = new Map();
@@ -39,18 +43,18 @@ class KdbSession {
       cwd: this.scratch,
       env: home
         ? {
-            ...process.env,
+            ...(launch.env || process.env),
             VERDI_HOME: home,
             LD_LIBRARY_PATH: [
               path.join(home, "share/NPI/lib/linux64"),
               path.join(home, "share/KDB/lib/linux64"),
               path.join(home, "etc/lib/linux64"),
-              process.env.LD_LIBRARY_PATH,
+              (launch.env || process.env).LD_LIBRARY_PATH,
             ]
               .filter(Boolean)
               .join(path.delimiter),
           }
-        : undefined,
+        : launch.env,
       onLog: log,
     });
     this.backend.child.once("close", () =>

@@ -9,15 +9,19 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');const path=require('node:path');
 const {KdbSession,mapPrefix}=require('../dist/kdb');
 const {Backend}=require('../dist/backend');
+const independent=process.env.WAVE_TEST_INDEPENDENT==='1';
+const binary=path.resolve(__dirname,independent?'../bin/wave-backend-independent':'../bin/wave-backend');
+const options=independent?{args:['--independent'],useVerdiLibraries:false}:{};
+const createSession=()=>new KdbSession(binary,independent?undefined:process.env.VERDI_HOME,undefined,options);
 test('explicit path mappings use longest prefix and keep unrelated paths',()=>{
   assert.equal(mapPrefix('/old/src/a.sv',{'/old':'/new','/old/src':'/snapshot'}),'/snapshot/a.sv');
   assert.equal(mapPrefix('tb.dut.clk',{'tb':'top','tb.dut':'top.core'}),'top.core.clk');
   assert.equal(mapPrefix('/older/a.sv',{'/old':'/new'}),'/older/a.sv');
 });
 test('real KDB: hierarchy, signal declaration, instance, definition and FSDB correlation',{skip:!process.env.WAVE_TEST_KDB},async t=>{
-  const session=new KdbSession(path.resolve(__dirname,'../bin/wave-backend'),process.env.VERDI_HOME);
-  const wave=new Backend(path.resolve(__dirname,'../bin/wave-backend'));t.after(()=>{session.dispose();wave.dispose();});
-  const result=await session.open(process.env.WAVE_TEST_KDB);assert.equal(result.backend,'native-npi-kdb');
+  const session=createSession();
+  const wave=new Backend(binary,options);t.after(()=>{session.dispose();wave.dispose();});
+  const result=await session.open(process.env.WAVE_TEST_KDB);assert.equal(result.backend,independent?'rust-independent-kdb':'native-npi-kdb');
   const roots=await session.children();assert.ok(roots.some(r=>r.fullname==='cv32e40p_mac_trace_tb'));
   const core='cv32e40p_mac_trace_tb.dut.u_core.u_core.core_i';
   assert.equal(await session.parent(core),'cv32e40p_mac_trace_tb.dut.u_core.u_core');
@@ -36,7 +40,7 @@ test('real KDB: hierarchy, signal declaration, instance, definition and FSDB cor
 
 test('full-chip FPU hierarchy excludes interfaces and lazily resolves source',{skip:!process.env.WAVE_TEST_FPU_RUN},async t=>{
   const settings=JSON.parse(fs.readFileSync(projectFile('.vscode/settings.json'),'utf8'));
-  const session=new KdbSession(path.resolve(__dirname,'../bin/wave-backend'),process.env.VERDI_HOME);t.after(()=>session.dispose());await session.open(settings['waveWorkbench.kdbPath']);
+  const session=createSession();t.after(()=>session.dispose());await session.open(settings['waveWorkbench.kdbPath']);
   const roots=await session.children();assert.ok(roots.some(n=>n.fullname==='tb'));assert.ok(roots.every(n=>n.kind==='npiModule'));assert.ok(roots.every(n=>!n.file&&!n.definitionFile));
   const before=session.backend.sequence;assert.strictEqual(await session.children(),roots);assert.equal(session.backend.sequence,before);
   const tb=await session.children('tb');assert.ok(tb.some(n=>n.fullname==='tb.dut'&&n.module==='chip_earlgrey_asic'));assert.ok(!tb.some(n=>n.fullname.includes('alert_if[')));

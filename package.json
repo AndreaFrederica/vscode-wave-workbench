@@ -1,7 +1,7 @@
 {
   "name": "wave-workbench",
   "displayName": "Wave Workbench — FSDB / KDB / nWave",
-  "version": "0.9.16",
+  "version": "0.9.18",
   "publisher": "andreafrederica",
   "description": "Native FSDB/KDB waveform viewer with nWave Tcl commands and Vide interoperability.",
   "license": "MPL-2.0",
@@ -244,7 +244,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "Custom executable for the independent FSDB and KDB backend. Empty uses the included Python implementation when Independent is selected."
+          "description": "Custom executable for the independent FSDB and KDB backend. Empty uses the bundled Rust implementation when Independent is selected."
         },
         "waveWorkbench.fsdbBackend": {
           "type": "string",
@@ -256,7 +256,7 @@
             "verdi"
           ],
           "enumDescriptions": [
-            "Use the configured independent executable if present. Otherwise use Verdi.",
+            "Use a custom independent backend if configured, or Verdi when a Verdi-enabled binary and SDK are configured. Otherwise use bundled Rust.",
             "Read FSDB and KDB with the independent backend.",
             "Read FSDB and KDB with Verdi Reader and NPI."
           ],
@@ -303,9 +303,9 @@
         },
         "waveWorkbench.tclshPath": {
           "type": "string",
-          "default": "/usr/bin/tclsh",
+          "default": "",
           "scope": "machine",
-          "description": "Tcl 8.6+ interpreter used for nWave commands. Scripts run in a safe child interpreter."
+          "description": "Path to Tcl 8.6+ for nWave commands. Empty uses tclsh on PATH."
         },
         "waveWorkbench.cacheSizeMB": {
           "type": "integer",
@@ -319,6 +319,12 @@
           "default": false,
           "scope": "window",
           "description": "Enable the same-user local Wave Workbench MCP bridge. Reload the VS Code window after changing this setting."
+        },
+        "waveWorkbench.lzoLibraryPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path to an LZO 2 shared library for the independent FSDB and KDB backend. Empty uses the system installation."
         }
       }
     },
@@ -364,7 +370,8 @@
     "pretest": "npm run typecheck && npm run build",
     "test:ui": "npm run typecheck && npm run build && playwright test",
     "format": "prettier --write \"src/**/*.ts\" \"scripts/*.mjs\" \"type-tests/*.ts\" \"tsconfig*.json\"",
-    "format:check": "prettier --check \"src/**/*.ts\" \"scripts/*.mjs\" \"type-tests/*.ts\" \"tsconfig*.json\""
+    "format:check": "prettier --check \"src/**/*.ts\" \"scripts/*.mjs\" \"type-tests/*.ts\" \"tsconfig*.json\"",
+    "package:native": "node scripts/package-native.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.0",

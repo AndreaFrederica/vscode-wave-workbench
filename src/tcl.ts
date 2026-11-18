@@ -30,12 +30,12 @@ class TclRunner {
   } | null = null;
   constructor(
     dispatch: TclRunner["dispatch"],
-    { executable = "/usr/bin/tclsh", log = (_text: string) => {} } = {},
+    { executable = "tclsh", log = (_text: string) => {} } = {},
   ) {
     this.dispatch = dispatch;
     this.log = log;
     const env = { ...process.env };
-    if (executable === "/usr/bin/tclsh") {
+    if (executable === "tclsh" || executable === "/usr/bin/tclsh") {
       delete env.LD_LIBRARY_PATH;
       delete env.TCL_LIBRARY;
       delete env.TCLLIBPATH;

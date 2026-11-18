@@ -876,7 +876,7 @@ function activate(context: vscode.ExtensionContext) {
           executable:
             vscode.workspace
               .getConfiguration("waveWorkbench")
-              .get<string>("tclshPath") || "/usr/bin/tclsh",
+              .get<string>("tclshPath") || undefined,
           log: (text) => {
             const lines = tclOutput.get(viewer);
             if (lines && lines.length < 500) lines.push(text.slice(0, 4096));

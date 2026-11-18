@@ -7,18 +7,25 @@ use std::{env, path::PathBuf, process::Command};
 fn main() {
     println!("cargo:rerun-if-env-changed=VERDI_HOME");
     println!("cargo:rerun-if-env-changed=FSDB_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=CXX");
     println!("cargo:rerun-if-changed=bridge.cpp");
     println!("cargo:rerun-if-changed=kdb_bridge.cpp");
     println!("cargo:rustc-check-cfg=cfg(fsdb)");
     let Ok(home) = env::var("VERDI_HOME") else {
         return;
     };
+    if env::var("TARGET").as_deref() != Ok("x86_64-unknown-linux-gnu")
+        || env::var("HOST").as_deref() != Ok("x86_64-unknown-linux-gnu")
+    {
+        return;
+    }
     let sdk = PathBuf::from(home).join("share/FsdbReader");
     let lib = env::var("FSDB_LIB_DIR")
         .map(PathBuf::from)
         .unwrap_or(sdk.join("linux64"));
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let status = Command::new(env::var("CXX").unwrap_or("/usr/bin/g++".into()))
+    let compiler = env::var("CXX").unwrap_or_else(|_| "/usr/bin/g++".into());
+    let status = Command::new(&compiler)
         .args([
             "-std=c++11",
             "-O2",
@@ -36,7 +43,7 @@ fn main() {
         .expect("C++ compiler required");
     assert!(status.success(), "FSDB bridge compilation failed");
     let npi = sdk.parent().unwrap().join("NPI/inc");
-    assert!(Command::new("/usr/bin/g++")
+    assert!(Command::new(compiler)
         .args(["-std=c++11", "-O2", "-fPIC", "-c", "kdb_bridge.cpp", "-o"])
         .arg(out.join("kdb_bridge.o"))
         .arg("-I")

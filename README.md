@@ -15,9 +15,9 @@ Wave Workbench 是 VS Code 的数字波形调试扩展。它直接打开 FSDB �
 
 | 选项 | 读取方式 | 运行要求 |
 | --- | --- | --- |
-| 独立后端 | 扩展随附的 Python 读取器直接读取 FSDB 和 KDB | Linux x86-64、Python 3.8+、`liblzo2.so.2` |
+| 独立后端 | 扩展随附的 Rust 后端直接读取 FSDB 和 KDB | Linux、macOS、Windows 的 x64 和 ARM64，需安装 LZO 2 |
 | Verdi 后端 | Rust 后端调用 Verdi Reader 和 NPI | Linux x86-64、与后端兼容的 Verdi 库及相应许可 |
-| 自动 | 配置了 `waveWorkbench.independentBackendPath` 时使用该可执行文件，其余情况使用 Verdi 后端 | 取决于选中的后端 |
+| 自动 | 优先使用自定义独立后端，其次使用已配置的 Verdi 后端，最后使用随附 Rust 后端 | 取决于选中的后端 |
 
 也可以在工作区设置里直接设置 `waveWorkbench.fsdbBackend`。例如将新打开的 FSDB 默认交给随附的独立后端。
 
@@ -29,7 +29,7 @@ Wave Workbench 是 VS Code 的数字波形调试扩展。它直接打开 FSDB �
 
 打开波形后，展开顶部「文件」菜单，查看文件名下方显示的实际后端。切换失败时，原会话仍可使用，诊断信息在「输出 → Wave Workbench」。 [独立后端的格式支持与对照验证](independent_backend/README.md)
 
-`waveWorkbench.independentBackendPath` 指向自定义独立后端可执行文件，留空时由 `python3` 启动随附读取器。`waveWorkbench.backendPath` 用于覆盖 Verdi/VCD 的 `wave-backend` 二进制。`waveWorkbench.verdiHome` 指向 Verdi 安装目录，留空时依次读取 `VERDI_HOME` 和 `NOVAS_HOME`。Remote SSH 环境使用远端设置、可执行文件和系统库。VCD 使用 Rust 读取路径。
+`waveWorkbench.independentBackendPath` 指向自定义独立后端可执行文件，留空时启动随附的 `bin/wave-backend-independent --independent`。`waveWorkbench.backendPath` 用于覆盖 Verdi/VCD 的 `wave-backend` 二进制。`waveWorkbench.verdiHome` 指向 Verdi 安装目录，留空时依次读取 `VERDI_HOME` 和 `NOVAS_HOME`。Remote SSH 环境使用远端设置、可执行文件和系统库。VCD 使用 Rust 读取路径。
 
 ## 浏览波形与 RTL
 
@@ -54,17 +54,32 @@ Wave Workbench 是 VS Code 的数字波形调试扩展。它直接打开 FSDB �
 
 ## 从源码构建
 
-需要 Node.js 22+、Rust/Cargo 和 Tcl 8.6+。构建 Verdi 后端时，先设置 `VERDI_HOME` 并准备 C++ 编译器、Verdi Reader 与 NPI 开发文件。未设置 `VERDI_HOME` 时，Rust 二进制只包含 VCD 支持，随包分发的 Python 后端仍可独立读取 FSDB 和 KDB。
+需要 Node.js 22+ 和 Rust/Cargo。以下命令生成对应当前系统及架构的 VSIX。
 
 ```sh
 npm ci
-cargo build --locked --release --manifest-path native/Cargo.toml --bin wave-backend
-mkdir -p bin
-cp native/target/release/wave-backend bin/
-npm run package
+npm run package:native
 ```
 
-`npm run package` 生成 `wave-workbench-<版本>.vsix`。开发时可以运行 `npm test`、`npx playwright install chromium` 和 `npm run test:ui`。 [实现结构](ARCHITECTURE.md) · [验证记录](VALIDATION.md)
+可以通过 `--target` 选择 VS Code 的平台标识。交叉构建需要用 `rustup target add` 安装目标 Rust 标准库，并给 Cargo 提供该目标的链接器和系统 SDK。比如在 Linux x64 上使用 `aarch64-linux-gnu-gcc` 构建 Linux ARM64。
+
+```sh
+rustup target add aarch64-unknown-linux-gnu
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+  npm run package:native -- --target linux-arm64
+```
+
+GitHub Actions 在对应系统上构建并运行测试，标签对应的六个 VSIX 发布到 GitHub Releases。远程窗口使用远端扩展宿主对应的包。
+
+| 系统 | VSIX 目标 | 独立 FSDB/KDB 的 LZO 2 |
+| --- | --- | --- |
+| Linux | `linux-x64`、`linux-arm64` | 安装发行版的共享库，例如 Debian/Ubuntu 的 `liblzo2-2` |
+| macOS | `darwin-x64`、`darwin-arm64` | `brew install lzo` |
+| Windows | `win32-x64`、`win32-arm64` | 安装对应架构的 LZO DLL，例如用 vcpkg 安装 `lzo:x64-windows` 或 `lzo:arm64-windows`，将 DLL 的绝对路径填入 `waveWorkbench.lzoLibraryPath` |
+
+VCD 可直接打开。Tcl 命令需要 Tcl 8.6+，默认从 `PATH` 查找 `tclsh`。Windows 主机上的 MCP 本地桥仍依赖 Unix socket，可在 Linux 扩展宿主（例如 Remote SSH 或 WSL）使用。
+
+有 Verdi SDK 的 Linux x64 环境可通过 `npm run package:native -- --verdi` 生成含 Verdi 桥的本地 VSIX。该构建需要 `VERDI_HOME`、C++ 编译器、Verdi Reader 和 NPI 开发文件。 [实现结构](ARCHITECTURE.md) · [验证记录](VALIDATION.md)
 
 ## 支持范围
 

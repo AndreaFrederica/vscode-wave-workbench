@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import type * as vscode from "vscode";
+import { existsSync } from "node:fs";
 import { Backend } from "./backend";
 import { KdbSession } from "./kdb";
 
@@ -10,12 +11,12 @@ export const backendChoices = [
   {
     value: "auto",
     label: "自动",
-    description: "按已配置的独立后端路径选择，否则使用 Verdi",
+    description: "优先使用自定义独立后端，启用 Verdi SDK 的构建可使用 Verdi",
   },
   {
     value: "independent",
     label: "独立后端",
-    description: "直接读取 FSDB 和 KDB",
+    description: "使用 Rust 直接读取 FSDB 和 KDB",
   },
   {
     value: "verdi",
@@ -37,16 +38,31 @@ export function backendPlan(
     `bin/wave-backend${process.platform === "win32" ? ".exe" : ""}`,
   );
   const independent = cfg.get<string>("independentBackendPath");
+  const binary = cfg.get<string>("backendPath");
+  const home =
+    cfg.get<string>("verdiHome") ||
+    process.env.VERDI_HOME ||
+    process.env.NOVAS_HOME;
+  const useBundledVerdi =
+    process.platform === "linux" &&
+    process.arch === "x64" &&
+    existsSync(context.asAbsolutePath("bin/verdi-sdk"));
   if (
     isFsdb(filename) &&
-    (choice === "independent" || (choice === "auto" && independent))
+    (choice === "independent" ||
+      (choice === "auto" &&
+        (independent || !(home && (binary || useBundledVerdi)))))
   ) {
     const binary =
-      independent || (process.platform === "win32" ? "python" : "python3");
-    const args = independent
-      ? []
-      : [context.asAbsolutePath("independent_backend/backend.py")];
-    const options = { args, useVerdiLibraries: false, onLog: log };
+      independent ||
+      context.asAbsolutePath(
+        `bin/wave-backend-independent${process.platform === "win32" ? ".exe" : ""}`,
+      );
+    const args = independent ? [] : ["--independent"];
+    const env = { ...process.env };
+    const lzo = cfg.get<string>("lzoLibraryPath");
+    if (lzo) env.WAVE_WORKBENCH_LZO_LIBRARY = lzo;
+    const options = { args, env, useVerdiLibraries: false, onLog: log };
     return {
       kind: "independent" as const,
       label: "独立后端",
@@ -54,11 +70,6 @@ export function backendPlan(
       createKdb: () => new KdbSession(binary, undefined, log, options),
     };
   }
-  const binary = cfg.get<string>("backendPath");
-  const home =
-    cfg.get<string>("verdiHome") ||
-    process.env.VERDI_HOME ||
-    process.env.NOVAS_HOME;
   const env = { ...process.env };
   if (home) env.VERDI_HOME = home;
   return {

@@ -15,3 +15,5 @@ dist/
 *.kdb
 *.daidir/
 *.log
+
+bin/verdi-sdk

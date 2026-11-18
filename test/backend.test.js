@@ -8,6 +8,9 @@ const assert=require('node:assert/strict');
 const path=require('node:path');
 const {Backend}=require('../dist/backend');
 const binary=path.resolve(__dirname,'../bin/wave-backend');
+const independent=process.env.WAVE_TEST_INDEPENDENT==='1';
+const fsdbBinary=independent?path.resolve(__dirname,'../bin/wave-backend-independent'):binary;
+const fsdbOptions=independent?{args:['--independent'],useVerdiLibraries:false}:{};
 test('VCD protocol: metadata, window seed, binary values, truncation, recoverable errors',async t=>{
   const b=new Backend(binary);t.after(()=>b.dispose());
   const m=await b.request('open',{path:path.resolve(__dirname,'../examples/demo.vcd')});
@@ -24,9 +27,9 @@ test('VCD protocol: metadata, window seed, binary values, truncation, recoverabl
   assert.equal((await b.request('query',{signals:[clk.id],start:'50',end:'50'}))[clk.id].events[0][0],'50');
 });
 test('Native FSDB: metadata and digital signal seek without VCD conversion',{skip:!process.env.WAVE_TEST_FSDB},async t=>{
-  const b=new Backend(binary,{onLog:()=>{}});t.after(()=>b.dispose());
+  const b=new Backend(fsdbBinary,{...fsdbOptions,onLog:()=>{}});t.after(()=>b.dispose());
   const m=await b.request('open',{path:process.env.WAVE_TEST_FSDB});
-  assert.equal(m.backend,'native-fsdb');assert.ok(m.signals.length>0);assert.ok(BigInt(m.end)>=BigInt(m.start));
+  assert.equal(m.backend,independent?'rust-independent-fsdb':'native-fsdb');assert.ok(m.signals.length>0);assert.ok(BigInt(m.end)>=BigInt(m.start));
   const s=m.signals.find(s=>s.supported&&/clk/.test(s.name))||m.signals.find(s=>s.supported);
   const r=await b.request('query',{signals:[s.id],start:m.start,end:m.end,limit:1000});
   assert.ok(r[s.id].events.length>0);assert.match(r[s.id].events[0][1],/^[01xz]+$/);
@@ -79,5 +82,5 @@ test('Rust virtual signals: merge, four states, concat order, source identity, c
 });
 
 test('native FSDB virtual NOT matches source four-state value',{skip:!process.env.WAVE_TEST_FSDB},async t=>{
- const b=new Backend(binary);t.after(()=>b.dispose());const m=await b.request('open',{path:process.env.WAVE_TEST_FSDB});const s=m.signals.find(s=>s.supported&&s.width===1&&s.name.includes('clk'));assert.ok(s);const d=await b.request('defineVirtual',{name:'inverted_clk',definition:{op:'not',inputs:[{id:s.id,scope:s.scope,name:s.name,bitOffset:null}]}});const time=String(Math.floor(Number(m.end)/2));const r=await b.request('query',{signals:[s.id,d.signal.id],start:time,end:time,limit:100});const raw=r[s.id].events.at(-1)[1].toLowerCase();assert.equal(r[d.signal.id].events.at(-1)[1],raw==='0'?'1':raw==='1'?'0':'x');
+ const b=new Backend(fsdbBinary,fsdbOptions);t.after(()=>b.dispose());const m=await b.request('open',{path:process.env.WAVE_TEST_FSDB});const s=m.signals.find(s=>s.supported&&s.width===1&&s.name.includes('clk'));assert.ok(s);const d=await b.request('defineVirtual',{name:'inverted_clk',definition:{op:'not',inputs:[{id:s.id,scope:s.scope,name:s.name,bitOffset:null}]}});const time=String(Math.floor(Number(m.end)/2));const r=await b.request('query',{signals:[s.id,d.signal.id],start:time,end:time,limit:100});const raw=r[s.id].events.at(-1)[1].toLowerCase();assert.equal(r[d.signal.id].events.at(-1)[1],raw==='0'?'1':raw==='1'?'0':'x');
 });
