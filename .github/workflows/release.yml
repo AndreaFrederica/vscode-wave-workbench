@@ -29,6 +29,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust }}
+      - name: Configure the Windows compiler
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.platform == 'win32-arm64' && 'arm64' || 'x64' }}
       - name: Validate release version
         if: github.ref_type == 'tag'
         run: node -e "const v = require('./package.json').version; if (process.env.GITHUB_REF_NAME !== 'v' + v) throw Error('Tag does not match package.json')"

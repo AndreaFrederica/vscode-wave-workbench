@@ -4,9 +4,14 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { packageTcl } from "./package-tcl.mjs";
 
 const { values } = parseArgs({
-  options: { target: { type: "string" }, verdi: { type: "boolean" } },
+  options: {
+    target: { type: "string" },
+    verdi: { type: "boolean" },
+    "tcl-runtime": { type: "string" },
+  },
 });
 const targets = {
   "linux-x64": "x86_64-unknown-linux-gnu",
@@ -91,6 +96,7 @@ if (values.verdi) {
 } else {
   copyFileSync(binary, "bin/wave-backend" + suffix);
 }
+await packageTcl(platform, values["tcl-runtime"]);
 run(process.execPath, [
   process.env.npm_execpath,
   "run",

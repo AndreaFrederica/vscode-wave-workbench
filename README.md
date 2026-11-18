@@ -25,6 +25,8 @@ npm run package:native
 
 在 VS Code 扩展视图中选择「从 VSIX 安装…」。使用 Remote SSH 时，在运行工作区扩展的远端主机上构建并安装对应平台的包。打包脚本支持 Linux、macOS 和 Windows 的 x64 与 ARM64 目标。打开现成波形可以先用仓库里的示例。 [示例 VCD](examples/demo.vcd)
 
+平台 VSIX 内置 Tcl 8.6、标准脚本库及许可文件，安装后可直接运行 Tcl。Windows 源码打包请在对应架构的 Visual Studio Developer Command Prompt 运行。跨平台打包时，可用 `--tcl-runtime` 指定为目标平台构建好的 Tcl 运行时目录。目录包含 `bin/tclsh`（Windows 为 `bin/tclsh.exe`）、`lib/tcl8.6`、`LICENSE-Tcl.txt`、`LICENSE-zlib.txt` 和 `LICENSE-LibTomMath.txt`。 [Tcl 构建说明](https://www.tcl-lang.org/doc/howto/compile.html)
+
 **RTL 语言服务（LSP）建议安装 Vide。** 在 VS Code 扩展视图搜索 `pascal-lab.vide-code-extension`。Vide 为 Verilog 和 SystemVerilog 提供代码补全、诊断和语义高亮，Wave Workbench 负责波形浏览和 RTL 联动。 [Vide 扩展](https://marketplace.visualstudio.com/items?itemName=pascal-lab.vide-code-extension)
 
 ## 跑通第一个 Verilator 示例
@@ -65,7 +67,7 @@ verilator --cc --exe --build --trace-fst --top-module top --Mdir obj_fst fixture
 
 - **浏览波形**。拖动底部滚动条浏览整个时间轴，用 Ctrl 加滚轮缩放，按 `[` 和 `]` 跳到选中信号的相邻边沿，按 `M` 添加命名标记。
 - **解码与标注**。给总线和指令绑定 RISC-V、TL-UL、AXI、UART 或 I²C 规则，为关键状态添加标签和注释，工作区可以维护自己的解码配置。 [解码规则](COMMANDS.md#波形解码和信号注释)
-- **Tcl**。使用侧栏或底部控制台执行 `wvAddSignal`、`wvZoom` 和 `wvSetCursor` 等命令。Tcl 8.6+ 可通过 `waveWorkbench.tclshPath` 指定。 [Tcl 命令](COMMANDS.md)
+- **Tcl**。使用侧栏或底部控制台执行 `wvAddSignal`、`wvZoom` 和 `wvSetCursor` 等命令。插件默认使用内置 Tcl，也可通过 `waveWorkbench.tclshPath` 指定其他解释器。 [Tcl 命令](COMMANDS.md)
 - **MCP**。Linux 或 macOS 的扩展宿主可启用 `waveWorkbench.mcpEnabled`。用 `wave_open` 打开 FST、VCD 或工程，`wave_clip` 提取原始事件，`wave_export` 导出片段，`wave_save_project` 无弹窗保存。可传 `path` 指定文件，省略时保存到当前工程或波形旁的同名工程。 [MCP 接口](COMMANDS.md#波形工程布局与-mcp090)
 
 ## 现有 FSDB 和 VCS KDB 项目

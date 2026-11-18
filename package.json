@@ -1,7 +1,7 @@
 {
   "name": "wave-workbench",
   "displayName": "Wave Workbench — Verilator Waveforms & RTL Debugging",
-  "version": "0.9.21",
+  "version": "0.9.22",
   "publisher": "andreafrederica",
   "description": "Debug Verilator FST and VCD in VS Code with elaborated RTL hierarchy, waveform projects, Tcl and MCP. Supports Verdi FSDB and KDB.",
   "license": "MPL-2.0",
@@ -313,7 +313,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "Path to Tcl 8.6+ for nWave commands. Empty uses tclsh on PATH."
+          "description": "Override the Tcl 8.6+ interpreter. Empty prefers the bundled Tcl and falls back to tclsh on PATH."
         },
         "waveWorkbench.cacheSizeMB": {
           "type": "integer",

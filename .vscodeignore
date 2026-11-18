@@ -16,3 +16,4 @@ dist/**/*.map
 type-tests/**
 .github/**
 **/__pycache__/**
+bin/.tcl-*/**

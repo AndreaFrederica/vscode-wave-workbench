@@ -60,7 +60,7 @@ puts [wvGetSigValueByTime {/tb/dut/data[7:0]} -time 20 -format Hex]
 
 ## Tcl 执行和限制
 
-使用真实 Tcl 8.6+ 解释器（默认 `/usr/bin/tclsh`，可设 `waveWorkbench.tclshPath`），支持 `set`、`foreach`、`if`、`expr`、`list`、`proc`、`source` 等 Tcl 语法。同一波形窗口的 Tcl 变量跨输入保留。脚本中 `source` 相对当前脚本目录解析。为了避免 EDA 环境内的同名库污染，默认系统 Tcl 进程不继承 EDA 的 `LD_LIBRARY_PATH` 和 Tcl 库覆盖变量。
+平台 VSIX 内置 Tcl 8.6 解释器，支持 `set`、`foreach`、`if`、`expr`、`list`、`proc`、`source` 等 Tcl 语法。`waveWorkbench.tclshPath` 可覆盖解释器选择，开发目录没有内置运行时时从 `PATH` 查找。同一波形窗口的 Tcl 变量跨输入保留。`source` 相对于当前脚本目录解析。
 
 执行入口为受限子解释器，未提供 `exec`、任意 `open`、socket 或完整进程环境；`puts` 输出到控制台，`file` 仅提供常用路径和只读检查子命令。脚本若依赖环境变量，需显式设置，例如：
 

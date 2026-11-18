@@ -17,3 +17,5 @@ dist/
 *.log
 
 bin/verdi-sdk
+bin/tcl/
+bin/.tcl-*/

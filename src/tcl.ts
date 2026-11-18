@@ -11,6 +11,7 @@ export interface TclNode {
 import { spawn } from "node:child_process";
 import * as readline from "node:readline";
 import * as path from "node:path";
+import { existsSync } from "node:fs";
 const encode = (s: unknown) =>
   Buffer.from(String(s), "utf8").toString("base64");
 const decode = (s: string) => Buffer.from(s || "", "base64").toString("utf8");
@@ -30,19 +31,42 @@ class TclRunner {
   } | null = null;
   constructor(
     dispatch: TclRunner["dispatch"],
-    { executable = "tclsh", log = (_text: string) => {} } = {},
+    {
+      executable,
+      log = (_text: string) => {},
+    }: {
+      executable?: string;
+      log?: (text: string) => void;
+    } = {},
   ) {
     this.dispatch = dispatch;
     this.log = log;
     const env = { ...process.env };
-    if (executable === "tclsh" || executable === "/usr/bin/tclsh") {
-      delete env.LD_LIBRARY_PATH;
-      delete env.TCL_LIBRARY;
-      delete env.TCLLIBPATH;
-      delete env.TK_LIBRARY;
+    const runtime = path.resolve(__dirname, "../bin/tcl");
+    const bundledShell = path.join(
+      runtime,
+      "bin",
+      process.platform === "win32" ? "tclsh.exe" : "tclsh",
+    );
+    const bundled = !executable && existsSync(bundledShell);
+    executable ||= bundled ? bundledShell : "tclsh";
+    if (bundled || executable === "tclsh" || executable === "/usr/bin/tclsh") {
+      for (const key of Object.keys(env)) {
+        if (
+          [
+            "LD_LIBRARY_PATH",
+            "TCL_LIBRARY",
+            "TCLLIBPATH",
+            "TK_LIBRARY",
+          ].includes(key.toUpperCase())
+        )
+          delete env[key];
+      }
     }
+    if (bundled) env.TCL_LIBRARY = path.join(runtime, "lib", "tcl8.6");
     this.child = spawn(executable, [path.join(__dirname, "tcl/bridge.tcl")], {
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
       env,
     });
     this.child.on("error", (e) => this.fail(e));

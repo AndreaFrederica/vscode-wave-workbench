@@ -2,9 +2,29 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
+import { delimiter, resolve } from "node:path";
+import { TclRunner } from "../dist/tcl.js";
 
 const platform = process.argv[2];
+// Verify the packaged Tcl bridge with no external shell on PATH.
+const savedPath = process.env.PATH;
+process.env.PATH = delimiter;
+const tcl = new TclRunner(async (name, args) => {
+  assert.equal(name, "wvSetCursor");
+  assert.equal(args[0].value, "20");
+  return "cursor-set";
+});
+try {
+  assert.match(await tcl.run("info patchlevel"), /^8\.6\./);
+  assert.equal(
+    await tcl.run("set tick [expr {2 * 10}]; wvSetCursor $tick"),
+    "cursor-set",
+  );
+} finally {
+  tcl.dispose();
+  process.env.PATH = savedPath;
+}
+
 for (const independent of [false, true]) {
   const binary = "wave-backend" + (independent ? "-independent" : "");
   const suffix = platform.startsWith("win32-") ? ".exe" : "";
