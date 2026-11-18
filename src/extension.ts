@@ -19,7 +19,12 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import { createWaveDocuments } from "./wave-documents";
 import { createWaveEditor } from "./wave-editor";
-import { backendChoices, isFsdb, type FsdbBackend } from "./backend-selection";
+import {
+  backendChoices,
+  isFsdb,
+  isWaveform,
+  type FsdbBackend,
+} from "./backend-selection";
 import {
   identifiers,
   resolveSelection,
@@ -27,7 +32,7 @@ import {
   portConnection,
 } from "./rtl-selection";
 import { restoreView } from "./view-state";
-import { readWaveProject, saveWaveProject } from "./project";
+import { designSnapshot, readWaveProject, saveWaveProject } from "./project";
 import { createDecoderGroup, loadDecoderProfiles } from "./decoder-config";
 import {
   builtinProfiles,
@@ -340,6 +345,22 @@ function activate(context: vscode.ExtensionContext) {
         ...(await findRtlSignals(viewer.backend, target.scope, target.name)),
       })),
     );
+    if (
+      !connection &&
+      session.kind === "verilator" &&
+      !groups[0].signals.length &&
+      selectedScope.startsWith(instance.fullname + ".")
+    ) {
+      const selected = await session.resolve(selectedScope);
+      if (["npiGenScope", "npiNamedBegin"].includes(selected?.kind)) {
+        const scope = dumpScope(viewer, selectedScope);
+        groups[0] = {
+          scope,
+          name: target,
+          ...(await findRtlSignals(viewer.backend, scope, target)),
+        };
+      }
+    }
     const signals = groups.flatMap((group) => group.signals);
     if (!valid() || !signals.length) return;
     const values = await readSignalsAt(viewer.backend, signals, cursor.tick);
@@ -771,7 +792,7 @@ function activate(context: vscode.ExtensionContext) {
     }
     const selection = await vscode.window.showQuickPick(available, {
       title: "最近打开的波形和工程",
-      placeHolder: "选择 FSDB、VCD 或波形工程",
+      placeHolder: "选择 FSDB、FST、VCD 或波形工程",
       matchOnDescription: true,
     });
     if (!selection) return;
@@ -785,7 +806,7 @@ function activate(context: vscode.ExtensionContext) {
   ) {
     let filename =
       typeof candidate === "string" ? candidate : candidate?.fsPath;
-    if (filename && !/\.(fsdb|vcd)$/i.test(filename)) filename = undefined;
+    if (filename && !isWaveform(filename)) filename = undefined;
     if (!filename && !picker)
       filename =
         vscode.workspace
@@ -798,8 +819,8 @@ function activate(context: vscode.ExtensionContext) {
     if (!filename)
       filename = (
         await vscode.window.showOpenDialog({
-          title: "打开 FSDB / VCD（自动接入同目录 KDB）",
-          filters: { Waveforms: ["fsdb", "vcd"] },
+          title: "打开波形",
+          filters: { Waveforms: ["fsdb", "fst", "vcd"] },
           canSelectMany: false,
         })
       )?.[0]?.fsPath;
@@ -930,12 +951,22 @@ function activate(context: vscode.ExtensionContext) {
       ? await viewer.ui("snapshot")
       : document.view || document.savedView;
     if (!view) throw Error("波形视图尚未就绪");
-    const kdb = viewer.kdb?.path;
+    const design = viewer.kdb;
+    const verilator = design?.kind === "verilator";
+    const designView = designSnapshot(viewer);
     if (cancellation?.isCancellationRequested) return;
-    await saveWaveProject(filename, viewer.uri.fsPath, view, kdb);
+    await saveWaveProject(
+      filename,
+      viewer.uri.fsPath,
+      view,
+      verilator ? undefined : design?.path,
+      verilator ? design.path : undefined,
+      designView,
+    );
     document.projectPath = filename;
     document.savedView = view;
-    document.savedKdb = kdb;
+    document.savedKdb = design?.path;
+    document.savedDesignView = designView;
     await rememberFile(filename);
     return filename;
   }
@@ -994,10 +1025,7 @@ function activate(context: vscode.ExtensionContext) {
     )?.[0]?.fsPath;
     if (!filename) return;
     const project = await readWaveProject(filename);
-    if (
-      !/\.(fsdb|vcd)$/i.test(project.waveform) ||
-      !fs.existsSync(project.waveform)
-    )
+    if (!isWaveform(project.waveform) || !fs.existsSync(project.waveform))
       throw Error("Waveform not found: " + project.waveform);
     const viewer = await openWaveform(project.waveform);
     if (!viewer) throw Error("无法打开工程的波形");
@@ -1015,17 +1043,31 @@ function activate(context: vscode.ExtensionContext) {
       } else if (choice !== "不保存") return;
     }
     const view = await restoreView(viewer.backend, project.view, viewer.meta);
+    const database = project.verilator || project.kdb;
     if (
-      project.kdb &&
-      (!viewer.kdb || path.resolve(viewer.kdb.path) !== project.kdb)
+      database &&
+      (!viewer.kdb || path.resolve(viewer.kdb.path) !== database)
     ) {
-      if (fs.existsSync(project.kdb)) await viewer.attachKdb(project.kdb);
-      else output.appendLine("Wave project KDB not found: " + project.kdb);
+      if (fs.existsSync(database)) await viewer.attachKdb(database, false);
+      else {
+        output.appendLine(
+          "Wave project design database not found: " + database,
+        );
+        void vscode.window.showWarningMessage(
+          "波形工程找不到设计数据库 " + database,
+        );
+      }
+    }
+    if (database && viewer.kdb?.path === database && project.designView) {
+      ++syncGeneration;
+      clearTimeout(syncTimer);
+      await viewer.restoreDesignView(project.designView);
     }
     await viewer.ui("restoreView", { ...view, projectBaseline: true });
     document.projectPath = filename;
     document.savedView = document.view || view;
     document.savedKdb = viewer.kdb?.path;
+    document.savedDesignView = designSnapshot(viewer);
     await rememberFile(filename);
     current = viewer;
     if (document.dirty) await saveActiveProject(viewer);
@@ -1167,14 +1209,15 @@ function activate(context: vscode.ExtensionContext) {
     let record = await viewer.kdb.resolve(fullname);
     if (
       target === "instance" &&
-      record.instance &&
+      record?.instance &&
       record.instance !== record.fullname
     )
       record = await viewer.kdb.resolve(record.instance);
-    let file = target === "definition" ? record.definitionFile : record.file;
-    const line = target === "definition" ? record.definitionLine : record.line;
+    let file = target === "definition" ? record?.definitionFile : record?.file;
+    const line =
+      target === "definition" ? record?.definitionLine : record?.line;
     if (!file || !Number.isInteger(line) || line < 1)
-      throw new Error(`KDB has no ${target} source location for ${fullname}.`);
+      throw new Error(`No ${target} source location for ${fullname}.`);
     const cfg = vscode.workspace.getConfiguration("waveWorkbench", viewer.uri);
     file = mapPrefix(file, cfg.get("sourcePathMappings"));
     if (!path.isAbsolute(file))
@@ -1557,7 +1600,7 @@ function activate(context: vscode.ExtensionContext) {
             if (name === "wave_open") {
               const filename = path.resolve(workspace, String(args.path));
               if (
-                !/\.(fsdb|vcd|waveproj)$/i.test(filename) ||
+                (!isWaveform(filename) && !/\.waveproj$/i.test(filename)) ||
                 !fs.existsSync(filename)
               )
                 throw Error("Waveform or project not found: " + filename);
@@ -1594,10 +1637,16 @@ function activate(context: vscode.ExtensionContext) {
               );
             }
             if (name === "wave_save_project") {
-              const filename = await saveProject(
-                viewer,
-                path.resolve(workspace, String(args.path)),
-              );
+              const destination =
+                typeof args.path === "string"
+                  ? path.resolve(workspace, args.path)
+                  : viewer.document.projectPath ||
+                    viewer.uri.fsPath.replace(/\.[^.]+$/, "") + ".waveproj";
+              const filename = await saveProject(viewer, destination);
+              if (viewer.panel.active && viewer.document.dirty)
+                await vscode.commands.executeCommand(
+                  "workbench.action.files.save",
+                );
               return { path: filename };
             }
             if (viewer.running || tclOutput.has(viewer))

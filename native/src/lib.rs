@@ -4,3 +4,4 @@ pub mod fsdb_container;
 pub mod independent;
 pub mod vcd;
 pub use independent::{fsdb, kdb};
+pub mod fst;

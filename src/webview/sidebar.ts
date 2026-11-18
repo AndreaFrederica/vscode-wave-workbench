@@ -338,7 +338,7 @@ function renderInstances() {
     rows.append(row);
   }
   if (!instanceRows.length)
-    rows.textContent = "接入 KDB 后浏览实例，点击实例打开 RTL";
+    rows.textContent = "接入设计数据库 后浏览实例，点击实例打开 RTL";
 }
 $("instanceTree").addEventListener(
   "scroll",
@@ -487,8 +487,8 @@ window.addEventListener("message", (e) => {
   running = !!session?.running;
   updateButton();
   $("sessionStatus").textContent = session
-    ? `${session.running ? "执行中 · " : ""}${session.ready ? "已加载" : "加载中"} · KDB ${session.kdb || "未接入"}\n${session.id}`
-    : "先打开 FSDB / VCD，再输入 nWave 命令。waveHelp 可直接查看帮助。";
+    ? `${session.running ? "执行中 · " : ""}${session.ready ? "已加载" : "加载中"} · 设计数据库 ${session.kdb || "未接入"}\n${session.id}`
+    : "先打开 FSDB / FST / VCD，再输入 nWave 命令。waveHelp 可直接查看帮助。";
   $("history").replaceChildren();
   const placeholder = document.createElement("option");
   placeholder.value = "";

@@ -6,6 +6,73 @@
 async function clickTool(page,selector){const target=page.locator(selector),parent=target.locator('xpath=ancestor::details[contains(@class,"toolMenu")]');if(await parent.count()&&!await parent.evaluate(e=>e.open)){await parent.locator('summary').click();}await target.click();}
 const {test,expect}=require('@playwright/test');
 const fs=require('node:fs');const path=require('node:path');const {Backend}=require('../dist/backend');
+test("large Verilator FST webview seeks and adds signals outside the initial preview", async ({ page }) => {
+  const fixture = process.env.WAVE_TEST_VERILATOR_LARGE;
+  test.skip(!fixture, "Set WAVE_TEST_VERILATOR_LARGE for the real FST webview");
+  const wave = new Backend(path.resolve(__dirname, "../bin/wave-backend-independent"), {
+    useVerdiLibraries: false,
+  });
+  const { VerilatorDesign } = require("../dist/verilator");
+  let design, source;
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.exposeFunction("bridge", async (m) => {
+    const send = (data) => page.evaluate((data) => window.dispatchEvent(new MessageEvent("message", { data })), data);
+    if (m.type === "ready") {
+      const meta = await wave.request("open", { path: path.join(fixture, "top.fst") });
+      design = await VerilatorDesign.open(path.join(fixture, "Vtop.tree.json"), meta.signals, [fixture]);
+      await send({ type: "metadata", ...meta, title: "top.fst" });
+      await send({ type: "kdbAttached", path: design.path });
+      await send({ type: "kdbHierarchy", scope: "", children: await design.children() });
+    } else if (m.type === "query") {
+      const result = await wave.request("query", {
+        signals: m.signals, start: String(m.start), end: String(m.end), limit: m.limit || 20000,
+      });
+      await send({ type: "data", request: m.request, result });
+    } else if (m.type === "search") {
+      const result = await wave.request("search", { query: m.query, offset: m.offset, limit: m.limit });
+      await send({ type: "searchResult", request: m.request, ...result });
+    } else if (m.type === "kdbChildren") {
+      await send({ type: "kdbHierarchy", scope: m.scope, children: await design.children(m.scope) });
+    } else if (m.type === "source") {
+      source = await design.resolve(m.scope + "." + m.name);
+    }
+  });
+  await page.addInitScript(() => {
+    window.acquireVsCodeApi = () => ({ getState: () => null, setState() {}, postMessage: (m) => window.bridge(m) });
+  });
+  await page.route("http://wave.test/**", async (route) => {
+    const name = new URL(route.request().url()).pathname.slice(1) || "index.html";
+    const contentTypes = { "index.html": "text/html", "wave.js": "text/javascript", "wave.css": "text/css" };
+    if (!contentTypes[name]) return route.abort();
+    let body = fs.readFileSync(path.resolve(__dirname, name.endsWith(".js") ? "../dist/webview" : "../media", name), "utf8");
+    if (name === "index.html") body = body.replaceAll("{{csp}}", "http://wave.test").replaceAll("{{nonce}}", "testnonce").replace("{{css}}", "/wave.css").replace("{{script}}", "/wave.js");
+    await route.fulfill({ body, contentType: contentTypes[name] });
+  });
+  try {
+    await page.goto("http://wave.test/");
+    await expect(page.locator("#backend")).toContainText("rust-fst");
+    const tree = page.locator("#kdbTree");
+    await tree.locator('button[title="TOP.top"]').click();
+    await expect(tree.locator('button[title="TOP.top.bank[0]"]')).toBeVisible();
+    await tree.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect(tree.locator('button[title="TOP.top.bank[255]"]')).toBeVisible();
+    await page.locator("#search").fill("top.bank[255].flipped");
+    await expect(page.locator(".leaf")).toHaveCount(1);
+    await page.locator(".leaf").dblclick();
+    await expect(page.locator(".row")).toHaveCount(1);
+    const cursor = page.locator("#cursorAInput");
+    await cursor.fill("99000");
+    await cursor.press("Enter");
+    await expect(page.locator(".row .value")).toHaveText(/^[A-Fa-f0-9]{16}$/);
+    await clickTool(page, '[data-action="source"]');
+    await expect.poll(() => source?.instance).toBe("TOP.top.bank[255]");
+    expect(errors).toEqual([]);
+  } finally {
+    wave.dispose();
+  }
+});
+
 test('native-backed webview: tree, bus, zoom, cursors, edge, source, remove and state',async({page})=>{
   const backend=new Backend(path.resolve(__dirname,'../bin/wave-backend'));
   const errors=[];page.on('pageerror',e=>errors.push(e.message));let state,source;

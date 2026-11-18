@@ -18,6 +18,7 @@ verdi-sdk = []
 
 [dependencies]
 flate2 = "1"
+fst-reader = "0.17.1"
 libloading = "0.8"
 num-bigint = "0.4"
 num-traits = "0.2"

@@ -6,6 +6,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import { version as extensionVersion } from "../package.json";
 
 type Arguments = Record<string, unknown>;
 const maxMessage = 2 * 1024 * 1024;
@@ -76,7 +77,7 @@ const toolDefinitions = [
   tool("wave_list", "List open waveform files and the selected view.", {}, []),
   tool(
     "wave_open",
-    "Open an FSDB/VCD file or restore a .waveproj project in Wave Workbench.",
+    "Open an FSDB, FST or VCD file or restore a .waveproj project in Wave Workbench.",
     {
       path: { type: "string" },
     },
@@ -84,12 +85,20 @@ const toolDefinitions = [
   ),
   tool(
     "wave_save_project",
-    "Save the current waveform and view state to a .waveproj file.",
+    "Save a waveform project without opening a dialog. With no path, use the current project or save beside the waveform.",
     {
-      path: { type: "string" },
-      waveform: { type: "string" },
+      path: {
+        type: "string",
+        description:
+          "Destination .waveproj path. Relative paths use the workspace root.",
+      },
+      waveform: {
+        type: "string",
+        description:
+          "Absolute path of an open waveform. Defaults to the active view.",
+      },
     },
-    ["path"],
+    [],
   ),
 ];
 
@@ -342,7 +351,7 @@ async function stdio(workspace: string) {
           ? version
           : supportedVersions[0],
         capabilities: { tools: {} },
-        serverInfo: { name: "wave-workbench", version: "0.9.19" },
+        serverInfo: { name: "wave-workbench", version: extensionVersion },
       };
     } else if (request.method === "ping") response.result = {};
     else if (request.method === "tools/list")

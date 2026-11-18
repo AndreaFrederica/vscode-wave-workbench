@@ -1,9 +1,9 @@
 {
   "name": "wave-workbench",
-  "displayName": "Wave Workbench — FSDB / KDB / nWave",
-  "version": "0.9.19",
+  "displayName": "Wave Workbench — Verilator Waveforms & RTL Debugging",
+  "version": "0.9.21",
   "publisher": "andreafrederica",
-  "description": "Native FSDB/KDB waveform viewer with nWave Tcl commands and Vide interoperability.",
+  "description": "Debug Verilator FST and VCD in VS Code with elaborated RTL hierarchy, waveform projects, Tcl and MCP. Supports Verdi FSDB and KDB.",
   "license": "MPL-2.0",
   "engines": {
     "vscode": "^1.85.0"
@@ -34,7 +34,7 @@
     "commands": [
       {
         "command": "waveWorkbench.open",
-        "title": "Wave Workbench: Open FSDB / VCD",
+        "title": "Wave Workbench: Open FSDB / FST / VCD",
         "icon": "$(pulse)"
       },
       {
@@ -48,7 +48,7 @@
       },
       {
         "command": "waveWorkbench.attachKdb",
-        "title": "Wave Workbench: Attach KDB (simv.daidir)"
+        "title": "Wave Workbench: Attach Design Database (KDB / Verilator JSON)"
       },
       {
         "command": "waveWorkbench.openPicker",
@@ -164,7 +164,7 @@
       "explorer/context": [
         {
           "command": "waveWorkbench.open",
-          "when": "resourceExtname == .fsdb || resourceExtname == .vcd",
+          "when": "resourceExtname == .fsdb || resourceExtname == .fst || resourceExtname == .vcd",
           "group": "navigation"
         },
         {
@@ -226,6 +226,9 @@
           },
           {
             "filenamePattern": "*.vcd"
+          },
+          {
+            "filenamePattern": "*.fst"
           }
         ],
         "priority": "default"
@@ -280,13 +283,18 @@
           "default": "",
           "description": "Matching VCS simv.daidir or its simv.kdb. Empty automatically checks beside the waveform."
         },
+        "waveWorkbench.verilatorTreePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to Verilator's elaborated .tree.json, relative to the workspace or absolute. Keep the companion .tree.meta.json beside it. Leave empty to detect a matching file beside the VCD or FST."
+        },
         "waveWorkbench.sourcePathMappings": {
           "type": "object",
           "default": {},
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Explicit KDB source path prefix replacements for relocated source snapshots."
+          "description": "Design database source path prefix replacements for relocated RTL."
         },
         "waveWorkbench.hierarchyMappings": {
           "type": "object",
@@ -294,7 +302,7 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Explicit FSDB hierarchy prefix to KDB hierarchy prefix replacements."
+          "description": "Waveform hierarchy prefix to design database hierarchy prefix replacements."
         },
         "waveWorkbench.defaultWaveform": {
           "type": "string",

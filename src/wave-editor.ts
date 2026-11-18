@@ -12,7 +12,12 @@ import type { Backend } from "./backend";
 import type { Metadata, WaveState } from "./shared/protocol";
 import { loadDecoderCatalog, saveDecoderProfile } from "./decoder-config";
 import { backendPlan, isFsdb, type FsdbBackend } from "./backend-selection";
-import { mapPrefix, type KdbSession } from "./kdb";
+import { mapPrefix, type DesignSession } from "./kdb";
+import {
+  findVerilatorTree,
+  VerilatorDesign,
+  verilatorTreeFile,
+} from "./verilator";
 import { registerVirtuals, restoreView } from "./view-state";
 import * as WaveSignal from "./shared/signals";
 
@@ -183,11 +188,62 @@ export function createWaveEditor(
       });
     }
     viewer.showHierarchy = showHierarchy;
+    viewer.restoreDesignView = async (view) => {
+      if (!viewer.kdb || !view) return;
+      const session = viewer.kdb;
+      viewer.includeOther = view.includeOther;
+      viewer.treeExpanded.clear();
+      viewer.treeCache.clear();
+      await showHierarchy();
+      const scopes = new Set(view.expanded);
+      let selected = view.selected
+        ? await session.resolve(view.selected).catch(() => undefined)
+        : undefined;
+      if (selected && selected.fullname !== selected.instance)
+        selected = undefined;
+      const visited = new Set<string>();
+      for (let scope = selected?.fullname; scope && !visited.has(scope); ) {
+        visited.add(scope);
+        const parent = await session.parent(scope);
+        if (parent) scopes.add(parent);
+        scope = parent;
+      }
+      for (const scope of scopes) {
+        if (!scope || viewer.kdb !== session || viewer.disposed) continue;
+        const record = await session.resolve(scope).catch(() => undefined);
+        if (!record || record.fullname !== record.instance) continue;
+        viewer.treeExpanded.add(scope);
+        await showHierarchy(scope);
+      }
+      if (viewer.kdb !== session || viewer.disposed) return;
+      viewer.selectedScope = selected?.fullname || "";
+      viewer.revealScope = viewer.selectedScope;
+      viewer.revealId = (viewer.revealId || 0) + 1;
+      refreshSidebar();
+      await panel.webview.postMessage({
+        type: "scopeSelected",
+        scope: viewer.selectedScope,
+      });
+    };
     const openKdb = async (
       database: string,
       selected: ReturnType<typeof choosePlan>,
       choice: FsdbBackend,
     ) => {
+      if (verilatorTreeFile(database)) {
+        const directory = path.dirname(database);
+        const sourceDirectories = [
+          vscode.workspace.getWorkspaceFolder?.(document.uri)?.uri.fsPath,
+          path.dirname(document.uri.fsPath),
+          directory,
+          path.dirname(directory),
+        ].filter(Boolean);
+        return VerilatorDesign.open(
+          database,
+          viewer.meta?.signals || [],
+          sourceDirectories,
+        );
+      }
       const session = selected.createKdb();
       try {
         await session.open(database);
@@ -212,13 +268,30 @@ export function createWaveEditor(
       viewer.attaching = (async () => {
         let database = suggested;
         if (!database) {
-          const selection = await vscode.window.showOpenDialog({
-            title: "选择与当前 FSDB 匹配的 VCS simv.daidir（KDB）",
-            canSelectFiles: false,
-            canSelectFolders: true,
-            canSelectMany: false,
-          });
+          const kind = isFsdb(document.uri.fsPath)
+            ? "KDB"
+            : await vscode.window.showQuickPick(
+                ["Verilator elaboration JSON", "KDB"],
+                { placeHolder: "选择设计数据库类型" },
+              );
+          if (!kind) return false;
+          const selection = await vscode.window.showOpenDialog(
+            kind === "KDB"
+              ? {
+                  title: "选择 VCS simv.daidir（KDB）",
+                  canSelectFiles: false,
+                  canSelectFolders: true,
+                  canSelectMany: false,
+                }
+              : {
+                  title: "选择 Verilator .tree.json",
+                  filters: { "Verilator JSON": ["json"] },
+                  canSelectMany: false,
+                },
+          );
           database = selection?.[0]?.fsPath;
+          if (database && kind !== "KDB" && !verilatorTreeFile(database))
+            throw Error("请选择 Verilator --json-only 生成的 .tree.json");
         }
         if (!database) return false;
         const session = await openKdb(database, plan, preference);
@@ -231,6 +304,11 @@ export function createWaveEditor(
           viewer.kdb = session;
           viewer.treeCache.clear();
           viewer.treeExpanded.clear();
+          viewer.sourceInstances.clear();
+          viewer.selectedScope = "";
+          viewer.revealScope = "";
+          viewer.scopeHistory = [];
+          viewer.scopeIndex = -1;
           refreshSidebar();
           await context.workspaceState.update(
             `kdb:${document.uri.toString()}`,
@@ -316,9 +394,19 @@ export function createWaveEditor(
         path.dirname(document.uri.fsPath),
         "simv.daidir",
       );
+      const tree = cfg.get<string>("verilatorTreePath");
+      const configuredTree =
+        tree &&
+        path.resolve(
+          vscode.workspace.getWorkspaceFolder?.(document.uri)?.uri.fsPath ||
+            path.dirname(document.uri.fsPath),
+          tree,
+        );
       const database =
         document.backup?.kdb ||
         context.workspaceState.get<string>(`kdb:${document.uri.toString()}`) ||
+        (!isFsdb(document.uri.fsPath) &&
+          (configuredTree || (await findVerilatorTree(document.uri.fsPath)))) ||
         (fs.existsSync(sibling) ? sibling : null) ||
         cfg.get<string>("kdbPath");
       try {
@@ -326,6 +414,7 @@ export function createWaveEditor(
         if (!document.dirty) document.savedKdb = viewer.kdb?.path;
         const backup = document.backup;
         if (backup) {
+          await viewer.restoreDesignView(backup.designView);
           const restored = await restoreView(backend, backup.view, meta);
           await viewer.ui("restoreView", {
             ...restored,
@@ -352,7 +441,7 @@ export function createWaveEditor(
         throw Error("当前波形正在切换后端、执行 Tcl 或接入 KDB，请稍后再试");
       switching = true;
       let candidate: Backend | undefined;
-      let candidateKdb: KdbSession | undefined;
+      let candidateKdb: DesignSession | undefined;
       try {
         await viewer.ready;
         if (viewer.disposed) throw Error("波形窗口已关闭");
@@ -372,7 +461,7 @@ export function createWaveEditor(
         const attached = viewer.kdb;
         const roots = new Map<
           string,
-          Awaited<ReturnType<KdbSession["children"]>>
+          Awaited<ReturnType<DesignSession["children"]>>
         >();
         if (attached) {
           candidateKdb = await openKdb(attached.path, next, choice);

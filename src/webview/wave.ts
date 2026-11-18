@@ -2053,7 +2053,7 @@ window.addEventListener("message", async (e) => {
   } else if (msg.type === "kdbAttached") {
     $("kdbState").textContent = `已接入 · ${msg.path}`;
   } else if (msg.type === "kdbDetached") {
-    $("kdbState").textContent = "未接入 KDB";
+    $("kdbState").textContent = "未接入设计数据库";
     kdbScope = "";
     kdbRows = [];
     renderKdb();
@@ -2061,9 +2061,7 @@ window.addEventListener("message", async (e) => {
     kdbScope = msg.scope;
     kdbRows = msg.children;
     $("kdbTree").scrollTop = 0;
-    $("kdbState").textContent =
-      (kdbScope || "KDB 顶层实例") +
-      (msg.children.length >= 1500 ? " · 仅显示前 1500 个子项" : "");
+    $("kdbState").textContent = kdbScope || "顶层实例";
     renderKdb();
   } else if (msg.type === "searchResult") {
     if (

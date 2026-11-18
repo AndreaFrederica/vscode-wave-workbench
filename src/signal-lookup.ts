@@ -50,20 +50,25 @@ async function findSignal(backend: Backend, name: string, delimiter = "/") {
 }
 
 async function findRtlSignals(backend: Backend, scope: string, name: string) {
-  const signal = await lookupSignal(backend, `${scope}.${name}`);
+  const aggregate = scope + "." + name.split("[", 1)[0];
+  const signal =
+    (await lookupSignal(backend, scope + "." + name)) ||
+    (await lookupSignal(backend, aggregate + "." + name));
   if (signal)
     return { signals: signal.supported ? [signal] : [], partial: false };
 
-  // FSDB can record the elements of a packed array as separate signals.
+  // Array elements can be recorded directly or under an aggregate trace scope.
   const limit = 16;
-  const result = await backend.request("search", {
-    query: `${scope}.${name}[`,
-  });
+  const prefix = scope + "." + name + "[";
+  const direct = await backend.request("search", { query: prefix });
+  const result = direct.total
+    ? direct
+    : await backend.request("search", { query: aggregate + "." + name + "[" });
   const members = result.signals
     .filter(
       (entry) =>
         entry.supported &&
-        entry.scope === scope &&
+        (entry.scope === scope || entry.scope === aggregate) &&
         entry.name.startsWith(name + "[") &&
         /^(?:\[\s*-?\d+\s*\])+$/.test(
           normalName(entry.name, ".").slice(name.length),

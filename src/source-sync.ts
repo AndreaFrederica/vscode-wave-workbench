@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 function moduleAt(text: string, line = 0) {
-  // Preserve offsets/newlines while excluding strings and comments. KDB remains
+  // Preserve offsets/newlines while excluding strings and comments. The design remains
   // authoritative for elaboration; this only identifies the editor's declaration.
   const clean = text.replace(
     /\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"/g,
@@ -15,7 +15,7 @@ function moduleAt(text: string, line = 0) {
   );
   const matches = [
     ...clean.matchAll(
-      /\b(module|interface|program)\s+(?:(?:automatic|static)\s+)?(\\\S+|[a-zA-Z_$][\w$]*)/g,
+      /\b(module|interface|program|package)\s+(?:(?:automatic|static)\s+)?(\\\S+|[a-zA-Z_$][\w$]*)/g,
     ),
   ];
   const offset = text

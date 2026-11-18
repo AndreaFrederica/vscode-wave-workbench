@@ -10,9 +10,12 @@ mod kdb;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
+    cell::RefCell,
     collections::HashMap,
     io::{self, BufRead, Write},
+    sync::Arc,
 };
+use wavebench_reader::fst::Fst;
 use wavebench_reader::vcd::{Events, Signal, Vcd};
 #[cfg(fsdb)]
 mod native {
@@ -169,6 +172,7 @@ impl IndependentFsdb {
 
 enum Database {
     Vcd(Vcd),
+    Fst(RefCell<Fst>, Vec<Signal>),
     IndependentFsdb(IndependentFsdb),
     #[cfg(fsdb)]
     Fsdb(native::Fsdb),
@@ -177,12 +181,18 @@ impl Database {
     fn signals(&self) -> &Vec<Signal> {
         match self {
             Self::Vcd(v) => &v.signals,
+            Self::Fst(_, signals) => signals,
             Self::IndependentFsdb(v) => &v.signals,
             #[cfg(fsdb)]
             Self::Fsdb(v) => &v.signals,
         }
     }
     fn open(path: &str, independent: bool) -> Result<Self, String> {
+        if path.to_lowercase().ends_with(".fst") {
+            let mut reader = Fst::open(path)?;
+            let signals = std::mem::take(&mut reader.signals);
+            return Ok(Self::Fst(RefCell::new(reader), signals));
+        }
         if path.to_lowercase().ends_with(".fsdb") {
             if independent {
                 return IndependentFsdb::open(path).map(Self::IndependentFsdb);
@@ -200,16 +210,24 @@ impl Database {
     }
     fn meta(&self) -> Value {
         let (start, end, scale, backend) = match self {
-            Self::Vcd(v) => (0, v.end, &v.scale, "rust-vcd"),
-            Self::IndependentFsdb(v) => (v.start, v.end, &v.scale, "rust-independent-fsdb"),
+            Self::Vcd(v) => (0, v.end, v.scale.clone(), "rust-vcd"),
+            Self::Fst(reader, _) => {
+                let reader = reader.borrow();
+                (reader.start, reader.end, reader.scale.clone(), "rust-fst")
+            }
+            Self::IndependentFsdb(v) => (v.start, v.end, v.scale.clone(), "rust-independent-fsdb"),
             #[cfg(fsdb)]
-            Self::Fsdb(v) => (v.start, v.end, &v.scale, "native-fsdb"),
+            Self::Fsdb(v) => (v.start, v.end, v.scale.clone(), "native-fsdb"),
         };
         json!({"signals":self.signals().iter().take(1500).collect::<Vec<_>>(),"total":self.signals().len(),"start":start.to_string(),"end":end.to_string(),"scale":scale,"backend":backend})
     }
     fn read(&self, id: &str, start: u64, end: u64, limit: usize) -> Result<(Events, bool), String> {
         match self {
             Self::Vcd(v) => v.query(id, start, end, limit),
+            Self::Fst(reader, _) => Ok(reader
+                .borrow_mut()
+                .query(&[id], start, end, limit)?
+                .remove(0)),
             #[cfg(fsdb)]
             Self::Fsdb(v) => v.query(id, start, end, limit),
             Self::IndependentFsdb(v) => v
@@ -264,8 +282,47 @@ impl Store {
             return Err("Invalid query bounds (max 64 signals, 100000 events each)".into());
         }
         let mut output = serde_json::Map::new();
+        let mut physical_blocks = HashMap::new();
+        if let Database::Fst(reader, _) = &self.database {
+            let mut missing = Vec::new();
+            for id in ids {
+                if self.virtuals.contains_key(id)
+                    || physical_blocks.contains_key(id)
+                    || missing.iter().any(|key: &cache::Key| key.signal == *id)
+                {
+                    continue;
+                }
+                if !self.signal(id).ok_or("Unknown signal")?.supported {
+                    return Err("Unsupported signal encoding".into());
+                }
+                let key = cache::Key {
+                    signal: id.clone(),
+                    start,
+                    end,
+                    limit,
+                };
+                if let Some(block) = self.cache.get(&key) {
+                    physical_blocks.insert(id.clone(), block);
+                } else {
+                    missing.push(key);
+                }
+            }
+            if !missing.is_empty() {
+                let requests: Vec<_> = missing.iter().map(|key| key.signal.as_str()).collect();
+                let decoded = reader.borrow_mut().query(&requests, start, end, limit)?;
+                self.cache.stats.reads += 1;
+                for (key, (events, truncated)) in missing.into_iter().zip(decoded) {
+                    let block = Arc::new(cache::Block { events, truncated });
+                    physical_blocks.insert(key.signal.clone(), block.clone());
+                    self.cache.insert(key, block);
+                }
+            }
+        }
         for id in ids {
-            let block = self.read_block(id, start, end, limit)?;
+            let block = match physical_blocks.get(id) {
+                Some(block) => block.clone(),
+                None => self.read_block(id, start, end, limit)?,
+            };
             output.insert(id.clone(),json!({"events":block.events.iter().map(|(t,v)|(t.to_string(),v)).collect::<Vec<_>>(),"truncated":block.truncated}));
         }
         Ok(Value::Object(output))

@@ -8,6 +8,16 @@ import { Backend } from "./backend";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+export interface DesignSession {
+  readonly kind: "kdb" | "verilator";
+  readonly path: string;
+  resolve(fullname: string): Promise<Location | undefined>;
+  children(fullname?: string, all?: boolean): Promise<Location[]>;
+  instances(module: string): Promise<Location[]>;
+  parent(fullname: string): Promise<string>;
+  dispose(): void;
+}
+
 function mapPrefix(value: string, mappings: Record<string, string> = {}) {
   const prefix = Object.keys(mappings)
     .filter(
@@ -17,7 +27,8 @@ function mapPrefix(value: string, mappings: Record<string, string> = {}) {
     .sort((a, b) => b.length - a.length)[0];
   return prefix ? mappings[prefix] + value.slice(prefix.length) : value;
 }
-class KdbSession {
+class KdbSession implements DesignSession {
+  readonly kind = "kdb";
   childrenCache: Map<string, Promise<Location[]>>;
   locationCache: Map<string, Promise<Location | undefined>>;
   instanceCache: Map<string, Promise<Location[]>>;

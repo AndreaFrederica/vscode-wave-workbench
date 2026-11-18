@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Viewer, WaveDocument } from "./viewer";
 import { restoreView } from "./view-state";
+import { designSnapshot } from "./project";
 
 type DocumentMethods = Omit<
   vscode.CustomEditorProvider<WaveDocument>,
@@ -40,6 +41,7 @@ export function createWaveDocuments(
         projectPath: backup?.projectPath,
         savedView: backup?.savedView,
         savedKdb: backup?.savedKdb,
+        savedDesignView: backup?.savedDesignView,
         dirty: !!backup,
         dispose() {},
       };
@@ -53,7 +55,9 @@ export function createWaveDocuments(
           document.projectPath &&
           document.view &&
           document.view === document.savedView &&
-          viewer.kdb?.path === document.savedKdb
+          viewer.kdb?.path === document.savedKdb &&
+          JSON.stringify(designSnapshot(viewer)) ===
+            JSON.stringify(document.savedDesignView)
         )
       ) {
         if (!(await saveProject(viewer, undefined, cancellation)))
@@ -102,6 +106,7 @@ export function createWaveDocuments(
           await viewer.panel.webview.postMessage({ type: "kdbDetached" });
         }
       }
+      await viewer.restoreDesignView?.(document.savedDesignView);
       await viewer.ui("restoreView", { ...restored, projectBaseline: true });
       document.dirty = false;
     },
@@ -115,8 +120,10 @@ export function createWaveDocuments(
       const backup: WaveDocument["backup"] = {
         view,
         kdb: viewer?.kdb?.path,
+        designView: viewer && designSnapshot(viewer),
         savedView: document.savedView,
         savedKdb: document.savedKdb,
+        savedDesignView: document.savedDesignView,
         projectPath: document.projectPath,
       };
       await fs.promises.writeFile(filename, JSON.stringify(backup), {

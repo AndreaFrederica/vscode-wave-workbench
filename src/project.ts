@@ -4,13 +4,31 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { WaveState } from "./shared/protocol";
+import type { Viewer } from "./viewer";
 
 interface WaveProject {
   format: "wave-workbench-project";
   version: 1;
   waveform: string;
   kdb?: string;
+  verilator?: string;
+  designView?: DesignView;
   view: WaveState;
+}
+
+export interface DesignView {
+  selected: string;
+  expanded: string[];
+  includeOther: boolean;
+}
+
+export function designSnapshot(viewer: Viewer): DesignView | undefined {
+  if (!viewer.kdb) return undefined;
+  return {
+    selected: viewer.selectedScope || "",
+    expanded: [...viewer.treeExpanded].sort(),
+    includeOther: !!viewer.includeOther,
+  };
 }
 
 export async function saveWaveProject(
@@ -18,6 +36,8 @@ export async function saveWaveProject(
   waveform: string,
   view: WaveState,
   kdb?: string,
+  verilator?: string,
+  designView?: DesignView,
 ) {
   const directory = path.dirname(filename);
   const document: WaveProject = {
@@ -25,6 +45,8 @@ export async function saveWaveProject(
     version: 1,
     waveform: path.relative(directory, waveform),
     kdb: kdb ? path.relative(directory, kdb) : undefined,
+    verilator: verilator ? path.relative(directory, verilator) : undefined,
+    designView,
     view,
   };
   const temporary = path.join(directory, ".wave-project-" + randomUUID());
@@ -52,6 +74,17 @@ export async function readWaveProject(filename: string) {
     typeof document.waveform !== "string" ||
     !document.waveform ||
     (document.kdb !== undefined && typeof document.kdb !== "string") ||
+    (document.verilator !== undefined &&
+      (typeof document.verilator !== "string" ||
+        !/\.tree\.json$/i.test(document.verilator))) ||
+    Boolean(document.kdb && document.verilator) ||
+    (document.designView !== undefined &&
+      (typeof document.designView?.selected !== "string" ||
+        !Array.isArray(document.designView.expanded) ||
+        document.designView.expanded.some(
+          (scope) => typeof scope !== "string",
+        ) ||
+        typeof document.designView.includeOther !== "boolean")) ||
     !document.view ||
     !Array.isArray(document.view.chosen)
   )
@@ -61,5 +94,8 @@ export async function readWaveProject(filename: string) {
     ...document,
     waveform: path.resolve(directory, document.waveform),
     kdb: document.kdb ? path.resolve(directory, document.kdb) : undefined,
+    verilator: document.verilator
+      ? path.resolve(directory, document.verilator)
+      : undefined,
   };
 }

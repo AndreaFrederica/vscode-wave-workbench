@@ -26,6 +26,8 @@ export const backendChoices = [
 ] as const;
 
 export const isFsdb = (filename: string) => /\.fsdb$/i.test(filename);
+export const isWaveform = (filename: string) =>
+  /\.(?:fsdb|fst|vcd)$/i.test(filename);
 
 export function backendPlan(
   context: Pick<vscode.ExtensionContext, "asAbsolutePath">,
@@ -71,10 +73,22 @@ export function backendPlan(
   }
   const env = { ...process.env };
   if (home) env.VERDI_HOME = home;
+  const fst = /\.fst$/i.test(filename);
+  const fsdb = isFsdb(filename);
+  const standalone = context.asAbsolutePath(
+    `bin/wave-backend-independent${process.platform === "win32" ? ".exe" : ""}`,
+  );
+  const waveBinary =
+    !fsdb && existsSync(standalone) ? standalone : defaultBinary;
   return {
-    kind: isFsdb(filename) ? ("verdi" as const) : ("vcd" as const),
-    label: isFsdb(filename) ? "Verdi 后端" : "VCD",
-    createWave: () => new Backend(binary || defaultBinary, { env, onLog: log }),
+    kind: fsdb ? ("verdi" as const) : fst ? ("fst" as const) : ("vcd" as const),
+    label: fsdb ? "Verdi 后端" : fst ? "FST" : "VCD",
+    createWave: () =>
+      new Backend(binary || waveBinary, {
+        env,
+        onLog: log,
+        useVerdiLibraries: fsdb || Boolean(binary),
+      }),
     createKdb: () => {
       if (!home && !binary)
         throw Error("请设置 waveWorkbench.verdiHome 或 VERDI_HOME 后接入 KDB");
