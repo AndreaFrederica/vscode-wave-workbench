@@ -48,3 +48,12 @@ WAVE_TEST_BACKEND="$PWD/independent_backend/backend.py" \
   WAVE_TEST_KDB="/path/to/mac/simv.daidir" \
   node --test test/kdb-extension.test.js
 ```
+
+## Rust 迁移
+
+Rust 的第一步是读取 FSDB 文件头、声明快照、时间窗口、块索引和字典位置。可用 `fsdb-inspect` 将这些字段与 Python 读取器逐项对照。
+
+```sh
+cargo build --locked --manifest-path native/Cargo.toml --bin fsdb-inspect
+python3 test/compare-fsdb-container.py native/target/debug/fsdb-inspect /path/to/simulation.fsdb
+```
