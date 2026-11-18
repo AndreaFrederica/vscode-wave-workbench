@@ -25,6 +25,8 @@ npm run package:native
 
 在 VS Code 扩展视图中选择「从 VSIX 安装…」。使用 Remote SSH 时，在运行工作区扩展的远端主机上构建并安装对应平台的包。打包脚本支持 Linux、macOS 和 Windows 的 x64 与 ARM64 目标。打开现成波形可以先用仓库里的示例。 [示例 VCD](examples/demo.vcd)
 
+**RTL 语言服务（LSP）建议安装 Vide。** 在 VS Code 扩展视图搜索 `pascal-lab.vide-code-extension`。Vide 为 Verilog 和 SystemVerilog 提供代码补全、诊断和语义高亮，Wave Workbench 负责波形浏览和 RTL 联动。 [Vide 扩展](https://marketplace.visualstudio.com/items?itemName=pascal-lab.vide-code-extension)
+
 ## 跑通第一个 Verilator 示例
 
 用 Verilator 5.054 和仓库自带的计数器示例生成一份真实 FST 与实例树。FST 仿真构建可能需要系统的 LZ4 和 zlib 开发包。 [Verilator 追踪与 JSON 参数](https://verilator.org/guide/latest/exe_verilator.html)
