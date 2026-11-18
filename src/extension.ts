@@ -24,7 +24,11 @@ import {
 import { registerVirtuals, restoreView } from "./view-state";
 import { readWaveProject, saveWaveProject } from "./project";
 import { loadDecoderProfiles } from "./decoder-config";
-import { decodeWord, supportsProfile } from "./shared/decoders";
+import {
+  builtinProfiles,
+  decodeWord,
+  supportsProfile,
+} from "./shared/decoders";
 import { findRtlSignals, readSignalsAt } from "./signal-lookup";
 import { serveWaveMcp } from "./mcp";
 import {
@@ -335,7 +339,9 @@ function activate(context: vscode.ExtensionContext) {
       (entry) => WaveSignal.key(entry) === WaveSignal.key(signal),
     );
     const decoded =
-      style?.decoder && decodeWord(style.decoder, raw, signal.width);
+      viewer.document.view?.showDecodedValues !== false &&
+      style?.decoder &&
+      decodeWord(style.decoder, raw, signal.width);
     markdown.appendCodeblock(
       `${signal.scope}.${WaveSignal.label(signal)}`,
       "text",
@@ -914,13 +920,19 @@ function activate(context: vscode.ExtensionContext) {
         .filter((p) => supportsProfile(p, signal.width))
         .map((profile) => ({
           label: profile.label,
-          description: profile.id,
+          description:
+            (builtinProfiles.some((preset) => preset.id === profile.id)
+              ? "内置预设"
+              : "工作区规则") +
+            " · " +
+            profile.id,
+          detail: signal.decoder?.id === profile.id ? "当前配置" : undefined,
           profile,
         })),
     ];
     const pick = await vscode.window.showQuickPick(choices, {
       title: "信号解码 · " + WaveSignal.label(signal),
-      placeHolder: "选择解码配置",
+      placeHolder: "选择与信号位宽匹配的解码规则",
     });
     if (pick) await viewer.ui("setDecoder", { signal, profile: pick.profile });
   }

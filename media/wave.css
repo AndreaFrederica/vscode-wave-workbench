@@ -128,7 +128,35 @@ body.sidebar-connected main>aside{display:none}
 #displayMenu input[type="range"] { min-width: 130px; }
 
 .signalAnnotation { margin-inline-start: .4em; color: var(--muted); }
+#displayMenu input[type="checkbox"] { margin: 0; accent-color: var(--accent); }
+.row .name.withInlineTags { display: flex; align-items: center; gap: .35em; min-width: 0; }
+.signalNameText, .signalTags { overflow: hidden; text-overflow: ellipsis; }
+.signalTags { max-width: 45%; color: var(--muted); font-size: 10px; }
+.row.active .signalTags { color: inherit; }
+.withInlineTags .signalAnnotation { flex: none; margin-inline-start: 0; }
 .hoverAnnotation { white-space: pre-wrap; margin-block: 4px; color: var(--muted); }
 #annotationSignal { overflow-wrap: anywhere; }
 #annotationNote { font: inherit; color: var(--input-fg); background: var(--input-bg); border: 1px solid var(--input-border); resize: vertical; }
 #annotationError { color: var(--error); font-size: 11px; }
+
+#decoderSelection {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 9px;
+  font-size: 11px;
+  color: var(--muted);
+}
+#editPopover:has(#decoderForm:not([hidden])) { width: 570px; }
+#decoderForm { max-height: calc(100vh - 96px); overflow: auto; }
+#decoderSignal { overflow-wrap: anywhere; }
+.decoderHint { color: var(--muted); }
+.decoderRuleList { overflow: auto; }
+.decoderRuleList table { width: 100%; min-width: 320px; table-layout: fixed; border-spacing: 5px; }
+.decoderRuleList th { text-align: left; font-size: 11px; color: var(--muted); }
+.decoderNumber { width: 21%; }
+.decoderControls { width: 79px; }
+.decoderRuleList td:last-child { white-space: nowrap; }
+.decoderRuleList td:last-child button + button { margin-inline-start: 4px; }
+#decoderError:empty { display: none; }
+#decoderError { font-size: 11px; color: var(--error); }

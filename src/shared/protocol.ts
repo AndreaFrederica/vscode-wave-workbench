@@ -79,6 +79,8 @@ export interface WaveState {
   markers: Marker[];
   markersVisible?: boolean;
   tooltipEnabled?: boolean;
+  showInlineTags?: boolean;
+  showDecodedValues?: boolean;
   busLabelMode?: BusLabelMode;
   rowHeight?: number;
   namesFraction?: number;

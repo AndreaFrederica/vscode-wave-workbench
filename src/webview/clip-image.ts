@@ -23,6 +23,7 @@ function compactValue(value: string) {
 export function renderClipImage(
   clip: WaveClip,
   busLabelMode: BusLabelMode,
+  showDecodedValues: boolean,
 ): string {
   const canvas = document.createElement("canvas");
   const width = 1440,
@@ -138,7 +139,9 @@ export function renderClipImage(
         ]);
         if (after - x >= 12) {
           const decoded =
-            trace.decoder && decodeWord(trace.decoder, value, trace.width);
+            showDecodedValues &&
+            trace.decoder &&
+            decodeWord(trace.decoder, value, trace.width);
           const text = decoded || compactValue(value);
           ctx.fillStyle = color;
           drawBusLabel(

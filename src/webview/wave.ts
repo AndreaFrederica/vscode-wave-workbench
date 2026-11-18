@@ -12,6 +12,7 @@ import {
   normalizeAnnotation,
   supportsProfile,
   validateProfile,
+  type Rule,
 } from "../shared/decoders";
 import type {
   Signal,
@@ -77,6 +78,17 @@ let markersVisible = saved.markersVisible !== false;
 let tooltipEnabled = saved.tooltipEnabled !== false;
 let busLabelMode: BusLabelMode =
   saved.busLabelMode === "full" ? "full" : "auto";
+const showInlineTags = $("showInlineTags");
+const showDecodedValues = $("showDecodedValues");
+function applyValueDisplay(state: Partial<WaveState>) {
+  showInlineTags.checked = state.showInlineTags === true;
+  showDecodedValues.checked = state.showDecodedValues !== false;
+}
+applyValueDisplay(saved);
+showInlineTags.onchange = showDecodedValues.onchange = () => {
+  persist();
+  if (meta) render();
+};
 let clearWaveHover: () => void;
 let rowHeight = normalizeRowHeight(saved.rowHeight);
 let namesFraction = normalizeNamesFraction(saved.namesFraction);
@@ -171,6 +183,8 @@ function persist() {
         markers,
         markersVisible,
         tooltipEnabled,
+        showInlineTags: showInlineTags.checked,
+        showDecodedValues: showDecodedValues.checked,
         busLabelMode,
         rowHeight,
         namesFraction,
@@ -948,15 +962,26 @@ function render() {
     name.className = "name";
     name.textContent = WaveSignal.label(s);
     if (s.annotation) {
-      const mark = document.createElement("span");
-      mark.className = "signalAnnotation";
-      mark.textContent = "✎";
-      mark.setAttribute("aria-label", "有标签或注释");
-      name.append(mark);
-      row.title += [
-        s.annotation.tags.map((tag) => "#" + tag).join(" "),
-        s.annotation.note,
-      ]
+      const tags = s.annotation.tags.map((tag) => "#" + tag).join(" ");
+      const inline = showInlineTags.checked && tags;
+      if (inline) {
+        const label = document.createElement("span");
+        label.className = "signalNameText";
+        label.textContent = name.textContent;
+        const tagText = document.createElement("span");
+        tagText.className = "signalTags";
+        tagText.textContent = tags;
+        name.classList.add("withInlineTags");
+        name.replaceChildren(label, tagText);
+      }
+      if (s.annotation.note || !inline) {
+        const mark = document.createElement("span");
+        mark.className = "signalAnnotation";
+        mark.textContent = "✎";
+        mark.setAttribute("aria-label", "有标签或注释");
+        name.append(mark);
+      }
+      row.title += [tags, s.annotation.note]
         .filter(Boolean)
         .map((text) => "\n" + text)
         .join("");
@@ -970,12 +995,13 @@ function render() {
     const value = document.createElement("span");
     value.className = "value";
     const raw = cursorValue(s.id);
-    value.textContent =
-      (s.decoder &&
-        decodeWord(s.decoder, WaveSignal.project(raw, s), s.width)) ||
-      formatSignal(raw, s);
-    if (s.decoder)
-      value.title = value.textContent + " · " + formatSignal(raw, s);
+    const rawValue = formatSignal(raw, s);
+    const decoded =
+      showDecodedValues.checked &&
+      s.decoder &&
+      decodeWord(s.decoder, WaveSignal.project(raw, s), s.width);
+    value.textContent = decoded || rawValue;
+    if (decoded) value.title = decoded + " · " + rawValue;
     const toggle = document.createElement("button");
     toggle.className = "busToggle";
     toggle.textContent =
@@ -1145,7 +1171,10 @@ function draw() {
       }
       ctx.stroke();
       if (s.width > 1 && right - left >= 10) {
-        const decoded = s.decoder && decodeWord(s.decoder, v, s.width);
+        const decoded =
+          showDecodedValues.checked &&
+          s.decoder &&
+          decodeWord(s.decoder, v, s.width);
         const value = decoded || formatSignal(raw, s),
           mode = s.displayRadix || radix;
         const compact = decoded
@@ -1674,6 +1703,8 @@ function snapshot(): WaveState & { chosen: Signal[] } {
     markers,
     markersVisible,
     tooltipEnabled,
+    showInlineTags: showInlineTags.checked,
+    showDecodedValues: showDecodedValues.checked,
     busLabelMode,
     rowHeight,
     namesFraction,
@@ -1707,7 +1738,8 @@ async function uiAction(name, p) {
     const selected = explicit.length ? explicit : displayed;
     return { start, end, cursorA, cursorB, selected, displayed, markers };
   }
-  if (name === "renderClipImage") return renderClipImage(p, busLabelMode);
+  if (name === "renderClipImage")
+    return renderClipImage(p, busLabelMode, showDecodedValues.checked);
   if (name === "restoreView") {
     if (p.projectBaseline) projectSignature = undefined;
     virtualDefinitions = p.virtualDefinitions || [];
@@ -1724,6 +1756,7 @@ async function uiAction(name, p) {
     displayFactor = p.displayFactor || 1;
     markers = p.markers || [];
     markersVisible = p.markersVisible !== false;
+    applyValueDisplay(p);
     setTooltip(p.tooltipEnabled !== false);
     setBusLabelMode(p.busLabelMode);
     rowHeight = normalizeRowHeight(p.rowHeight);
@@ -2709,6 +2742,106 @@ vscode.postMessage({ type: "ready" });
     $("signalAlias").select();
   }
   $("renameSignal").onclick = editAlias;
+  let decoderTarget: Signal;
+  const ruleFields = ["mask", "value", "label"] as const;
+  const ruleLabels = { mask: "掩码", value: "匹配值", label: "显示文本" };
+  const decodeMenu = $("decoderMenu");
+  decodeMenu.addEventListener("toggle", () => {
+    if (!decodeMenu.open) return;
+    const signal = chosen[active];
+    $("decoderSelection").textContent = signal
+      ? `${WaveSignal.label(signal)} · ${signal.decoder?.label || "原始值"}`
+      : "先选中波形信号";
+    decodeMenu.querySelector<HTMLButtonElement>(
+      '[data-action="selectDecoder"]',
+    ).disabled = !signal;
+    $("editSignalDecoder").disabled = !signal;
+    $("clearSignalDecoder").disabled = !signal?.decoder;
+  });
+  function appendDecoderRule(rule: Rule) {
+    const rows = $("decoderRules");
+    const row = rows.insertRow();
+    for (const field of ruleFields) {
+      const input = document.createElement("input");
+      input.value = rule[field];
+      input.maxLength = field === "label" ? 160 : 258;
+      input.required = true;
+      input.spellcheck = false;
+      input.autocapitalize = "off";
+      input.setAttribute("aria-label", ruleLabels[field]);
+      row.insertCell().append(input);
+    }
+    const controls = row.insertCell();
+    const up = document.createElement("button");
+    up.type = "button";
+    up.textContent = "↑";
+    up.setAttribute("aria-label", "上移规则");
+    up.onclick = () => {
+      const previous = row.previousElementSibling;
+      if (previous) rows.insertBefore(row, previous);
+    };
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "删除";
+    remove.onclick = () => row.remove();
+    controls.append(up, remove);
+  }
+  function addDefaultDecoderRule() {
+    if ($("decoderRules").rows.length >= 256) {
+      $("decoderError").textContent = "最多可添加 256 条解码规则";
+      return;
+    }
+    const mask = "0x" + ((1n << BigInt(decoderTarget.width)) - 1n).toString(16);
+    appendDecoderRule({ mask, value: "0", label: "" });
+  }
+  $("editSignalDecoder").onclick = () => {
+    decoderTarget = chosen[active];
+    if (!decoderTarget) return;
+    if (decoderTarget.width < 2 || decoderTarget.width > 256) {
+      status("自定义规则适用于 2–256 位信号", "warn");
+      return;
+    }
+    const profile = decoderTarget.decoder;
+    $("decoderSignal").textContent =
+      `${WaveSignal.label(decoderTarget)} · ${decoderTarget.width} 位`;
+    $("decoderLabel").value = profile?.rules ? profile.label : "自定义解码";
+    $("decoderError").textContent = "";
+    $("decoderRules").replaceChildren();
+    if (profile?.rules) profile.rules.forEach(appendDecoderRule);
+    else addDefaultDecoderRule();
+    openEditor($("decoderForm"));
+    $("decoderLabel").focus();
+  };
+  $("addDecoderRule").onclick = addDefaultDecoderRule;
+  $("cancelSignalDecoder").onclick = closeEditor;
+  $("clearSignalDecoder").onclick = async () => {
+    const signal = chosen[active];
+    if (signal) await uiAction("setDecoder", { signal });
+  };
+  $("decoderForm").onsubmit = async (event) => {
+    event.preventDefault();
+    try {
+      const rules = Array.from($("decoderRules").rows, (row) => {
+        const [mask, value, label] = Array.from(
+          row.querySelectorAll("input"),
+          (input) => input.value.trim(),
+        );
+        return { mask, value, label };
+      });
+      await uiAction("setDecoder", {
+        signal: decoderTarget,
+        profile: {
+          id: "signal-custom",
+          label: $("decoderLabel").value.trim(),
+          width: decoderTarget.width,
+          rules,
+        },
+      });
+      closeEditor();
+    } catch (error) {
+      $("decoderError").textContent = error.message;
+    }
+  };
   let annotationTarget: Signal;
   function editAnnotation() {
     annotationTarget = chosen[active];
@@ -3180,7 +3313,9 @@ vscode.postMessage({ type: "ready" });
       tooltip.append(empty);
     } else {
       const decoded =
-        signal.decoder && decodeWord(signal.decoder, projected, signal.width);
+        showDecodedValues.checked &&
+        signal.decoder &&
+        decodeWord(signal.decoder, projected, signal.width);
       for (const [name, value] of [
         ...(decoded ? [["解码", decoded]] : []),
         ["值", formatSignal(raw, signal)],
