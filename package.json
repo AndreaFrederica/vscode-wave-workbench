@@ -225,6 +225,12 @@
           "scope": "machine",
           "description": "Native wave-backend executable; empty uses bundled binary."
         },
+        "waveWorkbench.independentBackendPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Independent executable for FSDB and its paired KDB. Empty uses the regular backend."
+        },
         "waveWorkbench.verdiHome": {
           "type": "string",
           "default": "",

@@ -4,6 +4,7 @@ VS Code 数字波形调试插件初版，采用类似 Verdi/nWave 的层次树�
 
 - **FSDB 原生读取**：Rust 独立后端 + C++ ABI 桥调用本机 Verdi Reader SDK，不启动 Verdi GUI、不转换中间 VCD。
 - **KDB 原生接入**：另一个独立 Rust 进程动态加载本机 `libNPI.so`，用 `npi_load_design(-dbdir ...)` 读取 VCS elaboration 数据库，按完整层次解析真实对象、声明、实例位置及模块定义。
+- **独立 FSDB / KDB 后端**直接读取已验证的数据库格式，运行时无需 Verdi。通过 `waveWorkbench.independentBackendPath` 启用。 [安装方式与验证范围](independent_backend/README.md)
 - **波形界面**：信号搜索、层次浏览、拖动排序、双游标与时间差、缩放平移、事件跳转和多进制显示。
 
 本项目采用 **MPL-2.0** 开源，完整许可文本见 `LICENSE`，版权与外部依赖说明见 `NOTICE`。

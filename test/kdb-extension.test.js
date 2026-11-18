@@ -23,11 +23,11 @@ test('extension host adapter: real FSDB + KDB opens declaration / instantiation 
     Uri:{file:uri,joinPath:(base,...parts)=>uri(path.join(base.fsPath,...parts))},Position,Range,Selection:Range,ViewColumn:{Beside:2},
     env:{clipboard:{writeText:async text=>{clipboard=text;}}},
     extensions:{getExtension:()=>({packageJSON:{version:'1.2.5'}})},
-    workspace:{getConfiguration:()=>({get:name=>({verdiHome:process.env.VERDI_HOME,eventsPerSignal:20000})[name]}),openTextDocument:async file=>({uri:file,lineCount:fs.readFileSync(file.fsPath,'utf8').split('\n').length})},
+    workspace:{getConfiguration:()=>({get:name=>({verdiHome:process.env.VERDI_HOME,independentBackendPath:process.env.WAVE_TEST_BACKEND,eventsPerSignal:20000})[name]}),openTextDocument:async file=>({uri:file,lineCount:fs.readFileSync(file.fsPath,'utf8').split('\n').length})},
     window:{onDidChangeActiveTextEditor:fn=>{editorChanged=fn;return disposable;},registerWebviewViewProvider:(_id,p)=>{sidebarProvider=p;return disposable;},createOutputChannel:()=>({append(){},appendLine(){},dispose(){}}),registerCustomEditorProvider:(_id,p)=>{provider=p;return disposable;},showTextDocument:async (doc,options)=>{const editor={doc,options,revealRange(){}};opened.push(editor);return editor;},showOpenDialog:async()=>{dialogs++;return [uri(path.join(root,'examples/demo.vcd'))];},showInformationMessage:()=>{},showErrorMessage:message=>{throw new Error(message);}},
     commands:{registerCommand:(name,handler)=>{commands.set(name,handler);return disposable;},executeCommand:async(name,file)=>{if(name==='vscode.openWith')openedWaves.push(file.fsPath);if(name==='vscode.setEditorLayout')layoutCalls.push(file);}}
   };
-  const context={extensionUri:uri(root),asAbsolutePath:p=>path.join(root,p),subscriptions:[],workspaceState:{get:key=>stored.get(key),update:async(key,value)=>stored.set(key,value)}};
+  const context={extensionUri:uri(root),asAbsolutePath:p=>path.join(root,p),subscriptions:[],workspaceState:{get:(key,fallback)=>stored.has(key)?stored.get(key):fallback,update:async(key,value)=>stored.set(key,value)}};
   t.after(()=>context.subscriptions.forEach(d=>d.dispose()));
   const module={exports:{}};
   const wrapped=vm.runInThisContext('(function(require,module,exports){'+fs.readFileSync(path.join(root,'dist/extension.js'),'utf8')+'\n})');
@@ -37,7 +37,7 @@ test('extension host adapter: real FSDB + KDB opens declaration / instantiation 
   const document=await provider.openCustomDocument(uri(path.resolve(process.env.WAVE_TEST_KDB,'../waves.fsdb')));
   await provider.resolveCustomEditor(document,panel);
   await receive({type:'ready'});
-  assert.ok(messages.some(m=>m.type==='kdbAttached'));assert.deepEqual(layoutCalls[0],{orientation:1,groups:[{size:.6},{size:.4}]});
+  assert.ok(messages.some(m=>m.type==='kdbAttached'), JSON.stringify(messages.filter(m=>m.type==='error')));assert.deepEqual(layoutCalls[0],{orientation:1,groups:[{size:.6},{size:.4}]});
   const sidebarStates=[];sidebarProvider.resolveWebviewView({visible:true,onDidDispose(){},onDidChangeVisibility(){},webview:{cspSource:"'self'",asWebviewUri:u=>u,onDidReceiveMessage:fn=>{sidebarReceive=fn;},postMessage:async m=>sidebarStates.push(m)}});
   await sidebarReceive({type:'ready'});assert.ok(sidebarStates.at(-1).tree.some(n=>n.fullname==='cv32e40p_mac_trace_tb'));
   const parts=['cv32e40p_mac_trace_tb','dut','u_core','u_core'];let parent='';for(const part of parts){parent=parent?parent+'.'+part:part;await sidebarReceive({type:'tree',scope:parent,action:'expand'});}

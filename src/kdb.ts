@@ -26,20 +26,16 @@ class KdbSession {
   path: string = "";
   constructor(
     binary: string,
-    home: string,
+    home: string | undefined,
     log: (text: string) => void = () => {},
   ) {
-    if (!home)
-      throw new Error(
-        "Set waveWorkbench.verdiHome or VERDI_HOME before attaching KDB.",
-      );
     this.childrenCache = new Map();
     this.locationCache = new Map();
     this.instanceCache = new Map();
     this.scratch = fs.mkdtempSync(path.join(os.tmpdir(), "wave-kdb-"));
     this.backend = new Backend(binary, {
       cwd: this.scratch,
-      env: {
+      env: home ? {
         ...process.env,
         VERDI_HOME: home,
         LD_LIBRARY_PATH: [
@@ -50,7 +46,7 @@ class KdbSession {
         ]
           .filter(Boolean)
           .join(path.delimiter),
-      },
+      } : undefined,
       onLog: log,
     });
     this.backend.child.once("exit", () =>

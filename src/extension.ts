@@ -1277,13 +1277,21 @@ function activate(context: vscode.ExtensionContext) {
         cfg.get<string>("verdiHome") ||
         process.env.VERDI_HOME ||
         process.env.NOVAS_HOME;
+      const standalone =
+        /\.fsdb$/i.test(document.uri.fsPath) &&
+        cfg.get<string>("independentBackendPath");
+      const configuredBinary = standalone || cfg.get<string>("backendPath");
       const binary =
-        cfg.get<string>("backendPath") ||
+        configuredBinary ||
         context.asAbsolutePath(
           `bin/wave-backend${process.platform === "win32" ? ".exe" : ""}`,
         );
       const env = { ...process.env };
-      if (home) env.VERDI_HOME = home;
+      if (standalone) {
+        delete env.VERDI_HOME;
+        delete env.NOVAS_HOME;
+        delete env.FSDB_LIB_DIR;
+      } else if (home) env.VERDI_HOME = home;
       const backend = new Backend(binary, {
         env,
         onLog: (s) => output.append(s),
@@ -1386,7 +1394,11 @@ function activate(context: vscode.ExtensionContext) {
             database = selection?.[0]?.fsPath;
           }
           if (!database) return false;
-          const session = new KdbSession(binary, home, (s) => output.append(s));
+          if (!home && !configuredBinary)
+            throw new Error(
+              "Set waveWorkbench.verdiHome or configure an independent backend with waveWorkbench.backendPath.",
+            );
+          const session = new KdbSession(binary, standalone ? undefined : home, (s) => output.append(s));
           try {
             await session.open(database);
             if (viewer.disposed) {
