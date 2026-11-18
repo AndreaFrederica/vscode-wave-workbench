@@ -13,6 +13,8 @@ import * as readline from "node:readline";
 import * as path from "node:path";
 interface BackendOptions extends SpawnOptionsWithoutStdio {
   onLog?: (text: string) => void;
+  args?: string[];
+  useVerdiLibraries?: boolean;
 }
 class Backend {
   pending: Map<
@@ -26,7 +28,15 @@ class Backend {
   sequence: number;
   closed: boolean;
   child: ChildProcessWithoutNullStreams;
-  constructor(binary: string, options: BackendOptions = {}) {
+  constructor(
+    binary: string,
+    {
+      args = [],
+      useVerdiLibraries = true,
+      onLog,
+      ...options
+    }: BackendOptions = {},
+  ) {
     this.pending = new Map();
     this.sequence = 0;
     this.closed = false;
@@ -34,11 +44,15 @@ class Backend {
     const home = env.VERDI_HOME || env.NOVAS_HOME;
     const readerLib =
       env.FSDB_LIB_DIR || (home && path.join(home, "share/FsdbReader/linux64"));
-    if (readerLib)
+    if (!useVerdiLibraries) {
+      delete env.VERDI_HOME;
+      delete env.NOVAS_HOME;
+      delete env.FSDB_LIB_DIR;
+    } else if (readerLib)
       env.LD_LIBRARY_PATH = [readerLib, env.LD_LIBRARY_PATH]
         .filter(Boolean)
         .join(path.delimiter);
-    this.child = spawn(binary, [], {
+    this.child = spawn(binary, args, {
       stdio: ["pipe", "pipe", "pipe"],
       ...options,
       env,
@@ -55,12 +69,12 @@ class Backend {
     this.child.on("exit", (code, signal) =>
       fail(
         new Error(
-          `Wave backend exited (${signal || code}). Check Verdi Reader library path and Output > Wave Workbench.`,
+          `Wave backend exited (${signal || code}). See Output > Wave Workbench.`,
         ),
       ),
     );
     this.child.stdin.on("error", fail);
-    this.child.stderr.on("data", (d) => options.onLog?.(d.toString()));
+    this.child.stderr.on("data", (d) => onLog?.(d.toString()));
     readline
       .createInterface({ input: this.child.stdout })
       .on("line", (line) => {
@@ -68,7 +82,7 @@ class Backend {
         try {
           msg = JSON.parse(line);
         } catch {
-          options.onLog?.(line);
+          onLog?.(line);
           return;
         }
         const p = this.pending.get(msg.id);

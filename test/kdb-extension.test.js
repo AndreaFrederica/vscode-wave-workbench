@@ -7,6 +7,7 @@ const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 test('extension host adapter: real FSDB + KDB opens declaration / instantiation / definition',{skip:!process.env.WAVE_TEST_KDB},async t=>{
   const root=path.resolve(__dirname,'..'),messages=[],opened=[],disposable={dispose(){}};let provider,receive,sidebarProvider,sidebarReceive;const commands=new Map(),stored=new Map(),openedWaves=[];let editorChanged;let dialogs=0;const layoutCalls=[];let clipboard='';const batchExisting=new Set();
+  let backendChoice='auto', nextBackend, snapshot, backendOverride=process.env.WAVE_TEST_BACKEND;
   const uri=file=>({fsPath:file,toString(){return file;}});
   class Position{constructor(line,character){this.line=line;this.character=character;}}
   class Range{constructor(start,end){this.start=start;this.end=end;}}
@@ -19,12 +20,12 @@ test('extension host adapter: real FSDB + KDB opens declaration / instantiation 
     fire(event) { for (const listener of this.listeners) listener(event); }
     dispose() { this.listeners = []; }
   }
-  const vscode={EventEmitter,
+  const vscode={EventEmitter,ConfigurationTarget:{Global:1,Workspace:2},
     Uri:{file:uri,joinPath:(base,...parts)=>uri(path.join(base.fsPath,...parts))},Position,Range,Selection:Range,ViewColumn:{Beside:2},
     env:{clipboard:{writeText:async text=>{clipboard=text;}}},
     extensions:{getExtension:()=>({packageJSON:{version:'1.2.5'}})},
-    workspace:{getConfiguration:()=>({get:name=>({verdiHome:process.env.VERDI_HOME,independentBackendPath:process.env.WAVE_TEST_BACKEND,eventsPerSignal:20000})[name]}),openTextDocument:async file=>({uri:file,lineCount:fs.readFileSync(file.fsPath,'utf8').split('\n').length})},
-    window:{onDidChangeActiveTextEditor:fn=>{editorChanged=fn;return disposable;},registerWebviewViewProvider:(_id,p)=>{sidebarProvider=p;return disposable;},createOutputChannel:()=>({append(){},appendLine(){},dispose(){}}),registerCustomEditorProvider:(_id,p)=>{provider=p;return disposable;},showTextDocument:async (doc,options)=>{const editor={doc,options,revealRange(){}};opened.push(editor);return editor;},showOpenDialog:async()=>{dialogs++;return [uri(path.join(root,'examples/demo.vcd'))];},showInformationMessage:()=>{},showErrorMessage:message=>{throw new Error(message);}},
+    workspace:{getConfiguration:()=>({get:name=>({verdiHome:process.env.VERDI_HOME,independentBackendPath:backendOverride,fsdbBackend:backendChoice,eventsPerSignal:20000})[name],update:async(name,value)=>{assert.equal(name,'fsdbBackend');backendChoice=value;}}),openTextDocument:async file=>({uri:file,lineCount:fs.readFileSync(file.fsPath,'utf8').split('\n').length})},
+    window:{onDidChangeActiveTextEditor:fn=>{editorChanged=fn;return disposable;},registerWebviewViewProvider:(_id,p)=>{sidebarProvider=p;return disposable;},createOutputChannel:()=>({append(){},appendLine(){},dispose(){}}),registerCustomEditorProvider:(_id,p)=>{provider=p;return disposable;},showTextDocument:async (doc,options)=>{const editor={doc,options,revealRange(){}};opened.push(editor);return editor;},showOpenDialog:async()=>{dialogs++;return [uri(path.join(root,'examples/demo.vcd'))];},showQuickPick:async choices=>choices.find(choice=>choice.value===nextBackend),showInformationMessage:()=>{},showErrorMessage:message=>{throw new Error(message);}},
     commands:{registerCommand:(name,handler)=>{commands.set(name,handler);return disposable;},executeCommand:async(name,file)=>{if(name==='vscode.openWith')openedWaves.push(file.fsPath);if(name==='vscode.setEditorLayout')layoutCalls.push(file);}}
   };
   const context={extensionUri:uri(root),asAbsolutePath:p=>path.join(root,p),subscriptions:[],workspaceState:{get:(key,fallback)=>stored.has(key)?stored.get(key):fallback,update:async(key,value)=>stored.set(key,value)}};
@@ -33,7 +34,7 @@ test('extension host adapter: real FSDB + KDB opens declaration / instantiation 
   const wrapped=vm.runInThisContext('(function(require,module,exports){'+fs.readFileSync(path.join(root,'dist/extension.js'),'utf8')+'\n})');
   wrapped(name=>name==='vscode'?vscode:name.startsWith('.')?require(path.join(root,'dist',name)):require(name),module,module.exports);
   module.exports.activate(context);
-  const panel={active:true,reveal(){},onDidChangeViewState:()=>disposable,onDidDispose:()=>disposable,webview:{cspSource:"'self'",asWebviewUri:u=>u,onDidReceiveMessage:fn=>{receive=fn;return disposable;},postMessage:async m=>{messages.push(m);if(m.type==='ui'){const fresh=m.payload.signals.filter(s=>!batchExisting.has(s.scope+'.'+s.name));for(const s of fresh)batchExisting.add(s.scope+'.'+s.name);queueMicrotask(()=>receive({type:'uiResult',id:m.id,result:{added:fresh.length,duplicates:m.payload.signals.length-fresh.length}}));}return true;}}};
+  const panel={active:true,reveal(){},onDidChangeViewState:()=>disposable,onDidDispose:()=>disposable,webview:{cspSource:"'self'",asWebviewUri:u=>u,onDidReceiveMessage:fn=>{receive=fn;return disposable;},postMessage:async m=>{messages.push(m);if(m.type==='ui'){if(m.action==='snapshot'){queueMicrotask(()=>receive({type:'uiResult',id:m.id,result:snapshot}));return true;}const fresh=m.payload.signals.filter(s=>!batchExisting.has(s.scope+'.'+s.name));for(const s of fresh)batchExisting.add(s.scope+'.'+s.name);queueMicrotask(()=>receive({type:'uiResult',id:m.id,result:{added:fresh.length,duplicates:m.payload.signals.length-fresh.length}}));}return true;}}};
   const document=await provider.openCustomDocument(uri(path.resolve(process.env.WAVE_TEST_KDB,'../waves.fsdb')));
   await provider.resolveCustomEditor(document,panel);
   await receive({type:'ready'});
@@ -69,6 +70,39 @@ test('extension host adapter: real FSDB + KDB opens declaration / instantiation 
   assert.ok(sidebarStates.at(-1).tree.some(n=>n.fullname===wanted&&n.selected));assert.equal(opened.length,openCount);assert.equal(messages.findLast(m=>m.type==='scopeSelected').scope,wanted);
   // A file absent from this KDB leaves the selected design unchanged.
   const other={document:{uri:uri('/tmp/not-in-design.sv'),languageId:'systemverilog',version:1,getText:()=> 'module not_in_this_design; endmodule'},selection:{active:{line:0}}};vscode.window.activeTextEditor=other;editorChanged(other);await new Promise(r=>setTimeout(r,250));assert.equal(messages.findLast(m=>m.type==='scopeSelected').scope,wanted);
+
+  if (process.env.WAVE_TEST_SWITCH_BACKEND) {
+    assert.equal(meta.backendLabel, 'Verdi 后端');
+    snapshot = {
+      chosen: [{ ...signal, displayName: 'test clock', group: 'CPU' }],
+      virtualDefinitions: [],
+      start: Number(meta.start), end: Number(meta.end), cursorA: Number(meta.start),
+      cursorB: null, markers: [{ name: 'first', time: Number(meta.start) }],
+      radix: 'hex', groupOrder: ['CPU'], collapsedGroups: [], expandedBuses: [],
+    };
+    backendOverride = path.join(root, 'missing-test-independent');
+    nextBackend = 'independent';
+    await assert.rejects(commands.get('waveWorkbench.selectBackend')(), /ENOENT/);
+    assert.equal(backendChoice, 'auto');
+    assert.equal(messages.filter(m => m.type === 'backendChanged').length, 0);
+
+    backendOverride = undefined;
+    for (const [key, label] of [['independent', '独立后端'], ['verdi', 'Verdi 后端']]) {
+      nextBackend = key;
+      await commands.get('waveWorkbench.selectBackend')();
+      assert.equal(backendChoice, key);
+      const changed = messages.findLast(m => m.type === 'backendChanged');
+      assert.equal(changed.backendLabel, label);
+      assert.equal(changed.view.chosen[0].displayName, 'test clock');
+      assert.equal(changed.view.chosen[0].group, 'CPU');
+      assert.deepEqual(changed.view.markers, snapshot.markers);
+      await receive({ type: 'query', signals: [signal.id], start: Number(meta.start), end: Number(meta.end), limit: 4, request: 900 });
+      assert.ok(messages.findLast(m => m.type === 'data' && m.request === 900).result[signal.id].events.length);
+      await receive({ type: 'kdbChildren', scope });
+      assert.ok(messages.findLast(m => m.type === 'kdbHierarchy').children.length);
+    }
+    assert.deepEqual(messages.filter(m => m.type === 'error'), []);
+  }
 
   await commands.get('waveWorkbench.open')(document.uri);
   await commands.get('waveWorkbench.openLast')();

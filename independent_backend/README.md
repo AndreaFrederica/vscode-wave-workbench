@@ -4,11 +4,13 @@
 
 运行需要 Python 3.8 或更新版本和系统的 `liblzo2.so.2`。源码采用仓库的 MPL-2.0 许可。系统 LZO 由发行版提供，遵循其 GPL v2+ 许可。 [LZO 项目](https://www.oberhumer.com/opensource/lzo/) · [项目许可](../LICENSE)
 
-把 `waveWorkbench.independentBackendPath` 设为本目录下 `backend.py` 的绝对路径。使用 Remote SSH 时，这个路径和 Python 环境都在远端机器上。VS Code 会在打开 FSDB 时选择该后端，并用它打开同目录下的 `simv.daidir` 或插件中选定的 KDB。
+在波形编辑器标题栏、Wave Workbench 侧栏标题栏或命令面板运行「Wave Workbench: 选择 FSDB 后端…」。可选「独立后端」「Verdi 后端」或「自动」。当前 FSDB 的波形和已接入的 KDB 一起切换，工作区会记住选项。
+
+独立后端默认启动扩展随附的 Python 读取器。可设置 `waveWorkbench.independentBackendPath` 指向自定义独立后端可执行文件。使用 Remote SSH 时，Python 和自定义路径都在远端机器上。Verdi 模式由 `waveWorkbench.verdiHome` 或 `VERDI_HOME` 指定 SDK。
 
 ```json
 {
-  "waveWorkbench.independentBackendPath": "/path/to/vscode-wave-workbench/independent_backend/backend.py"
+  "waveWorkbench.fsdbBackend": "independent"
 }
 ```
 

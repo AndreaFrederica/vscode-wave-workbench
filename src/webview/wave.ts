@@ -1549,7 +1549,8 @@ window.addEventListener("message", async (e) => {
   if (msg.type === "metadata") {
     meta = msg;
     $("file").textContent = msg.title;
-    $("backend").textContent = `${msg.backend} · Vide ${msg.vide || "未安装"}`;
+    $("backend").textContent =
+      `${msg.backendLabel || msg.backend} · Vide ${msg.vide || "未安装"}`;
     start = Number.isFinite(saved.start) ? saved.start : Number(msg.start);
     end = Number.isFinite(saved.end)
       ? saved.end
@@ -1571,6 +1572,19 @@ window.addEventListener("message", async (e) => {
     else publishProjectState(true);
     renderTree();
     request();
+  } else if (msg.type === "backendChanged") {
+    meta = msg;
+    $("backend").textContent =
+      `${msg.backendLabel || msg.backend} · Vide ${msg.vide || "未安装"}`;
+    data = {};
+    inflight = cursorFlight = null;
+    cursorValues = {};
+    catalog.pages.clear();
+    catalog.flight = null;
+    catalog.revision = ++searchRequest;
+    catalog.total = catalog.query ? 0 : meta.total;
+    renderTree();
+    await uiAction("restoreView", msg.view);
   } else if (msg.type === "ui") {
     try {
       const result = await uiAction(msg.action, msg.payload || {});
@@ -2200,6 +2214,12 @@ vscode.postMessage({ type: "ready" });
   new ResizeObserver(() => requestAnimationFrame(scopeRows)).observe(pane);
   window.addEventListener("message", (e) => {
     const m = e.data;
+    if (m.type === "backendChanged") {
+      flight = null;
+      pages.clear();
+      if (scope) selectScope(scope);
+      return;
+    }
     if (m.type !== "scopeSignals") return;
     if (flight?.revision === m.request) flight = null;
     if (m.request === revision && m.scope === scope) {
@@ -3414,7 +3434,7 @@ vscode.postMessage({ type: "ready" });
   });
   window.addEventListener("message", (e) => {
     const m = e.data;
-    if (m.type === "metadata") {
+    if (m.type === "metadata" || m.type === "backendChanged") {
       hoverCache.clear();
       hoverFlight = null;
       hideHover();

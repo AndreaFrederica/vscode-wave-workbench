@@ -122,7 +122,7 @@
       },
       {
         "command": "waveWorkbench.cacheStats",
-        "title": "Wave Workbench: 查看 Rust 波形缓存统计",
+        "title": "Wave Workbench: 查看波形缓存统计",
         "icon": "$(database)"
       },
       {
@@ -146,6 +146,11 @@
       {
         "command": "waveWorkbench.exportClip",
         "title": "Wave Workbench: 截取 / 导出波形…"
+      },
+      {
+        "command": "waveWorkbench.selectBackend",
+        "title": "Wave Workbench: 选择 FSDB 后端…",
+        "icon": "$(server-process)"
       }
     ],
     "menus": {
@@ -183,6 +188,11 @@
           "group": "navigation@2"
         },
         {
+          "command": "waveWorkbench.selectBackend",
+          "when": "activeCustomEditorId == waveWorkbench.viewer && resourceExtname == .fsdb",
+          "group": "navigation@4"
+        },
+        {
           "command": "waveWorkbench.addSelection",
           "when": "editorLangId == systemverilog || editorLangId == verilog",
           "group": "navigation@3"
@@ -198,6 +208,11 @@
           "command": "waveWorkbench.open",
           "when": "view == waveWorkbench.control",
           "group": "navigation@1"
+        },
+        {
+          "command": "waveWorkbench.selectBackend",
+          "when": "view == waveWorkbench.control",
+          "group": "navigation@2"
         }
       ]
     },
@@ -229,7 +244,23 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "Independent executable for FSDB and its paired KDB. Empty uses the regular backend."
+          "description": "Custom executable for the independent FSDB and KDB backend. Empty uses the included Python implementation when Independent is selected."
+        },
+        "waveWorkbench.fsdbBackend": {
+          "type": "string",
+          "scope": "resource",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "independent",
+            "verdi"
+          ],
+          "enumDescriptions": [
+            "Use the configured independent executable if present. Otherwise use Verdi.",
+            "Read FSDB and KDB with the independent backend.",
+            "Read FSDB and KDB with Verdi Reader and NPI."
+          ],
+          "description": "Backend for FSDB waveforms and their paired KDB databases."
         },
         "waveWorkbench.verdiHome": {
           "type": "string",

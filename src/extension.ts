@@ -14,14 +14,16 @@ import type {
 import * as vscode from "vscode";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import * as crypto from "node:crypto";
+import { createWaveDocuments } from "./wave-documents";
+import { createWaveEditor } from "./wave-editor";
+import { backendChoices, isFsdb, type FsdbBackend } from "./backend-selection";
 import {
   identifiers,
   resolveSelection,
   codeOnly,
   portConnection,
 } from "./rtl-selection";
-import { registerVirtuals, restoreView } from "./view-state";
+import { restoreView } from "./view-state";
 import { readWaveProject, saveWaveProject } from "./project";
 import { loadDecoderProfiles } from "./decoder-config";
 import {
@@ -39,8 +41,7 @@ import {
   type ClipOptions,
 } from "./wave-clip";
 import * as WaveSignal from "./shared/signals";
-import { Backend } from "./backend";
-import { KdbSession, mapPrefix } from "./kdb";
+import { mapPrefix } from "./kdb";
 import { Sidebar } from "./sidebar";
 import { WaveCommands, HELP, formatValue, quote } from "./commands";
 import { moduleAt, commonScope, SourceFiles } from "./source-sync";
@@ -1166,573 +1167,41 @@ function activate(context: vscode.ExtensionContext) {
     sidebar.refresh();
     output.appendLine(`KDB ${record.fullname} -> ${file}:${line} (${target})`);
   }
+  const refreshSidebar = () => sidebar.refresh();
   const provider: vscode.CustomEditorProvider<WaveDocument> = {
-    onDidChangeCustomDocument: projectChanges.event,
-    async openCustomDocument(uri, openContext) {
-      const backupId = openContext?.backupId;
-      const backup: WaveDocument["backup"] = backupId
-        ? JSON.parse(await fs.promises.readFile(backupId, "utf8"))
-        : undefined;
-      return {
-        uri,
-        backup,
-        projectPath: backup?.projectPath,
-        savedView: backup?.savedView,
-        savedKdb: backup?.savedKdb,
-        dirty: !!backup,
-        dispose() {},
-      };
-    },
-    async saveCustomDocument(document, cancellation) {
-      const viewer = [...viewers].find((view) => view.document === document);
-      if (!viewer || cancellation.isCancellationRequested)
-        throw new vscode.CancellationError();
-      if (
-        !(
-          document.projectPath &&
-          document.view &&
-          document.view === document.savedView &&
-          viewer.kdb?.path === document.savedKdb
-        )
-      ) {
-        if (!(await saveProject(viewer, undefined, cancellation)))
-          throw new vscode.CancellationError();
-      }
-      document.dirty = false;
-      await viewer.panel.webview.postMessage({
-        type: "projectSaved",
-        view: document.savedView,
-      });
-    },
-    async saveCustomDocumentAs(document, destination, cancellation) {
-      if (
-        destination.scheme !== "file" ||
-        !/\.waveproj$/i.test(destination.fsPath)
-      )
-        throw Error("请选择 .waveproj 作为工程文件扩展名");
-      const viewer = [...viewers].find((view) => view.document === document);
-      if (
-        !viewer ||
-        !(await saveProject(viewer, destination.fsPath, cancellation))
-      )
-        throw new vscode.CancellationError();
-      document.dirty = false;
-      await viewer.panel.webview.postMessage({
-        type: "projectSaved",
-        view: document.savedView,
-      });
-    },
-    async revertCustomDocument(document) {
-      const viewer = [...viewers].find((view) => view.document === document);
-      if (!viewer || !document.savedView) return;
-      const restored = await restoreView(
-        viewer.backend,
-        document.savedView,
-        viewer.meta,
-      );
-      if (document.savedKdb !== viewer.kdb?.path) {
-        if (document.savedKdb) await viewer.attachKdb(document.savedKdb, false);
-        else {
-          viewer.kdb?.dispose();
-          viewer.kdb = null;
-          viewer.treeCache.clear();
-          viewer.treeExpanded.clear();
-          sidebar.refresh();
-          await viewer.panel.webview.postMessage({ type: "kdbDetached" });
-        }
-      }
-      await viewer.ui("restoreView", { ...restored, projectBaseline: true });
-      document.dirty = false;
-    },
-    async backupCustomDocument(document, { destination }, cancellation) {
-      const viewer = [...viewers].find((view) => view.document === document);
-      const view = document.view || document.backup?.view;
-      if (!view || cancellation.isCancellationRequested)
-        throw new vscode.CancellationError();
-      const filename = destination.fsPath;
-      await fs.promises.mkdir(path.dirname(filename), { recursive: true });
-      const backup: WaveDocument["backup"] = {
-        view,
-        kdb: viewer?.kdb?.path,
-        savedView: document.savedView,
-        savedKdb: document.savedKdb,
-        projectPath: document.projectPath,
-      };
-      await fs.promises.writeFile(filename, JSON.stringify(backup), {
-        mode: 0o600,
-      });
-      return {
-        id: filename,
-        delete: () => {
-          void fs.promises.rm(filename, { force: true }).catch(() => {});
-        },
-      };
-    },
-    async resolveCustomEditor(document, panel) {
-      const cfg = vscode.workspace.getConfiguration(
-        "waveWorkbench",
-        document.uri,
-      );
-      const home =
-        cfg.get<string>("verdiHome") ||
-        process.env.VERDI_HOME ||
-        process.env.NOVAS_HOME;
-      const standalone =
-        /\.fsdb$/i.test(document.uri.fsPath) &&
-        cfg.get<string>("independentBackendPath");
-      const configuredBinary = standalone || cfg.get<string>("backendPath");
-      const binary =
-        configuredBinary ||
-        context.asAbsolutePath(
-          `bin/wave-backend${process.platform === "win32" ? ".exe" : ""}`,
-        );
-      const env = { ...process.env };
-      if (standalone) {
-        delete env.VERDI_HOME;
-        delete env.NOVAS_HOME;
-        delete env.FSDB_LIB_DIR;
-      } else if (home) env.VERDI_HOME = home;
-      const backend = new Backend(binary, {
-        env,
-        onLog: (s) => output.append(s),
-      });
-      const viewer = {
-        document,
-        panel,
-        backend,
-        meta: null,
-        uri: document.uri,
-        kdb: null,
-        treeCache: new Map(),
-        treeExpanded: new Set(),
-        sourceInstances: new Map(),
-        selectedScope: "",
-        scopeHistory: [],
-        scopeIndex: -1,
-        pendingUI: new Map(),
-        uiSequence: 0,
-      } as Viewer;
-      viewer.ready = new Promise((resolve) => {
-        viewer.resolveReady = resolve;
-      });
-      viewer.ui = (action, payload = {}) =>
-        new Promise((resolve, reject) => {
-          if (viewer.disposed) {
-            reject(new Error("Wave window is closed"));
-            return;
-          }
-          const id = ++viewer.uiSequence;
-          const timer = setTimeout(() => {
-            viewer.pendingUI.delete(id);
-            reject(new Error("Wave view did not respond to " + action));
-          }, 30000);
-          viewer.pendingUI.set(id, { resolve, reject, timer });
-          panel.webview.postMessage({ type: "ui", id, action, payload });
-        });
-      viewers.add(viewer);
-      current = viewer;
-      sidebar.refresh();
-      panel.onDidChangeViewState(() => {
-        if (panel.active) {
-          current = viewer;
-          sidebar.refresh();
-        }
-      });
-      panel.onDidDispose(() => {
-        viewer.disposed = true;
-        viewer.resolveReady(null);
-        backend.dispose();
-        viewer.kdb?.dispose();
-        viewer.tcl?.dispose();
-        for (const p of viewer.pendingUI.values()) {
-          clearTimeout(p.timer);
-          p.reject(new Error("Wave window closed"));
-        }
-        viewer.pendingUI.clear();
-        viewers.delete(viewer);
+    ...createWaveDocuments(
+      vscode,
+      viewers,
+      projectChanges,
+      saveProject,
+      refreshSidebar,
+    ),
+    resolveCustomEditor: createWaveEditor(vscode, context, {
+      viewers,
+      projectChanges,
+      output,
+      refreshSidebar,
+      setCurrent(viewer) {
+        current = viewer;
+      },
+      removeCurrent(viewer) {
         if (current === viewer) current = [...viewers].at(-1);
-        sidebar.refresh();
-      });
-      panel.webview.options = {
-        enableScripts: true,
-        localResourceRoots: [
-          vscode.Uri.joinPath(context.extensionUri, "media"),
-          vscode.Uri.joinPath(context.extensionUri, "dist", "webview"),
-        ],
-      };
-      let metaPromise;
-      const sendError = (e, origin, request) =>
-        panel.webview.postMessage({
-          type: "error",
-          origin,
-          request,
-          message: e.message || String(e),
-        });
-      async function showHierarchy(scope = "") {
-        if (!viewer.kdb) return;
-        const children = await viewer.kdb.children(scope, viewer.includeOther);
-        viewer.treeCache.set(scope, children);
-        sidebar.refresh();
-        await panel.webview.postMessage({
-          type: "kdbHierarchy",
-          scope,
-          children,
-        });
-      }
-      viewer.showHierarchy = showHierarchy;
-      viewer.attachKdb = async (suggested, edited = !suggested) => {
-        if (viewer.attaching) return viewer.attaching;
-        viewer.attaching = (async () => {
-          let database = suggested;
-          if (!database) {
-            const selection = await vscode.window.showOpenDialog({
-              title: "选择与当前 FSDB 匹配的 VCS simv.daidir（KDB）",
-              canSelectFiles: false,
-              canSelectFolders: true,
-              canSelectMany: false,
-            });
-            database = selection?.[0]?.fsPath;
-          }
-          if (!database) return false;
-          if (!home && !configuredBinary)
-            throw new Error(
-              "Set waveWorkbench.verdiHome or configure an independent backend with waveWorkbench.backendPath.",
-            );
-          const session = new KdbSession(binary, standalone ? undefined : home, (s) => output.append(s));
-          try {
-            await session.open(database);
-            if (viewer.disposed) {
-              session.dispose();
-              return false;
-            }
-            viewer.kdb?.dispose();
-            viewer.kdb = session;
-            viewer.treeCache.clear();
-            viewer.treeExpanded.clear();
-            sidebar.refresh();
-            await context.workspaceState.update(
-              `kdb:${document.uri.toString()}`,
-              database,
-            );
-            await panel.webview.postMessage({
-              type: "kdbAttached",
-              path: session.path,
-            });
-            await showHierarchy();
-            scheduleEditorSync(vscode.window.activeTextEditor);
-            if (edited && document.view) {
-              document.dirty = true;
-              projectChanges.fire({ document });
-            }
-            return true;
-          } catch (e) {
-            session.dispose();
-            throw e;
-          }
-        })().finally(() => {
-          viewer.attaching = null;
-        });
-        return viewer.attaching;
-      };
-      panel.webview.onDidReceiveMessage(
-        async (msg) => {
-          try {
-            if (msg.type === "ready") {
-              metaPromise ||= backend.request("open", {
-                path: document.uri.fsPath,
-              });
-              const meta = await metaPromise;
-              await backend.request("cacheConfigure", {
-                bytes: (cfg.get<number>("cacheSizeMB") ?? 64) * 1024 * 1024,
-              });
-              viewer.meta = meta;
-              sidebar.refresh();
-              await context.workspaceState.update(
-                "lastWaveform",
-                document.uri.fsPath,
-              );
-              if (BigInt(meta.end) > BigInt(Number.MAX_SAFE_INTEGER))
-                throw new Error(
-                  "Time range exceeds exact canvas tick precision (2^53). Native backend retains u64 timestamps.",
-                );
-              await rememberFile(document.uri.fsPath);
-              await applyDebugLayout(viewer);
-              await panel.webview.postMessage({
-                type: "metadata",
-                ...meta,
-                title: path.basename(document.uri.fsPath),
-                vide:
-                  vscode.extensions.getExtension(
-                    "pascal-lab.vide-code-extension",
-                  )?.packageJSON.version || null,
-              });
-              const sibling = path.join(
-                path.dirname(document.uri.fsPath),
-                "simv.daidir",
-              );
-              const database =
-                document.backup?.kdb ||
-                context.workspaceState.get<string>(
-                  `kdb:${document.uri.toString()}`,
-                ) ||
-                (fs.existsSync(sibling) ? sibling : null) ||
-                cfg.get<string>("kdbPath");
-              try {
-                if (database && !viewer.kdb) await viewer.attachKdb(database);
-                if (!document.dirty) document.savedKdb = viewer.kdb?.path;
-                if (document.backup) {
-                  const backup = document.backup;
-                  const restored = await restoreView(
-                    backend,
-                    backup.view,
-                    meta,
-                  );
-                  await viewer.ui("restoreView", {
-                    ...restored,
-                    projectBaseline: true,
-                  });
-                  document.backup = undefined;
-                }
-              } finally {
-                viewer.resolveReady(viewer);
-              }
-            } else if (msg.type === "rtlCursor") {
-              if (
-                viewer.meta &&
-                Number.isSafeInteger(msg.tick) &&
-                msg.tick >= Number(viewer.meta.start) &&
-                msg.tick <= Number(viewer.meta.end) &&
-                Number.isFinite(msg.displayFactor) &&
-                msg.displayFactor > 0
-              ) {
-                viewer.rtlCursor = {
-                  tick: msg.tick,
-                  displayFactor: msg.displayFactor,
-                  displayScale:
-                    typeof msg.displayScale === "string"
-                      ? msg.displayScale
-                      : null,
-                };
-              }
-            } else if (msg.type === "projectState" && msg.view) {
-              document.view = msg.view;
-              if (msg.baseline) {
-                if (!document.dirty) document.savedView = document.view;
-              } else {
-                document.dirty = true;
-                projectChanges.fire({ document });
-              }
-            } else if (msg.type === "uiResult") {
-              const p = viewer.pendingUI.get(msg.id);
-              if (p) {
-                viewer.pendingUI.delete(msg.id);
-                clearTimeout(p.timer);
-                if (msg.error) p.reject(new Error(msg.error));
-                else p.resolve(msg.result);
-              }
-            } else if (
-              msg.type === "executeTcl" &&
-              typeof msg.script === "string"
-            ) {
-              await executeTcl(viewer, msg.script);
-            } else if (msg.type === "openWaveform") {
-              await openWaveform(undefined, { picker: true });
-            } else if (msg.type === "openRecent") {
-              await openRecent();
-            } else if (msg.type === "selectDecoder") {
-              await selectDecoder(viewer);
-            } else if (msg.type === "editDecoderConfig") {
-              await editDecoderConfig(viewer);
-            } else if (msg.type === "saveProject") {
-              await saveActiveProject(viewer);
-            } else if (msg.type === "openProject") {
-              await openProject();
-            } else if (msg.type === "exportClip") {
-              await chooseClipExport(viewer);
-            } else if (msg.type === "runScript") {
-              await runScript();
-            } else if (msg.type === "attachKdb") {
-              await viewer.attachKdb();
-            } else if (
-              msg.type === "kdbChildren" &&
-              typeof msg.scope === "string"
-            ) {
-              await showHierarchy(msg.scope);
-            } else if (
-              msg.type === "kdbParent" &&
-              typeof msg.scope === "string"
-            ) {
-              if (viewer.kdb)
-                await showHierarchy(
-                  msg.scope ? await viewer.kdb.parent(msg.scope) : "",
-                );
-            } else if (
-              msg.type === "kdbSource" &&
-              typeof msg.scope === "string"
-            ) {
-              await openKdbSource(viewer, msg.scope, msg.target);
-            } else if (
-              msg.type === "navigateScope" &&
-              ["back", "forward"].includes(msg.direction)
-            ) {
-              current = viewer;
-              await sidebarTree("", msg.direction);
-            } else if (
-              msg.type === "scopeSignals" &&
-              typeof msg.scope === "string"
-            ) {
-              if (viewer.selectedScope !== msg.scope) {
-                viewer.selectedScope = msg.scope;
-                sidebar.refresh();
-              }
-              const result = await backend.request("scopeSignals", {
-                query: msg.scope,
-                offset: Math.max(0, msg.offset || 0),
-                limit: 512,
-              });
-              await panel.webview.postMessage({
-                type: "scopeSignals",
-                request: msg.request,
-                ...result,
-              });
-            } else if (
-              msg.type === "search" &&
-              typeof msg.query === "string" &&
-              msg.query.length < 1024
-            ) {
-              const result = await backend.request("search", {
-                query: msg.query,
-                offset: Number.isSafeInteger(msg.offset) ? msg.offset : 0,
-                limit: msg.limit || 512,
-              });
-              await panel.webview.postMessage({
-                type: "searchResult",
-                request: msg.request,
-                ...result,
-              });
-            } else if (msg.type === "defineVirtual") {
-              const result = await backend.request("defineVirtual", {
-                definition: msg.definition,
-                name:
-                  typeof msg.name === "string" ? msg.name.slice(0, 120) : "",
-              });
-              await panel.webview.postMessage({
-                type: "virtualCreated",
-                ...result,
-              });
-            } else if (
-              msg.type === "restore" &&
-              Array.isArray(msg.signals) &&
-              msg.signals.length <= 100000
-            ) {
-              await registerVirtuals(backend, msg.virtualDefinitions || []);
-              const style = new Map();
-              for (const s of msg.signals) {
-                if (typeof s === "string") continue;
-                const key = WaveSignal.baseKey(s);
-                if (!style.has(key)) style.set(key, []);
-                style.get(key).push(s);
-              }
-              const signals = [];
-              for (let i = 0; i < msg.signals.length; i += 1000) {
-                const chunk = msg.signals
-                  .slice(i, i + 1000)
-                  .map((s) =>
-                    typeof s === "string"
-                      ? { id: s }
-                      : { id: s.id, scope: s.scope, name: s.name },
-                  );
-                const described = await backend.request("describe", {
-                  descriptors: chunk,
-                });
-                for (const signal of described) {
-                  const s =
-                    style.get(WaveSignal.baseKey(signal))?.shift() || {};
-                  signals.push(WaveSignal.restore(s, signal));
-                }
-              }
-              await panel.webview.postMessage({ type: "restore", signals });
-            } else if (msg.type === "query") {
-              if (
-                !viewer.meta ||
-                !Array.isArray(msg.signals) ||
-                msg.signals.length > 64 ||
-                !Number.isSafeInteger(msg.start) ||
-                !Number.isSafeInteger(msg.end) ||
-                msg.start < 0 ||
-                msg.end < msg.start
-              )
-                return;
-              const result = await backend.request("query", {
-                signals: msg.signals,
-                start: String(msg.start),
-                end: String(msg.end),
-                limit:
-                  msg.report && Number.isSafeInteger(msg.limit)
-                    ? Math.min(
-                        cfg.get<number>("eventsPerSignal") || 20000,
-                        Math.max(2, Math.min(5000, msg.limit)),
-                      )
-                    : cfg.get<number>("eventsPerSignal"),
-              });
-              await panel.webview.postMessage({
-                type: "data",
-                request: msg.request,
-                result,
-              });
-            } else if (
-              msg.type === "copyPaths" &&
-              typeof msg.text === "string" &&
-              msg.text.length < 16000000
-            ) {
-              await vscode.env.clipboard.writeText(msg.text);
-            } else if (msg.type === "source") {
-              if (String(msg.id).startsWith("@virtual:")) {
-                vscode.window.showInformationMessage(
-                  "虚拟信号没有独立 RTL 声明；请在输入信号行定位源码。",
-                );
-                return;
-              }
-
-              const signal = (
-                await backend.request("describe", {
-                  signals: [String(msg.id)],
-                  query: `${msg.scope}.${msg.name}`,
-                })
-              )[0];
-              if (signal) {
-                const fullname = mapPrefix(
-                  `${signal.scope}.${signal.name.replace(/\s*\[\s*-?\d+\s*:\s*-?\d+\s*\]$/, "")}`,
-                  cfg.get("hierarchyMappings"),
-                );
-                await openKdbSource(viewer, fullname, msg.target);
-              }
-            }
-          } catch (e) {
-            if (msg.type === "ready") viewer.resolveReady(null);
-            output.appendLine(String(e));
-            await sendError(e, msg.type, msg.request);
-          }
-        },
-        null,
-        context.subscriptions,
-      );
-      const nonce = crypto.randomBytes(16).toString("hex");
-      const resource = (n: string) =>
-        panel.webview.asWebviewUri(
-          vscode.Uri.joinPath(
-            context.extensionUri,
-            n.endsWith(".js") ? "dist/webview" : "media",
-            n,
-          ),
-        );
-      panel.webview.html = fs
-        .readFileSync(context.asAbsolutePath("media/index.html"), "utf8")
-        .replaceAll("{{csp}}", panel.webview.cspSource)
-        .replaceAll("{{nonce}}", nonce)
-        .replace("{{css}}", resource("wave.css").toString())
-        .replace("{{script}}", resource("wave.js").toString());
-    },
+      },
+      scheduleEditorSync,
+      rememberFile,
+      applyDebugLayout,
+      executeTcl,
+      openWaveform,
+      openRecent,
+      selectDecoder,
+      editDecoderConfig,
+      saveActiveProject,
+      openProject,
+      chooseClipExport,
+      runScript,
+      openKdbSource,
+      sidebarTree,
+    }),
   };
   context.subscriptions.push(
     vscode.window.registerCustomEditorProvider(
@@ -1749,6 +1218,38 @@ function activate(context: vscode.ExtensionContext) {
     open: (uri) => openWaveform(uri),
     openPicker: () => openWaveform(undefined, { picker: true }),
     openRecent,
+    selectBackend: async () => {
+      const viewer = current;
+      const cfg = vscode.workspace.getConfiguration(
+        "waveWorkbench",
+        viewer?.uri,
+      );
+      const preference = cfg.get<FsdbBackend>("fsdbBackend", "auto");
+      const selection = await vscode.window.showQuickPick(
+        backendChoices.map((choice) => ({
+          ...choice,
+          picked: choice.value === preference,
+          detail:
+            viewer?.backendKind === choice.value
+              ? "当前波形正在使用"
+              : undefined,
+        })),
+        { title: "选择 FSDB / KDB 后端" },
+      );
+      if (!selection) return;
+      const label =
+        viewer && isFsdb(viewer.uri.fsPath)
+          ? await viewer.switchBackend(selection.value)
+          : selection.label;
+      await cfg.update(
+        "fsdbBackend",
+        selection.value,
+        vscode.workspace.workspaceFolders?.length
+          ? vscode.ConfigurationTarget.Workspace
+          : vscode.ConfigurationTarget.Global,
+      );
+      await vscode.window.showInformationMessage(`Wave Workbench · ${label}`);
+    },
     openLast: () =>
       openWaveform(context.workspaceState.get<string>("lastWaveform")),
     runScript: (uri) => runScript(uri),
@@ -1789,7 +1290,7 @@ function activate(context: vscode.ExtensionContext) {
       const stats = await current.backend.request("cacheStats");
       output.appendLine(JSON.stringify(stats, null, 2));
       vscode.window.showInformationMessage(
-        `Rust 波形缓存：${stats.entries} 块，${(stats.bytes / 1048576).toFixed(1)} / ${(stats.budget / 1048576).toFixed(0)} MiB，命中 ${stats.hits}，实际读取 ${stats.reads} 次`,
+        `波形缓存 · ${stats.entries} 块，${(stats.bytes / 1048576).toFixed(1)} / ${(stats.budget / 1048576).toFixed(0)} MiB，命中 ${stats.hits}，实际读取 ${stats.reads} 次`,
       );
     },
     saveSignals: async () => {

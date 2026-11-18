@@ -28,28 +28,32 @@ class KdbSession {
     binary: string,
     home: string | undefined,
     log: (text: string) => void = () => {},
+    launch: { args?: string[]; useVerdiLibraries?: boolean } = {},
   ) {
     this.childrenCache = new Map();
     this.locationCache = new Map();
     this.instanceCache = new Map();
     this.scratch = fs.mkdtempSync(path.join(os.tmpdir(), "wave-kdb-"));
     this.backend = new Backend(binary, {
+      ...launch,
       cwd: this.scratch,
-      env: home ? {
-        ...process.env,
-        VERDI_HOME: home,
-        LD_LIBRARY_PATH: [
-          path.join(home, "share/NPI/lib/linux64"),
-          path.join(home, "share/KDB/lib/linux64"),
-          path.join(home, "etc/lib/linux64"),
-          process.env.LD_LIBRARY_PATH,
-        ]
-          .filter(Boolean)
-          .join(path.delimiter),
-      } : undefined,
+      env: home
+        ? {
+            ...process.env,
+            VERDI_HOME: home,
+            LD_LIBRARY_PATH: [
+              path.join(home, "share/NPI/lib/linux64"),
+              path.join(home, "share/KDB/lib/linux64"),
+              path.join(home, "etc/lib/linux64"),
+              process.env.LD_LIBRARY_PATH,
+            ]
+              .filter(Boolean)
+              .join(path.delimiter),
+          }
+        : undefined,
       onLog: log,
     });
-    this.backend.child.once("exit", () =>
+    this.backend.child.once("close", () =>
       fs.rm(this.scratch, { recursive: true, force: true }, () => {}),
     );
   }

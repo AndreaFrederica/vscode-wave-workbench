@@ -14,3 +14,4 @@ tsconfig*.json
 dist/**/*.map
 type-tests/**
 .github/**
+**/__pycache__/**

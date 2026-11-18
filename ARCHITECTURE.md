@@ -1,12 +1,15 @@
 # TypeScript 架构（0.8.0）
 
-扩展宿主、Tcl 命令适配和 Webview 源码使用 TypeScript。原生 FSDB/KDB 读取、虚拟信号运算与 LRU 缓存仍由独立 Rust 后端及 C++ SDK 桥负责。
+扩展宿主、Tcl 命令适配和 Webview 源码使用 TypeScript。FSDB 和 KDB 可以通过独立 Python 读取器或 Rust 与 C++ 封装的 Verdi SDK 读取，两套后端共用 JSON 协议。
 
 | 路径 | 职责 |
 | --- | --- |
-| `src/extension.ts` | VS Code 命令、会话、编辑器布局、RTL 双向定位 |
+| `src/extension.ts` | 扩展激活、VS Code 命令、编辑器布局、RTL 双向定位 |
+| `src/wave-editor.ts` | 波形编辑器会话、Webview 消息、后端切换 |
+| `src/wave-documents.ts` | 波形工程文档的打开、保存、备份与恢复 |
+| `src/backend-selection.ts` | 为 FSDB、KDB 和 VCD 选择并启动对应后端 |
 | `src/viewer.ts` | 波形编辑器会话类型 |
-| `src/backend.ts` | 子进程生命周期、请求编号、超时与 Rust JSON 协议 |
+| `src/backend.ts` | 子进程生命周期、请求编号、超时与行分隔 JSON 协议 |
 | `src/kdb.ts` | 独立 KDB 会话、层次与源位置缓存 |
 | `src/commands.ts`、`src/tcl.ts` | nWave 命令适配与 Tcl 子进程 |
 | `src/rtl-selection.ts`、`src/source-sync.ts` | RTL 批量信号提取与实例跟随 |

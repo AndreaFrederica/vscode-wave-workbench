@@ -5,6 +5,7 @@
 
 import type * as vscode from "vscode";
 import type { Backend } from "./backend";
+import type { FsdbBackend } from "./backend-selection";
 import type { KdbSession } from "./kdb";
 import type { TclRunner } from "./tcl";
 import type { Metadata, Location, WaveState } from "./shared/protocol";
@@ -28,6 +29,8 @@ export interface Viewer {
   document: WaveDocument;
   panel: vscode.WebviewPanel;
   backend: Backend;
+  backendKind: "independent" | "verdi" | "vcd";
+  switchBackend: (choice: FsdbBackend) => Promise<string>;
   meta: Metadata;
   uri: vscode.Uri;
   kdb: KdbSession;
