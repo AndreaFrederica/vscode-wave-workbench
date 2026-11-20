@@ -56,10 +56,13 @@ test("Verilator VCD and FST agree on alias values and source locations", { skip:
         markers: [{ name: "overflow", time: 31 }], groupOrder: ["Core"],
         radix: "hex", collapsedGroups: [], expandedBuses: [], virtualDefinitions: [],
       };
-      await saveWaveProject(projectFile, waveform, view, undefined, design.path, designView);
+      const traceProject = { filelist: path.join(directory, "sim.f"), workingDirectory: directory };
+      await saveWaveProject(projectFile, waveform, view, undefined, design.path, designView, traceProject);
       const saved = JSON.parse(fs.readFileSync(projectFile, "utf8"));
       assert.ok(!path.isAbsolute(saved.verilator));
+      assert.deepEqual(saved.traceProject, { filelist: "sim.f", workingDirectory: "" });
       const reopened = await readWaveProject(projectFile);
+      assert.deepEqual(reopened.traceProject, traceProject);
       const newBackend = startBackend();
       t.after(() => newBackend.dispose());
       const newMeta = await newBackend.request("open", { path: reopened.waveform });
@@ -107,4 +110,62 @@ test("large Verilator FST pages past preview and seeds held signals at late seek
   const design = await VerilatorDesign.open(path.join(stress, "Vtop.tree.json"), meta.signals, [stress]);
   assert.equal((await design.children("TOP.top")).length, 256);
   assert.equal((await design.resolve(scope + ".flipped[63:0]")).instance, scope);
+});
+
+test("module schematic uses elaborated port references and follows generated instances", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "wave-module-schematic-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const filename = path.join(directory, "Vtop.tree.json");
+  const variable = (name, addr, direction) => ({ type: "VAR", name, addr, direction, loc: "f,3:1" });
+  const ref = (name, varp, access = "RD") => ({ type: "VARREF", name, varp, access });
+  const pin = (modVarp, expression) => ({ type: "PIN", modVarp, exprp: [expression] });
+  fs.writeFileSync(filename, JSON.stringify({
+    type: "NETLIST",
+    modulesp: [
+      { type: "MODULE", name: "top", level: 1, stmtsp: [
+        variable("data", "data", "INPUT"),
+        variable("q", "q", "OUTPUT"),
+        { type: "GENBLOCK", name: "lanes[0]", itemsp: [
+          { type: "CELL", name: "u", modp: "leaf", pinsp: [
+            pin("d", { type: "SEL", fromp: [ref("data", "data")], lsbp: [{ name: "32'h4" }], widthConst: 4, declRange: "[7:0]" }),
+            pin("out", ref("q", "q", "WR")),
+            pin("enable", { type: "CONST", name: "1'h1" }),
+            pin("complex", { type: "CONCAT" }),
+          ] },
+        ] },
+      ] },
+      { type: "MODULE", name: "leaf", addr: "leaf", stmtsp: [
+        variable("d", "d", "INPUT"), variable("out", "out", "OUTPUT"),
+        variable("en", "enable", "INPUT"), variable("complex", "complex", "INPUT"),
+        variable("unused", "unused", "INPUT"),
+        { type: "ALWAYS", keyword: "always_ff", loc: "f,7:1",
+          stmtsp: [ref("d", "d"), ref("out", "out", "WR")] },
+      ] },
+    ],
+  }));
+  fs.writeFileSync(filename.replace(".tree.json", ".tree.meta.json"), JSON.stringify({
+    files: { f: { filename: "fixture.sv" } },
+  }));
+  const design = await VerilatorDesign.open(filename, [], [directory]);
+  t.after(() => design.dispose());
+  const top = design.moduleSchematic();
+  assert.equal(top.module.instance, "top");
+  const instance = top.nodes.find((node) => node.kind === "module");
+  assert.equal(instance.instance, "top.lanes[0].u");
+  const ports = Object.fromEntries(instance.ports.map((port) => [port.label, port]));
+  assert.equal(ports.unused.status, "open");
+  assert.equal(ports.complex.status, "unresolved");
+  assert.equal(top.partial, true);
+  assert.ok(top.edges.some((edge) => edge.from === "net:top.data" && edge.toPort === ports.d.id && edge.label === "[7:4]"));
+  assert.ok(top.edges.some((edge) => edge.fromPort === ports.out.id && edge.to === "net:top.q"));
+  const constant = top.nodes.find((node) => node.kind === "constant");
+  assert.equal(constant.label, "1'b1");
+  assert.ok(top.edges.some((edge) => edge.from === constant.id && edge.toPort === ports.en.id));
+  const leaf = design.moduleSchematic(instance.instance);
+  const process = leaf.nodes.find((node) => node.label === "always_ff");
+  assert.equal(leaf.module.parent, "top");
+  assert.equal(leaf.partial, false);
+  assert.equal(process.location.line, 7);
+  assert.ok(leaf.edges.some((edge) => edge.from === "net:top.lanes[0].u.d" && edge.to === process.id));
+  assert.ok(leaf.edges.some((edge) => edge.from === process.id && edge.to === "net:top.lanes[0].u.out"));
 });

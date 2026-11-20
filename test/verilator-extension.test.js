@@ -6,6 +6,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const vm = require("node:vm");
+const { spawn } = require("node:child_process");
+const { createHash } = require("node:crypto");
+const { pathToFileURL } = require("node:url");
 
 test("extension host opens Verilator FST, links RTL both ways and reopens a saved project", {
   skip: !process.env.WAVE_TEST_VERILATOR,
@@ -23,7 +26,41 @@ test("extension host opens Verilator FST, links RTL both ways and reopens a save
   const commands = new Map();
   const saved = new Map();
   const disposable = { dispose() {} };
-  let provider, sidebarProvider, receiveSidebar, receive, close, document, hover, activeEditor;
+  const traceCalls = [];
+  const runningTrace = Promise.withResolvers();
+  const cancelledTrace = Promise.withResolvers();
+  const managedConfigs = [];
+  let managedDisposals = 0;
+  const source = path.join(fixture, "fixture.sv");
+  const compilation = {
+    roots: [pathToFileURL(source).href],
+    files: [pathToFileURL(source).href],
+    includeDirs: [],
+    topModules: ["top"],
+    defines: ["MODE=1"],
+    parameterOverrides: ["Width=4"],
+    complete: true,
+  };
+  const analysisReply = {
+    schemaVersion: 1, revision: "7", scope: "file", root: 0,
+    signals: [
+      { id: 0, name: "pc", declaration: null },
+      { id: 1, name: "clk", declaration: {
+        uri: path.join(fixture, "fixture.sv"), range: { start: { line: 3, character: 48 } },
+      } },
+      { id: 2, name: "not_dumped", declaration: null },
+    ],
+    assignments: [{
+      kind: "nonblocking", targets: [0], inputs: [{
+        signal: 1, kind: "trigger", edge: "rising",
+        location: { uri: "file:///fixture.sv", range: { start: { line: 6, character: 19 } } },
+      }],
+      location: { uri: "file:///fixture.sv", range: { start: { line: 7, character: 4 } } },
+      hasUnresolvedOperands: false,
+    }],
+    frontier: [], diagnostics: ["localAssignmentCoverage"],
+  };
+  let provider, sidebarProvider, traceTree, receiveSidebar, receive, close, document, hover, activeEditor;
   let selectedTree = false;
   let restored;
   let snapshot;
@@ -60,18 +97,59 @@ test("extension host opens Verilator FST, links RTL both ways and reopens a save
   }
   const vscode = {
     EventEmitter, Position, Range, Selection: Range, MarkdownString,
+    CancellationTokenSource: class {
+      listeners = new Set();
+      token = {
+        isCancellationRequested: false,
+        onCancellationRequested: (listener) => {
+          this.listeners.add(listener);
+          return { dispose: () => this.listeners.delete(listener) };
+        },
+      };
+      cancel() {
+        this.token.isCancellationRequested = true;
+        for (const listener of this.listeners) listener();
+      }
+      dispose() { this.listeners.clear(); }
+    },
     Hover: class { constructor(contents) { this.contents = contents; } },
+    TreeItem: class { constructor(label, state) { Object.assign(this, { label, state }); } },
+    TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
     Uri: { file: uri, joinPath: (base, ...parts) => uri(path.join(base.fsPath, ...parts)) },
     ViewColumn: { One: 1, Two: 2, Beside: 2 },
-    extensions: { getExtension: () => undefined },
+    ProgressLocation: { Notification: 15 },
+    extensions: { getExtension: () => ({ packageJSON: { version: "1.3.0" }, activate: async () => ({
+      version: 1, capabilities: { staticTraceVersion: 1 },
+      traceDrivers: async (params, token) => {
+        traceCalls.push(params);
+        if (params.options?.maxDepth === 137) {
+          await new Promise((resolve) => {
+            token.onCancellationRequested(resolve);
+            runningTrace.resolve();
+          });
+          cancelledTrace.resolve(token.isCancellationRequested);
+        }
+        return analysisReply;
+      },
+      openTraceProject: async (configuration) => {
+        managedConfigs.push(configuration);
+        return {
+          traceDrivers: async () => ({ ...analysisReply, compilation }),
+          dispose() { managedDisposals++; },
+        };
+      },
+    }) }) },
     languages: { registerHoverProvider(_selector, service) { hover = service; return disposable; } },
     workspace: {
-      getConfiguration: () => ({ get: () => undefined }),
-      openTextDocument: async (file) => rtl(file.fsPath),
+      workspaceFolders: process.platform === "win32" ? [] : [{ uri: uri(temporary) }],
+      textDocuments: [],
+      getConfiguration: () => ({ get: (key) => key === "mcpEnabled" ? true : undefined }),
+      openTextDocument: async (file) => file.language === "markdown" ? file : rtl(file.fsPath),
     },
     window: {
       registerCustomEditorProvider(_id, value) { provider = value; return disposable; },
       registerWebviewViewProvider(_id, value) { sidebarProvider = value; return disposable; },
+      registerTreeDataProvider(_id, value) { traceTree = value; return disposable; },
       onDidChangeActiveTextEditor(handler) { activeEditor = handler; return disposable; },
       createOutputChannel: () => ({ append() {}, appendLine() {}, dispose() {} }),
       showQuickPick: async (values) => values[0],
@@ -80,6 +158,11 @@ test("extension host opens Verilator FST, links RTL both ways and reopens a save
         return [uri(path.join(fixture, "obj_dir/Vtop.tree.json"))];
       },
       showSaveDialog: async () => uri(project),
+      withProgress: async (_options, task) => {
+        const source = new vscode.CancellationTokenSource();
+        try { return await task({}, source.token); }
+        finally { source.dispose(); }
+      },
       showTextDocument: async (doc) => {
         const editor = { doc, revealRange() {} };
         opened.push(editor);
@@ -128,6 +211,7 @@ test("extension host opens Verilator FST, links RTL both ways and reopens a save
   }
   await commands.get("waveWorkbench.open")(uri(waveform));
   const meta = messages.find((m) => m.type === "metadata");
+  assert.ok(meta, JSON.stringify(messages.filter((m) => m.type === "error")));
   assert.equal(meta.backend, "rust-fst");
   assert.ok(!messages.some((m) => m.type === "kdbAttached"));
   await commands.get("waveWorkbench.attachKdb")();
@@ -159,6 +243,164 @@ test("extension host opens Verilator FST, links RTL both ways and reopens a save
   for (let attempt = 0; attempt < 40 && messages.findLast((m) => m.type === "scopeSelected")?.scope !== scope; attempt++)
     await new Promise((done) => setTimeout(done, 25));
   assert.equal(messages.findLast((m) => m.type === "scopeSelected").scope, scope);
+
+  await commands.get("waveWorkbench.traceDrivers")();
+  assert.equal(traceCalls.at(-1).position.line, 7);
+  assert.match(opened.at(-1).doc.content, /flowchart LR/);
+  assert.match(opened.at(-1).doc.content, /fixture\.sv.*L8/);
+  await receive({ type: "rtlTrace", signal: scope + ".pc", mode: "context", tick: "30" });
+  assert.match(opened.at(-1).doc.content, /Waveform observations/);
+  assert.match(opened.at(-1).doc.content, /Window \d+–29 ticks/);
+  assert.match(opened.at(-1).doc.content, /Cursor values sampled at tick 30/);
+  const timeline = traceTree.getChildren().find(({ kind }) => kind === "timeline");
+  assert.equal(traceTree.getTreeItem(timeline).label, "Observed transitions");
+  const transition = traceTree.getChildren(timeline).find(({ point }) => point?.tick === "29");
+  const jump = traceTree.getTreeItem(transition).command;
+  await commands.get(jump.command)(...jump.arguments);
+  assert.deepEqual(messages.findLast(({ action }) => action === "cursor").payload, { time: 29, reveal: true });
+  const [transitionSource] = traceTree.getChildren(transition);
+  const openSource = traceTree.getTreeItem(transitionSource).command;
+  assert.equal(openSource.command, "waveWorkbench.traceOpenSource");
+  assert.equal(openSource.arguments[0].range.start.line, 7);
+  const [upstreamSample] = traceTree.getChildren(transitionSource);
+  assert.equal(upstreamSample.kind, "transition");
+  assert.equal(traceTree.getTreeItem(upstreamSample).command.command, "waveWorkbench.traceJumpToTick");
+  const beforeRefresh = traceCalls.length;
+  for (const tick of [52, 46, 40]) {
+    await receive({ type: "rtlCursor", tick, displayFactor: 1, displayScale: "ps" });
+  }
+  const currentTransition = () => traceTree.getChildren(timeline)[0]?.point?.tick;
+  for (let attempt = 0; attempt < 40 && currentTransition() !== "39"; attempt++)
+    await new Promise((done) => setTimeout(done, 25));
+  assert.equal(currentTransition(), "39");
+  assert.equal(traceCalls.length, beforeRefresh);
+  const previousTraceCount = traceCalls.length;
+  const selectedSignal = traceTree.getChildren().find(({ kind }) => kind === "signal");
+  assert(selectedSignal);
+  await commands.get("waveWorkbench.traceFromSignal")(selectedSignal);
+  assert.ok(traceCalls.length > previousTraceCount);
+  assert.match(opened.at(-1).doc.content, /RTL trace of .*pc/);
+  const previousJumpCount = messages.filter(({ action }) => action === "cursor").length;
+  await commands.get(jump.command)(...jump.arguments);
+  assert.equal(messages.filter(({ action }) => action === "cursor").length, previousJumpCount);
+  const executionDirectory = process.env.WAVE_TEST_EXECUTION_TRACE;
+  if (executionDirectory) {
+    await commands.get("waveWorkbench.openExecutionRecording")(
+      uri(path.join(executionDirectory, "execution.jsonl")),
+      "TOP.trace_tb.dut.owner_q", "7",
+    );
+    const execution = traceTree.getChildren()[0];
+    assert.equal(traceTree.getTreeItem(execution).label, "Recorded execution");
+    const recorded = traceTree.getChildren(execution).find(({ event }) => event.kind === "assignment-committed");
+    assert.match(traceTree.getTreeItem(recorded).description, /Tick 7/);
+    const source = traceTree.getTreeItem(traceTree.getChildren(recorded)[0]);
+    assert.equal(source.command.command, "waveWorkbench.traceOpenSource");
+    assert.match(source.label, /RTL source · L\d+/);
+  }
+
+  if (process.platform !== "win32") {
+    const digest = (file) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    const relativeSource = path.relative(temporary, source);
+    fs.writeFileSync(path.join(temporary, "trace.build.json"), JSON.stringify({
+      schemaVersion: 1, format: "wave-workbench-build", waveformSha256: digest(waveform),
+      roots: [relativeSource], files: [{ path: relativeSource, sha256: digest(source) }],
+      include_dirs: [], top_modules: ["top"], defines: ["MODE=1"], parameter_overrides: ["Width=4"],
+    }));
+    const mcp = spawn(process.execPath, [path.join(root, "dist/mcp.js"), temporary]);
+    t.after(() => mcp.kill());
+    let output = "";
+    mcp.stdout.setEncoding("utf8").on("data", (data) => { output += data; });
+    const complete = new Promise((resolve, reject) => {
+      mcp.on("error", reject);
+      mcp.on("close", (code) => code === 0 ? resolve() : reject(Error("MCP exited with " + code)));
+    });
+    mcp.stdin.end([
+      { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+        name: "wave_trace_drivers",
+        arguments: { signal: scope + ".pc", format: "mermaid", detail: "full", maxDepth: 9 },
+      } },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: {
+        name: "wave_trace_context",
+        arguments: { signal: scope + ".pc", tick: "30", historyStart: "28", format: "mermaid", detail: "full" },
+      } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: {
+        name: "wave_trace_context",
+        arguments: { signal: scope + ".pc", tick: "30", detail: "full", buildManifest: "trace.build.json" },
+      } },
+      { jsonrpc: "2.0", id: 6, method: "tools/call", params: {
+        name: "wave_trace_drivers",
+        arguments: { signal: scope + ".pc", detail: "full", buildManifest: "trace.build.json", pageSize: 32 },
+      } },
+    ].map((request) => JSON.stringify(request) + "\n").join(""));
+    await complete;
+    const responses = new Map(output.trim().split("\n").map((line) => {
+      const reply = JSON.parse(line);
+      return [reply.id, reply];
+    }));
+    const [list, reply, contextReply, managedReply] = [1, 2, 3, 4].map((id) => responses.get(id));
+    const waiting = spawn(process.execPath, [path.join(root, "dist/mcp.js"), temporary]);
+    t.after(() => waiting.kill());
+    let cancelOutput = "";
+    waiting.stdout.setEncoding("utf8").on("data", (data) => { cancelOutput += data; });
+    const exited = new Promise((resolve, reject) => {
+      waiting.on("error", reject);
+      waiting.on("close", (code) => code === 0 ? resolve() : reject(Error("MCP exited with " + code)));
+    });
+    const send = (payload) => JSON.stringify({ jsonrpc: "2.0", ...payload }) + "\n";
+    waiting.stdin.write(send({
+      id: 5, method: "tools/call", params: {
+        name: "wave_trace_drivers",
+        arguments: { signal: scope + ".pc", maxDepth: 137 },
+      },
+    }));
+    await runningTrace.promise;
+    waiting.stdin.end(send({ method: "notifications/cancelled", params: { requestId: 5 } }) +
+      send({ id: 6, method: "ping" }));
+    assert.equal(await cancelledTrace.promise, true);
+    await exited;
+    assert.deepEqual(JSON.parse(cancelOutput), { jsonrpc: "2.0", id: 6, result: {} });
+    assert.ok(list.result.tools.some(({ name }) => name === "wave_trace_drivers"));
+    assert.ok(!reply.result.isError, reply.result.content[0].text);
+    const result = JSON.parse(reply.result.content[0].text);
+    assert.ok(traceCalls.some(({ position, options }) => position.line === 3 && options.maxDepth === 9));
+    assert.equal(result.instance, scope);
+    assert.match(result.mermaid, /flowchart LR/);
+    assert.match(result.report, /RTL trace of TOP\.top\.u0\.pc/);
+    assert.ok(!contextReply.result.isError, contextReply.result.content[0].text);
+    const contextResult = JSON.parse(contextReply.result.content[0].text);
+    assert.equal(contextResult.context.mode, "observations");
+    assert.equal(contextResult.context.sourceMatch, "unverified");
+    assert.equal(contextResult.context.observations[0].value, "1111");
+    assert.equal(contextResult.context.observations[0].history.at(-1).tick, "29");
+    assert.ok(contextResult.context.observations.some(({ signal }) => signal === 1));
+    assert.ok(contextResult.context.unmapped.includes(2));
+    assert.equal(contextResult.context.assignmentCandidates.status, "observedChange");
+    assert.equal(contextResult.context.assignmentCandidates.candidates[0].status, "consistentWithObservations");
+    assert.match(contextResult.observationMermaid, /subgraph g0/);
+    assert.ok(contextResult.context.temporalTrace.edges.some((edge) => edge.kind === "trigger"));
+    assert.match(contextResult.temporalMermaid, /trigger evidence/);
+    assert.match(contextResult.report, /Waveform observations/);
+    assert.match(contextResult.report, /Candidate assignments for the observed change/);
+    assert.ok(!managedReply.result.isError, managedReply.result.content[0].text);
+    const managed = JSON.parse(managedReply.result.content[0].text);
+    assert.equal(managed.context.sourceVerification.status, "matched");
+    assert.equal(managed.simulationProject.buildManifest, path.join(temporary, "trace.build.json"));
+    assert.match(managed.report, /Simulation build manifest/);
+    const staticManagedReply = responses.get(6);
+    assert.ok(!staticManagedReply.result.isError, staticManagedReply.result.content[0].text);
+    const staticManaged = JSON.parse(staticManagedReply.result.content[0].text);
+    assert.deepEqual(staticManaged.simulationProject, managed.simulationProject);
+    assert.equal(staticManaged.buildVerification.status, "matched");
+    assert.equal(staticManaged.assignments.length, managed.assignments.length);
+    assert.match(staticManaged.report, /Simulation build manifest/);
+    assert.equal(managedConfigs.length, 2);
+    assert.equal(managedConfigs[0], managedConfigs[1]);
+    assert.ok(managedConfigs[0].includes("source_files = " + JSON.stringify([source])));
+    assert.ok(managedConfigs[0].includes('defines = ["MODE=1"]'));
+    assert.ok(managedConfigs[0].includes('parameter_overrides = ["Width=4"]'));
+    assert.equal(managedDisposals, 2);
+  }
 
   snapshot = {
     chosen: [{ ...pc, group: "APU", annotation: { tags: ["pc"], note: "counter" } }],

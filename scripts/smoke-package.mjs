@@ -54,3 +54,5 @@ for (const independent of [false, true]) {
   assert.equal(open.result.backend, "rust-vcd", open.error);
   assert.deepEqual(query.result["!"].events[0], ["10", "0"]);
 }
+
+await import("./smoke-mcp.mjs");

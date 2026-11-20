@@ -9,7 +9,7 @@ const {test,expect}=require('@playwright/test');
 const path=require('node:path'),fs=require('node:fs'),os=require('node:os');
 const {Backend}=require('../dist/backend');const {TclRunner}=require('../dist/tcl');const {WaveCommands,quote}=require('../dist/commands');const {KdbSession}=require('../dist/kdb');
 async function setup(page,filename,kdbPath,decoderConfig){
-  const backend=new Backend(path.resolve(__dirname,'../bin/wave-backend'));const pending=new Map();let sequence=0,queryDelay=0;const logs=[],queries=[],catalogRequests=[],decoderRequests=[];
+  const backend=new Backend(path.resolve(__dirname,'../bin/wave-backend'));const pending=new Map();let sequence=0,queryDelay=0;const logs=[],queries=[],catalogRequests=[],decoderRequests=[],rtlRequests=[];
   const viewer={backend,uri:{fsPath:filename},meta:await backend.request('open',{path:filename})};
   const send=m=>page.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),m);
   viewer.ui=(action,payload)=>new Promise((resolve,reject)=>{const id=++sequence;pending.set(id,{resolve,reject});send({type:'ui',id,action,payload}).catch(reject);});
@@ -17,6 +17,7 @@ async function setup(page,filename,kdbPath,decoderConfig){
   const engine=new WaveCommands({getViewer:()=>viewer,open:async file=>{if(path.resolve(file)!==filename)throw Error('Unexpected test open');},scope:async name=>{await send({type:'kdbHierarchy',scope:name,children:await viewer.kdb.children(name)});}});
   const runner=new TclRunner((name,args,dir)=>{viewer.scriptDirectory=dir;return engine.execute(name,args);},{log:text=>logs.push(text)});
   await page.exposeFunction('bridge',async m=>{
+    if(['rtlTrace','rtlSchematic','rtlModuleSchematic','rtlTraceSchematic'].includes(m.type))rtlRequests.push(m);
     if(m.type==='ready'){await send({type:'metadata',...viewer.meta,title:path.basename(filename),vide:'1.2.5'});}
     else if(m.type==='queryWaveDecoder'){decoderRequests.push(m);}
     else if(m.type==='decoderCatalog'){
@@ -42,7 +43,7 @@ async function setup(page,filename,kdbPath,decoderConfig){
   await page.addInitScript(()=>{window.acquireVsCodeApi=()=>({getState:()=>null,setState(s){window.__savedWaveState=s;},postMessage:m=>window.bridge(m)});});
   await page.route('http://wave.test/**',async route=>{const name=new URL(route.request().url()).pathname.slice(1)||'index.html';if(!['index.html','wave.js','wave.css'].includes(name)){await route.abort();return;}let body=fs.readFileSync(path.resolve(__dirname,name.endsWith('.js')?'../dist/webview':'../media',name),'utf8');if(name==='index.html')body=body.replaceAll('{{csp}}','http://wave.test').replaceAll('{{nonce}}','testnonce').replace('{{css}}','/wave.css').replace('{{script}}','/wave.js');await route.fulfill({body,contentType:name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});});
   await page.goto('http://wave.test/');await expect(page.locator('#backend')).toContainText(viewer.meta.backend);
-  return {viewer,send,logs,queries,catalogRequests,decoderRequests,running:()=>!!runner.pending,setQueryDelay(ms){queryDelay=ms;},run:(script,directory)=>runner.run(script,directory||path.dirname(filename)),dispose(){runner.dispose();backend.dispose();viewer.kdb?.dispose();}};
+  return {viewer,send,logs,queries,catalogRequests,decoderRequests,rtlRequests,running:()=>!!runner.pending,setQueryDelay(ms){queryDelay=ms;},run:(script,directory)=>runner.run(script,directory||path.dirname(filename)),dispose(){runner.dispose();backend.dispose();viewer.kdb?.dispose();}};
 }
 test('real Tcl and wave UI: groups, units, values, markers, transition, export/replay, errors',async({page})=>{
   const env=await setup(page,path.resolve(__dirname,'../examples/demo.vcd'));
@@ -290,6 +291,28 @@ test('compact controls leave waveform height available; editors float and menus 
   await page.screenshot({path:'test-results/compact-waveform.png'});
   await page.setViewportSize({width:720,height:400});expect(await height()).toBeGreaterThanOrEqual(310);await page.locator('#sourceMenu summary').click();await expect(page.locator('[data-action=source]')).toBeVisible();const rect=await page.locator('#sourceMenu .menuPanel').boundingBox();expect(rect.x).toBeGreaterThanOrEqual(0);expect(rect.x+rect.width).toBeLessThanOrEqual(720);await page.keyboard.press('Escape');await page.screenshot({path:'test-results/compact-waveform-narrow.png'});
  }finally{env.dispose();}
+});
+
+test('trace and schematic toolbar menus dispatch to the selected waveform signal', async ({page}) => {
+  const env = await setup(page, path.resolve(__dirname,'../examples/demo.vcd'));
+  try {
+    await clickTool(page, '#schematicMenu [data-action=rtlSchematicTop]');
+    await env.run('wvAddSignal {/tb/dut/clk}; wvSetCursor 20');
+    await page.locator('.row').first().click();
+    await clickTool(page, '#traceMenu [data-action=traceContext]');
+    await clickTool(page, '#schematicMenu [data-action=rtlTraceSchematic]');
+    await clickTool(page, '#schematicMenu [data-action=rtlSchematicLoads]');
+    await clickTool(page, '#schematicMenu [data-action=rtlSchematicModule]');
+    await expect.poll(() => env.rtlRequests).toMatchObject([
+      {type: 'rtlModuleSchematic'},
+      {type: 'rtlTrace', mode: 'context', signal: 'tb.dut.clk', tick: '20'},
+      {type: 'rtlTraceSchematic'},
+      {type: 'rtlSchematic', direction: 'loads', signal: 'tb.dut.clk', tick: '20'},
+      {type: 'rtlModuleSchematic', signal: 'tb.dut.clk'},
+    ]);
+  } finally {
+    env.dispose();
+  }
 });
 
 test('named time markers: add, render dashed line, drag, edit, navigate, hide and replay',async({page})=>{
@@ -974,4 +997,175 @@ test('transaction rows accept only the current request and keep bindings across 
   } finally {
     env.dispose();
   }
+});
+
+test('mixed wave rows preserve real cursor values and Tcl range measurements', async ({page}) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wave-real-ui-'));
+  const filename = path.join(directory, 'mixed.vcd');
+  fs.writeFileSync(filename, [
+    '$timescale 1ns $end', '$scope module tb $end', '$var real 64 ! voltage $end',
+    '$var wire 1 " ready $end', '$upscope $end', '$enddefinitions $end',
+    '#0', 'r-0.125 !', '0"', '#4', 'r0.125 !', '#9', 'r0.9 !', '1"', '#17',
+  ].join('\n') + '\n');
+  const env = await setup(page, filename);
+  try {
+    await env.run('wvAddSignal /tb/voltage /tb/ready; wvSetCursor 9');
+    await expect(page.locator('.row').nth(0).locator('.value')).toHaveText('0.9');
+    await expect(page.locator('.row').nth(1).locator('.value')).toHaveText('1');
+    expect(await env.run('wvGetSigValueByTime /tb/voltage -time 1')).toBe('-0.125');
+    const stats = JSON.parse(await env.run('waveMeasureAnalog /tb/voltage 0 9'));
+    expect(stats).toMatchObject({min: -0.125, max: 0.125, rms: 0.125, coveredTicks: '9'});
+  } finally {
+    env.dispose();
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
+});
+
+async function openSchematic(page) {
+  await page.addInitScript(() => { window.acquireVsCodeApi = () => ({postMessage: window.bridge}); });
+  await page.route('http://schematic.test/**', async route => {
+    const name = new URL(route.request().url()).pathname.slice(1) || 'schematic.html';
+    if (!['schematic.html', 'schematic.js', 'schematic.css'].includes(name)) return route.abort();
+    let body = fs.readFileSync(path.resolve(__dirname, name.endsWith('.js') ? '../dist/webview' : '../media', name), 'utf8');
+    if (name === 'schematic.html') body = body.replaceAll('{{csp}}', 'http://schematic.test').replaceAll('{{nonce}}', 'testnonce').replace('{{css}}', '/schematic.css').replace('{{script}}', '/schematic.js');
+    await route.fulfill({body, contentType: name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html'});
+  });
+  await page.goto('http://schematic.test/');
+}
+
+test('local RTL schematic lays out data and control and dispatches cross-probe actions', async ({page}) => {
+  const messages = [];
+  await page.exposeFunction('bridge', async message => {
+    messages.push(message);
+    if (message.type === 'ready' || message.type === 'follow' || message.type === 'back' || message.type === 'refresh') {
+      await page.evaluate(({action, revision}) => window.dispatchEvent(new MessageEvent('message', {data: {
+        type: 'schematic', title: action === 'follow' ? 'tb.a' : 'tb.q', revision, canGoBack: action === 'follow', graph: {
+          root: action === 'follow' ? 'a' : 'q', partial: false,
+          nodes: [
+            {id: 'a', label: 'a', detail: 'tb', kind: 'signal', wave: true, source: true},
+            {id: 'clk', label: 'clk', detail: 'tb', kind: 'signal', wave: true},
+            {id: 'dff', label: 'DFF', detail: '', kind: 'register'},
+            {id: 'q', label: 'q', detail: 'tb · 1', kind: 'signal', wave: true},
+          ],
+          edges: [{from: 'a', to: 'dff'}, {from: 'clk', to: 'dff', control: true}, {from: 'dff', to: 'q'}],
+        },
+      }})), {action: message.type, revision: (message.revision ?? -1) + 1});
+    }
+  });
+  await openSchematic(page);
+  await expect(page.locator('svg .node')).toHaveCount(4);
+  await expect(page.locator('svg .edge.control')).toHaveCount(1);
+  const scene = page.locator('#scene');
+  const bounds = await scene.boundingBox();
+  const viewBox = async () => (await page.locator('#diagram').getAttribute('viewBox')).split(' ').map(Number);
+  const before = await viewBox();
+  await page.mouse.move(bounds.x + bounds.width * 0.4, bounds.y + bounds.height * 0.3);
+  await page.mouse.wheel(0, -160);
+  await expect.poll(async () => (await viewBox())[2]).toBeLessThan(before[2]);
+  const zoomed = await viewBox();
+  expect(zoomed[0] + zoomed[2] * 0.4).toBeCloseTo(before[0] + before[2] * 0.4, 0);
+  expect(zoomed[1] + zoomed[3] * 0.3).toBeCloseTo(before[1] + before[3] * 0.3, 0);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width * 0.4 + 60, bounds.y + bounds.height * 0.3 + 35, {steps: 4});
+  await page.mouse.up();
+  const shifted = await viewBox();
+  expect(shifted[0]).toBeLessThan(zoomed[0]);
+  expect(shifted[1]).toBeLessThan(zoomed[1]);
+  expect(shifted[2]).toBeCloseTo(zoomed[2]);
+  await page.getByRole('button', {name: '适应视图'}).click();
+  expect(await viewBox()).toEqual(before);
+  await page.getByRole('button', {name: 'a', exact: true}).click();
+  await page.getByRole('button', {name: '查看源码'}).click();
+  await page.getByRole('button', {name: '加入波形'}).click();
+  await expect.poll(() => messages.slice(1)).toEqual([{type: 'source', id: 'a', revision: 0}, {type: 'wave', id: 'a', revision: 0}]);
+  await page.getByRole('button', {name: '展开上游'}).click();
+  await expect(page.locator('#title')).toHaveText('tb.a');
+  await expect(page.locator('svg .node')).toHaveCount(4);
+  await expect(page.locator('svg .node.root')).toHaveAttribute('aria-label', 'a');
+  await page.getByRole('button', {name: '返回'}).click();
+  await expect(page.locator('svg .node.root')).toHaveAttribute('aria-label', 'q');
+  await page.getByRole('button', {name: '刷新 A 游标'}).click();
+  await expect.poll(() => messages.at(-1)).toEqual({type: 'refresh', revision: 2});
+  await expect(page.locator('svg .node')).toHaveCount(4);
+});
+
+test('dense trace renders visible nodes and keeps pan and zoom interactive', async ({page}) => {
+  const nodes = Array.from({length: 800}, (_, id) => ({
+    id: String(id), kind: 'signal', label: 'net' + id, detail: 'tb.dut',
+  }));
+  const edges = [];
+  for (let id = 1; id < nodes.length; id++) {
+    edges.push({from: String(id), to: String(Math.floor((id - 1) / 4))});
+    for (let offset = 1; offset <= 9; offset++)
+      edges.push({from: String(id), to: String((id + offset) % nodes.length)});
+  }
+  await page.exposeFunction('bridge', message => {
+    if (message.type === 'ready') return page.evaluate(graph => {
+      window.dispatchEvent(new MessageEvent('message', {data: {
+        type: 'schematic', traceSnapshot: true, title: 'Dense trace', graph,
+      }}));
+    }, {nodes, edges, root: '0', partial: false});
+  });
+  await openSchematic(page);
+  await expect(page.locator('#trace-edges')).toBeVisible();
+  await expect(page.getByRole('button', {name: 'net0', exact: true})).toBeVisible();
+  await expect(page.locator('svg .edge')).toHaveCount(0);
+  expect(await page.locator('svg .node').count()).toBeLessThan(160);
+  const view = await page.locator('#diagram').getAttribute('viewBox');
+  const scene = page.locator('#scene');
+  await scene.hover();
+  await page.mouse.wheel(0, -120);
+  await expect(page.locator('#diagram')).not.toHaveAttribute('viewBox', view);
+  const zoomed = await page.locator('#diagram').getAttribute('viewBox');
+  await page.mouse.down();
+  await page.mouse.move(800, 500, {steps: 5});
+  await page.mouse.up();
+  await expect(page.locator('#diagram')).not.toHaveAttribute('viewBox', zoomed);
+  await page.getByRole('button', {name: '适应视图'}).click();
+  await expect(page.locator('#status')).toContainText('放大查看连线');
+});
+
+test('module schematic draws named pins and navigates hierarchy', async ({page}) => {
+  const messages = [];
+  const module = {
+    id: 'module:top.dut', label: 'dut', detail: 'leaf', kind: 'module',
+    ports: [{id: 'd', label: 'd', direction: 'input'}, {id: 'q', label: 'q', direction: 'output'}],
+    source: true,
+  };
+  const input = {id: 'data', label: 'data', detail: 'input', kind: 'port', direction: 'input'};
+  await page.exposeFunction('bridge', async message => {
+    messages.push(message);
+    const leaf = message.type === 'enter';
+    const instance = leaf ? 'top.dut' : 'top';
+    if (['ready', 'enter', 'parent', 'back'].includes(message.type)) {
+      await page.evaluate(data => window.dispatchEvent(new MessageEvent('message', {data})), {
+        type: 'schematic', title: instance, revision: (message.revision ?? -1) + 1, canGoBack: leaf,
+        graph: {
+          root: '', partial: false, module: {instance, name: leaf ? 'leaf' : 'top', parent: leaf ? 'top' : undefined},
+          nodes: leaf ? [input] : [input, module],
+          edges: leaf ? [] : [{from: 'data', to: module.id, toPort: 'd', label: '[7:4]'}],
+        },
+      });
+    }
+  });
+  await openSchematic(page);
+  await expect(page.getByText('[7:4]', {exact: true})).toBeVisible();
+  await expect(page.locator('.node.module .pin text')).toHaveText(['d', 'q']);
+  await expect(page.getByRole('button', {name: '刷新 A 游标'})).toBeHidden();
+  await page.getByRole('button', {name: 'dut', exact: true}).click();
+  await expect(page.locator('.edge.active')).toHaveCount(1);
+  await page.getByRole('button', {name: '查看源码'}).click();
+  await expect.poll(() => messages.at(-1)).toEqual({type: 'source', id: module.id, revision: 0});
+  const moduleBox = await page.getByRole('button', {name: 'dut', exact: true}).boundingBox();
+  await page.mouse.move(moduleBox.x + moduleBox.width / 2, moduleBox.y + moduleBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(moduleBox.x + moduleBox.width / 2 + 43, moduleBox.y + moduleBox.height / 2 + 15, {steps: 4});
+  await page.mouse.up();
+  expect(messages.some(({type}) => type === 'enter')).toBe(false);
+  await page.getByRole('button', {name: 'dut', exact: true}).dblclick();
+  await expect(page.locator('#title')).toHaveText('top.dut');
+  await expect(page.locator('.node.module')).toHaveCount(0);
+  await page.getByRole('button', {name: '上一级'}).click();
+  await expect(page.locator('.node.module')).toHaveCount(1);
+  await expect(page.locator('#title')).toHaveText('top');
 });

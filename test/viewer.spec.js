@@ -75,13 +75,15 @@ test("large Verilator FST webview seeks and adds signals outside the initial pre
 
 test('native-backed webview: tree, bus, zoom, cursors, edge, source, remove and state',async({page})=>{
   const backend=new Backend(path.resolve(__dirname,'../bin/wave-backend'));
-  const errors=[];page.on('pageerror',e=>errors.push(e.message));let state,source;
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));let state,source,trace;
   await page.exposeFunction('bridge',async message=>{
     let reply;
     if(message.type==='ready')reply={type:'metadata',...await backend.request('open',{path:path.resolve(__dirname,'../examples/demo.vcd')}),title:'demo.vcd',vide:'1.2.5'};
     else if(message.type==='query')reply={type:'data',request:message.request,result:await backend.request('query',{signals:message.signals,start:String(message.start),end:String(message.end),limit:20000})};
     else if(message.type==='search')reply={type:'searchResult',request:message.request,...await backend.request('search',{query:message.query,offset:message.offset,limit:message.limit})};
+    else if(message.type==='scopeSignals')reply={type:'scopeSignals',request:message.request,...await backend.request('scopeSignals',{query:message.scope,offset:message.offset,limit:512})};
     else if(message.type==='source')source=message;
+    else if(message.type==='rtlTrace')trace=message;
     if(reply)await page.evaluate(msg=>window.dispatchEvent(new MessageEvent('message',{data:msg})),reply);
   });
   await page.exposeFunction('saveState',s=>{state=s;});
@@ -99,6 +101,15 @@ test('native-backed webview: tree, bus, zoom, cursors, edge, source, remove and 
     const rootScope=page.locator('#treeViewport .scope[title="tb"]'),childScope=page.locator('#treeViewport .scope[title="tb.dut"]'),clock=page.locator('.leaf').filter({hasText:'+ clk'});
     await expect(rootScope).toHaveCSS('padding-left','8px');await expect(childScope).toHaveCSS('padding-left','24px');await expect(clock).toHaveCSS('padding-left','40px');
     await childScope.click({position:{x:28,y:12}});await expect(clock).toHaveCount(0);await childScope.click({position:{x:28,y:12}});await expect(clock).toHaveCSS('padding-left','40px');
+    await childScope.click({position:{x:60,y:12}});
+    const traceDrivers=page.locator('.scopeActions').getByRole('button',{name:'追踪驱动'});
+    const traceLoads=page.locator('.scopeActions').getByRole('button',{name:'追踪负载'});
+    await expect(traceDrivers).toBeDisabled();
+    await page.locator('.scopeSignal[title="tb.dut.clk"]').click();
+    await traceDrivers.click();
+    await expect.poll(()=>[trace?.signal,trace?.mode]).toEqual(['tb.dut.clk','drivers']);
+    await traceLoads.click();
+    await expect.poll(()=>[trace?.signal,trace?.mode]).toEqual(['tb.dut.clk','loads']);
     // VS Code injects theme variables and changes body theme attributes at runtime.
     async function setTheme(kind,values){await page.evaluate(({kind,values})=>{document.body.className=kind;document.body.style.cssText='';for(const [name,value] of Object.entries(values))document.body.style.setProperty('--vscode-'+name,value);document.body.dataset.vscodeThemeId=kind;},{kind,values});}
     const light={'editor-background':'#ffffff','sideBar-background':'#f3f3f3','foreground':'#242424','descriptionForeground':'#555555','input-background':'#ffffff','input-foreground':'#242424','panel-border':'#cccccc','charts-green':'#187a38','charts-blue':'#005fb8','editorIndentGuide-background1':'#dddddd','errorForeground':'#b00020','editorWarning-foreground':'#795e00','charts-purple':'#812da8','list-activeSelectionBackground':'#005fb8','list-activeSelectionForeground':'#ffffff'};
@@ -126,11 +137,25 @@ test('native-backed webview: tree, bus, zoom, cursors, edge, source, remove and 
     await expect(page.locator('#cursors')).toContainText('Δ:');
     await page.locator('#radix').selectOption('unsigned');await expect(page.locator('.row').nth(1).locator('.value')).toHaveText('42');
     await page.locator('.row').first().click();await page.locator('[data-action="next"]').click();await expect(page.locator('#cursorAInput')).toHaveValue('25');
+    await clickTool(page,'[data-action="traceRecordedContext"]');
+    await expect.poll(()=>[trace?.mode,trace?.tick]).toEqual(['recordedContext','25']);
+    await clickTool(page,'[data-action="traceContinuations"]');
+    await expect.poll(()=>[trace?.mode,trace?.tick,trace?.followContinuations]).toEqual(['context','25',true]);
+    await clickTool(page,'[data-action="traceStaticContinuations"]');
+    await expect.poll(()=>[trace?.mode,trace?.signal,trace?.followContinuations]).toEqual(['drivers','tb.dut.clk',true]);
     await clickTool(page,'[data-action="source"]');await expect.poll(()=>source?.name).toBe('clk');
     await page.screenshot({path:'test-results/viewer.png'});
     await clickTool(page,'[data-action="remove"]');await expect(page.locator('.row')).toHaveCount(1);
     await expect.poll(()=>state?.chosen?.length).toBe(1);
     await page.locator('#search').fill('nonexistent');await expect(page.locator('.leaf')).toHaveCount(0);
+    await page.evaluate(() => {
+      const send = (id, action, payload) =>
+        window.dispatchEvent(new MessageEvent("message", { data: { type: "ui", id, action, payload } }));
+      send(1, "window", { start: 0, end: 10 });
+      send(2, "cursor", { time: 45, reveal: true });
+    });
+    await expect(page.locator('#cursorAInput')).toHaveValue('45');
+    await expect(page.locator('#cursors')).not.toHaveClass(/offscreen/);
     expect(errors).toEqual([]);
   }finally{backend.dispose();}
 });
