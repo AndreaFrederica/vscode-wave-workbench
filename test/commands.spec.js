@@ -21,6 +21,16 @@ async function setup(page,filename,kdbPath,decoderConfig){
     if(['rtlTrace','rtlSchematic','rtlModuleSchematic','rtlTraceSchematic'].includes(m.type))rtlRequests.push(m);
     if(m.type==='ready'){await send({type:'metadata',...viewer.meta,title:path.basename(filename),vide:'1.2.5'});}
     else if(m.type==='queryWaveDecoder'){decoderRequests.push(m);}
+    else if (m.type === 'measureWave') {
+      const {measureWave} = require('../dist/wave-measurements');
+      try {
+        const rows = await measureWave(backend, viewer.meta, m.operation, m.signals, m.start, m.end, m.reverse);
+        await send({type:'waveMeasurement', request:m.request, rows});
+      } catch (error) {
+        await send({type:'waveMeasurement', request:m.request, error:error.message});
+      }
+    }
+
     else if(m.type==='decoderCatalog'){
       const {loadDecoderCatalog}=require('../dist/decoder-config');
       await send({type:'decoderCatalog',...await loadDecoderCatalog(decoderConfig),workspaceAvailable:!!decoderConfig});
@@ -396,6 +406,21 @@ test('changing row height scales the waveform and its hover band', async ({page}
     await expect(page.locator('#waveTooltip')).toContainText('data[7:0]');
     await expect(page.locator('#hoverBand')).toHaveCSS('height', '64px');
     expect((await page.locator('#hoverBand').boundingBox()).y).toBe(bus.y);
+
+    await env.run('wvAddSignal /tb/dut/valid');
+    await page.locator('#displayMenu summary').click();
+    const slider = page.getByRole('slider', {name: '波形行高'});
+    await expect(slider).toHaveAttribute('max', '320');
+    await slider.fill('320');
+    await page.locator('#displayMenu summary').click();
+    await expect(page.locator('.row').first()).toHaveCSS('height', '320px');
+    const snapshot = await env.viewer.ui('snapshot');
+    expect(snapshot.rowHeight).toBe(320);
+    await env.run('wvSelectSignal /tb/dut/valid');
+    await expect.poll(() => page.locator('#tracks').evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+    expect(JSON.parse(await env.run('waveLayout 240 30')).rowHeight).toBe(240);
+    await env.viewer.ui('restoreView', snapshot);
+    await expect(page.locator('.row').first()).toHaveCSS('height', '320px');
   } finally {
     env.dispose();
   }
@@ -1038,6 +1063,38 @@ test('mixed wave rows preserve real cursor values and Tcl range measurements', a
     expect(await env.run('wvGetSigValueByTime /tb/voltage -time 1')).toBe('-0.125');
     const stats = JSON.parse(await env.run('waveMeasureAnalog /tb/voltage 0 9'));
     expect(stats).toMatchObject({min: -0.125, max: 0.125, rms: 0.125, coveredTicks: '9'});
+  } finally {
+    env.dispose();
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
+});
+
+test('measurement menu reports cursor values, clock duty and first rising-edge delay', async ({page}) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wave-measurement-ui-'));
+  const filename = path.join(directory, 'clock.vcd');
+  fs.writeFileSync(filename, [
+    '$timescale 1us $end', '$scope module tb $end', '$var wire 1 ! clk $end',
+    '$var wire 1 " gated $end', '$upscope $end', '$enddefinitions $end',
+    '#0', '0!', '0"', '#1', '1!', '#3', '1"', '#5', '0!', '#9', '1!',
+    '#13', '0!', '#17', '1!', '#21', '0!', '#25',
+  ].join('\n') + '\n');
+  const env = await setup(page, filename);
+  try {
+    await env.run('wvAddSignal /tb/clk /tb/gated; wvSetCursor 1; wvSetMarker 21');
+    const dialog = page.getByRole('dialog', {name: '数字脉宽、周期、频率和占空比'});
+    await page.locator('.row').first().click();
+    await clickTool(page, '[data-action=measure-pulse]');
+    await expect(dialog.getByRole('row').filter({hasText: '平均周期'})).toContainText('8 µs');
+    await expect(dialog.getByRole('row').filter({hasText: '高电平占空比'})).toContainText('50 %');
+    await expect(dialog.getByRole('row').filter({hasText: '频率'})).toContainText('125 kHz');
+    await dialog.getByRole('button', {name: '关闭'}).click();
+
+    await page.locator('.row').nth(1).click({modifiers:['Control']});
+    await clickTool(page, '[data-action=measure-delay]');
+    await expect(page.locator('#measurementRows').getByRole('row').last()).toContainText('2 µs');
+    await page.keyboard.press('Escape');
+    await clickTool(page, '[data-action=measure-cursors]');
+    await expect(page.locator('#measurementRows').getByRole('row').filter({hasText: 'clk'})).toContainText('A 1 · B 0');
   } finally {
     env.dispose();
     fs.rmSync(directory, {recursive: true, force: true});

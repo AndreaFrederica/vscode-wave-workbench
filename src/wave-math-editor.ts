@@ -168,6 +168,7 @@ export async function showWaveMath(
       output,
       name,
       source,
+      operation === "integral",
     );
     if (current())
       await viewer.panel.webview.postMessage({

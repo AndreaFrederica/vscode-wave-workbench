@@ -6,6 +6,8 @@ import type { TagColors, TagStyle } from "./tags";
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+export const WAVE_ROW_HEIGHT = { min: 24, max: 320 } as const;
+
 export type Radix = "bin" | "oct" | "hex" | "unsigned" | "signed";
 export type BusLabelMode = "auto" | "full";
 export interface Operand {
@@ -21,6 +23,7 @@ export type Definition =
       inputs: [];
       width: number;
       real?: true;
+      linear?: true;
       source: string;
       samples: [string, string][];
     };
@@ -397,6 +400,7 @@ export interface WaveClip {
     group?: string;
     width: number;
     real?: boolean;
+    linear?: boolean;
     unit?: string;
     decoder?: DecoderProfile;
     annotation?: Annotation;

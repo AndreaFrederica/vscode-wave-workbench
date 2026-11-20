@@ -4,7 +4,7 @@
 <nav id="compactToolbar" aria-label="Wave controls">
 <details class="toolMenu" id="fileMenu"><summary>文件</summary><div class="menuPanel"><span id="file">正在读取波形…</span><small id="backend"></small><button data-action="openWaveform">打开波形…</button><button data-action="openRecent">最近打开…</button><button data-action="openProject">打开波形工程…</button><button data-action="saveProject">保存波形工程…</button><button data-action="exportClip">截取 / 导出波形…</button><button data-action="runScript">运行 Tcl 脚本…</button><button data-action="console">Tcl 命令</button></div></details>
 <button data-action="fit" title="全局缩放 F" aria-label="全局缩放">全局</button><button data-action="in" title="放大 +" aria-label="放大">＋</button><button data-action="out" title="缩小 -" aria-label="缩小">−</button><button data-action="left" title="向左平移" aria-label="向左平移">←</button><button data-action="right" title="向右平移" aria-label="向右平移">→</button><button data-action="prev" title="上一边沿 [" aria-label="上一边沿">Ⅰ‹</button><button data-action="next" title="下一边沿 ]" aria-label="下一边沿">›Ⅰ</button><i></i>
-<details class="toolMenu" id="displayMenu"><summary>显示</summary><div class="menuPanel"><label for="waveRowHeight">波形行高</label><input id="waveRowHeight" type="range" min="24" max="80" step="1" value="32">
+<details class="toolMenu" id="displayMenu"><summary>显示</summary><div class="menuPanel"><label for="waveRowHeight">波形行高</label><input id="waveRowHeight" type="range" step="1" value="32">
 <label for="busLabelMode">总线格数值</label>
 <select id="busLabelMode">
   <option value="auto">自动缩写</option>
@@ -26,6 +26,14 @@
     <button id="decoderWorkspace" data-action="editDecoderConfig">新建工作区规则文件…</button>
   </div>
 </details>
+<details class="toolMenu" id="measurementMenu"><summary>测量</summary><div class="menuPanel">
+<button data-action="measure-cursors">A/B 游标读数与差值</button>
+<button data-action="measure-analog">实数统计（最值、峰峰值、均值、RMS）</button>
+<button data-action="measure-pulse">数字脉宽、周期、频率和占空比</button>
+<button data-action="measure-delay">两路信号的首个上升沿延时</button>
+<button data-action="measure-edges">实数 10–90% 上升／下降时间</button>
+<button data-action="measure-peaks">FFT 频谱峰值</button>
+</div></details>
 <details class="toolMenu" id="mathMenu"><summary>数学</summary><div class="menuPanel">
 <button data-action="math-expression">数学算式…</button>
 <button data-action="math-derivative">差分微分…</button>
@@ -36,7 +44,7 @@
 <button data-action="math-fft">FFT 频谱…</button>
 <button data-action="math-external">运行外部算子…</button>
 </div></details>
-<details class="toolMenu" id="signalMenu"><summary>信号</summary><div class="menuPanel" id="signalTools"><button id="renameSignal">重命名信号</button><button id="editAnnotation">标签和注释…</button><button id="moveUp">上移</button><button id="moveDown">下移</button><button id="createVirtual">拼接 / 逻辑</button><button id="expandBus">展开 Bus</button><button id="collapseBus">收回 Bus</button><button data-action="exportClip">截取 / 导出波形…</button><button id="signalReport">事件报告</button><button data-action="analogUnit">设置实数单位…</button><button data-action="analogMeasure">实数 A/B 测量</button><button data-action="analogThreshold">生成滞回数字波形…</button><button data-action="remove">移除信号</button></div></details>
+<details class="toolMenu" id="signalMenu"><summary>信号</summary><div class="menuPanel" id="signalTools"><button id="renameSignal">重命名信号</button><button id="editAnnotation">标签和注释…</button><button id="moveUp">上移</button><button id="moveDown">下移</button><button id="createVirtual">拼接 / 逻辑</button><button id="expandBus">展开 Bus</button><button id="collapseBus">收回 Bus</button><button data-action="exportClip">截取 / 导出波形…</button><button id="signalReport">事件报告</button><button data-action="analogUnit">设置实数单位…</button><button data-action="analogThreshold">生成滞回数字波形…</button><button data-action="remove">移除信号</button></div></details>
 <details class="toolMenu" id="sourceMenu">
   <summary>源码</summary>
   <div class="menuPanel">
@@ -53,6 +61,7 @@
     <button data-action="traceLoads">追踪负载</button>
     <button data-action="traceContext">查看 A 游标追踪证据</button>
     <button data-action="traceStaticContinuations">自动续查上游驱动</button>
+    <button data-action="traceLoadContinuations">自动续查下游负载</button>
     <button data-action="traceContinuations">自动续查 A 游标的上游</button>
     <button data-action="traceRecordedContext">结合执行记录追踪 A 游标…</button>
     <button data-action="traceExecution">回放 A 游标处的执行记录…</button>
@@ -121,5 +130,10 @@
 <div id="annotationError" role="status"></div>
 </form><form id="virtualForm" hidden><label for="virtualName">虚拟信号名称</label><input id="virtualName" aria-label="虚拟信号名称" maxlength="120"><select id="virtualOp" aria-label="虚拟信号操作"><option value="concat">拼接（上方信号为高位）</option><option value="and">按位 AND</option><option value="or">按位 OR</option><option value="xor">按位 XOR</option><option value="not">按位 NOT</option></select><div class="editActions"><button type="submit">创建虚拟信号</button><button id="cancelVirtual" type="button">取消</button></div></form></div>
 <section id="markerManager" hidden role="dialog" aria-label="时间标记管理"><div class="markerManagerHeader"><strong>时间标记</strong><button id="closeMarkerManager">关闭</button></div><div id="markerList"></div></section>
+<dialog id="measurementDialog" aria-labelledby="measurementTitle">
+<header><strong id="measurementTitle">波形测量</strong><form method="dialog"><button>关闭</button></form></header>
+<p id="measurementStatus" role="status"></p>
+<table><tbody id="measurementRows"></tbody></table>
+</dialog>
 <div id="waveTooltip" role="tooltip" hidden></div>
 <div id="contextMenu" role="menu" hidden></div><script nonce="{{nonce}}" src="{{script}}"></script></body></html>

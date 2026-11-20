@@ -1,4 +1,4 @@
-import { measureAnalog, thresholdSamples } from "./shared/analog";
+import { thresholdSamples } from "./shared/analog";
 // SPDX-License-Identifier: MPL-2.0
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -31,6 +31,7 @@ import {
 import { registerVirtuals, restoreView } from "./view-state";
 import * as WaveSignal from "./shared/signals";
 import { mathActions, showWaveMath } from "./wave-math-editor";
+import { measureWave, measurements } from "./wave-measurements";
 
 interface EditorActions {
   trackTask<T>(
@@ -998,6 +999,34 @@ export function createWaveEditor(
                 ),
               (uri) => openWaveform(uri),
             );
+          } else if (
+            msg.type === "measureWave" &&
+            measurements.includes(msg.operation)
+          ) {
+            try {
+              const rows = await measureWave(
+                backend,
+                viewer.meta,
+                msg.operation,
+                msg.signals,
+                msg.start,
+                msg.end,
+                msg.reverse === true,
+              );
+              if (viewer.backend === backend)
+                await panel.webview.postMessage({
+                  type: "waveMeasurement",
+                  request: msg.request,
+                  rows,
+                });
+            } catch (error) {
+              if (viewer.backend === backend)
+                await panel.webview.postMessage({
+                  type: "waveMeasurement",
+                  request: msg.request,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+            }
           } else if (msg.type === "analogOperation") {
             const id = msg.id;
             if (typeof id !== "string") return;
@@ -1021,43 +1050,6 @@ export function createWaveEditor(
                   signal,
                   unit: unit.trim(),
                 });
-            } else if (msg.operation === "measure") {
-              if (
-                typeof msg.start !== "string" ||
-                typeof msg.end !== "string" ||
-                !/^\d+$/.test(msg.start) ||
-                !/^\d+$/.test(msg.end)
-              )
-                return;
-              const { start, end } = msg;
-              const block = (
-                await backend.request("query", {
-                  signals: [id],
-                  start,
-                  end,
-                  limit: 100000,
-                })
-              )[id];
-              if (block.truncated)
-                throw Error("测量区间采样过多，请缩小 A/B 范围。");
-              const result = measureAnalog(
-                block.events,
-                BigInt(start),
-                BigInt(end),
-              );
-              const unit =
-                typeof msg.unit === "string" && msg.unit.length <= 24
-                  ? msg.unit
-                  : "";
-              const text = (value: number | null) =>
-                value === null
-                  ? "—"
-                  : [Number(value.toPrecision(7)), unit]
-                      .filter((item) => item !== "")
-                      .join(" ");
-              vscode.window.showInformationMessage(
-                `${signal.name}  Min ${text(result.min)}  Max ${text(result.max)}  Vpp ${text(result.peakToPeak)}  Mean ${text(result.mean)}  RMS ${text(result.rms)}  覆盖 ${result.coveredTicks}/${result.durationTicks} tick`,
-              );
             } else if (msg.operation === "threshold") {
               const value = await vscode.window.showInputBox({
                 title: "生成带滞回的数字波形",

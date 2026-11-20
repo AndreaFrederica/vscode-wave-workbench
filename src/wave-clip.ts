@@ -117,7 +117,11 @@ export async function readClip(
       const tick = String(Math.max(start, Number(time)));
       const value = WaveSignal.project(raw, signal);
       if (events.at(-1)?.[0] === tick) events[events.length - 1][1] = value;
-      else if (events.at(-1)?.[1] !== value) events.push([tick, value]);
+      else if (
+        (signal.definition?.op === "samples" && signal.definition.linear) ||
+        events.at(-1)?.[1] !== value
+      )
+        events.push([tick, value]);
     }
     if (events[0]?.[0] !== String(start))
       events.unshift([
@@ -134,7 +138,15 @@ export async function readClip(
       label: WaveSignal.label(signal),
       group: signal.group,
       width: signal.width,
-      ...(signal.real ? { real: true, unit: signal.unit } : {}),
+      ...(signal.real
+        ? {
+            real: true,
+            unit: signal.unit,
+            ...(signal.definition?.op === "samples" && signal.definition.linear
+              ? { linear: true }
+              : {}),
+          }
+        : {}),
       decoder: signal.decoder,
       annotation: signal.annotation,
       events,

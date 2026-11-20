@@ -26,6 +26,8 @@ pub struct Definition {
     pub samples: Option<Vec<(String, String)>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub real: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear: Option<bool>,
 }
 
 pub const MAX_REAL_SAMPLES: usize = 16_384;
@@ -47,6 +49,7 @@ impl Definition {
                 || samples.is_empty()
                 || samples.len() > if real { MAX_REAL_SAMPLES } else { 4097 }
                 || (real && width != 64)
+                || (self.linear == Some(true) && !real)
                 || samples.iter().any(|(tick, value)| {
                     tick.parse::<u64>().is_err()
                         || if real {
@@ -70,6 +73,7 @@ impl Definition {
             || self.samples.is_some()
             || self.source.is_some()
             || self.real.is_some()
+            || self.linear.is_some()
         {
             return Err("Virtual expression cannot have recorded samples".into());
         }
@@ -170,6 +174,44 @@ fn evaluate(op: &str, values: &[String], width: u32) -> String {
         })
         .collect()
 }
+fn interpolated(events: &[(u64, String)], tick: u64) -> Option<String> {
+    let index = events.partition_point(|event| event.0 <= tick);
+    let (left_tick, left_value) = index.checked_sub(1).and_then(|i| events.get(i))?;
+    let (right_tick, right_value) = events.get(index)?;
+    if *left_tick == tick {
+        return None;
+    }
+    let left = left_value.parse::<f64>().ok()?;
+    let right = right_value.parse::<f64>().ok()?;
+    if !left.is_finite() || !right.is_finite() {
+        return None;
+    }
+    let fraction = (tick - *left_tick) as f64 / (*right_tick - *left_tick) as f64;
+    Some(((1.0 - fraction) * left + fraction * right).to_string())
+}
+
+pub fn linear_window(
+    events: &[(u64, String)],
+    start: u64,
+    end: u64,
+    limit: usize,
+) -> (Events, bool) {
+    let (mut window, mut truncated) = wavebench_reader::vcd::window(events, start, end, limit);
+    if let (Some(seed), Some(value)) = (window.first_mut(), interpolated(events, start)) {
+        *seed = (start, value);
+    }
+    if start < end && !truncated {
+        if let Some(value) = interpolated(events, end) {
+            if window.len() == limit {
+                truncated = true;
+            } else {
+                window.push((end, value));
+            }
+        }
+    }
+    (window, truncated)
+}
+
 pub fn compute(
     def: &Definition,
     widths: &[u32],
@@ -189,7 +231,11 @@ pub fn compute(
             .iter()
             .map(|(tick, value)| (tick.parse().unwrap(), value.clone()))
             .collect();
-        let (events, truncated) = wavebench_reader::vcd::window(&events, start, end, limit);
+        let (events, truncated) = if def.linear == Some(true) {
+            linear_window(&events, start, end, limit)
+        } else {
+            wavebench_reader::vcd::window(&events, start, end, limit)
+        };
         return Ok(Block { events, truncated });
     }
     let mut safe_end = end;
@@ -260,6 +306,7 @@ mod tests {
     fn simultaneous_changes_and_truncation() {
         let d = Definition {
             real: None,
+            linear: None,
             width: None,
             source: None,
             samples: None,

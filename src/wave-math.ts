@@ -159,13 +159,26 @@ export function calculateWave(
       value = total;
     }
     const encoded = Number.isFinite(value) ? String(value) : "NaN";
-    if (result.at(-1)?.[1] !== encoded) result.push([String(tick), encoded]);
+    // Linear interpolation needs the knot where a flat interval ends.
+    if (
+      (transform === "integral" && encoded !== "NaN") ||
+      result.at(-1)?.[1] !== encoded
+    )
+      result.push([String(tick), encoded]);
+    const nextTick = next !== undefined && next < end ? next : end;
+    if (
+      transform === "integral" &&
+      encoded !== "NaN" &&
+      !Number.isFinite(current) &&
+      tick + 1n < nextTick
+    )
+      result.push([String(tick + 1n), "NaN"]);
     if (result.length > maxMathSamples)
       throw Error("计算结果超过 16384 个采样，请缩小 A/B 区间。");
     if (tick >= end) break;
     previous = Number.isFinite(current) ? current : NaN;
     previousTime = tick;
-    tick = next !== undefined && next < end ? next : end;
+    tick = nextTick;
   }
   if (!result.some(([, value]) => value !== "NaN"))
     throw Error("计算区间内没有可用结果。请检查输入值和算式。");

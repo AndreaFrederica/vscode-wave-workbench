@@ -152,7 +152,16 @@ export function paintClipImage(
       const end = trace.truncated
         ? Number(trace.events.at(-1)?.[0] ?? from)
         : to;
-      const range = drawAnalog(ctx, trace.events, from, end, xAt, high, low);
+      const range = drawAnalog(
+        ctx,
+        trace.events,
+        from,
+        end,
+        xAt,
+        high,
+        low,
+        trace.linear,
+      );
       if (range) {
         ctx.fillStyle = colors.muted;
         label(

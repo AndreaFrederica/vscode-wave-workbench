@@ -5,7 +5,7 @@
 
 import { getElement as $ } from "./dom";
 import { renderClipImage } from "./clip-image";
-import { realLabel } from "../shared/analog";
+import { interpolateReal, realLabel } from "../shared/analog";
 import { drawAnalog } from "./analog-render";
 import {
   validDecoderInstances,
@@ -39,14 +39,15 @@ import {
   type DecoderProfile,
   type Rule,
 } from "../shared/decoders";
-import type {
-  Signal,
-  Metadata,
-  WaveState,
-  Block,
-  BusLabelMode,
-  Marker,
-  QueryResult,
+import {
+  WAVE_ROW_HEIGHT,
+  type Signal,
+  type Metadata,
+  type WaveState,
+  type Block,
+  type BusLabelMode,
+  type Marker,
+  type QueryResult,
 } from "../shared/protocol";
 /* global acquireVsCodeApi */
 const vscode = acquireVsCodeApi<Partial<WaveState>>();
@@ -101,6 +102,7 @@ let decoderInstances = validDecoderInstances(saved.decoderInstances)
   ? saved.decoderInstances
   : [];
 let decoderRequest = 0;
+let measurementRequest = 0;
 interface DecoderLane {
   lane: HTMLElement;
   items: HTMLElement;
@@ -280,6 +282,9 @@ showInlineTags.onchange =
       if (meta) render();
     };
 let clearWaveHover: () => void;
+const rowHeightSlider = $("waveRowHeight") as HTMLInputElement;
+rowHeightSlider.min = String(WAVE_ROW_HEIGHT.min);
+rowHeightSlider.max = String(WAVE_ROW_HEIGHT.max);
 let rowHeight = normalizeRowHeight(saved.rowHeight);
 let namesFraction = normalizeNamesFraction(saved.namesFraction);
 let valueFraction = normalizeValueFraction(saved.valueFraction);
@@ -287,7 +292,9 @@ let timelineHeight = DEFAULT_ROW_HEIGHT;
 
 function normalizeRowHeight(value: unknown) {
   return typeof value === "number" && Number.isFinite(value)
-    ? Math.round(Math.min(80, Math.max(24, value)))
+    ? Math.round(
+        Math.min(WAVE_ROW_HEIGHT.max, Math.max(WAVE_ROW_HEIGHT.min, value)),
+      )
     : DEFAULT_ROW_HEIGHT;
 }
 function normalizeNamesFraction(value: unknown) {
@@ -307,7 +314,7 @@ function applyTrackLayout() {
     namesFraction === undefined ? "280px" : namesFraction * 100 + "%";
   tracks.style.setProperty("--wave-names-width", namesWidth);
   $("decoderTracks").style.setProperty("--wave-names-width", namesWidth);
-  ($("waveRowHeight") as HTMLInputElement).value = String(rowHeight);
+  rowHeightSlider.value = String(rowHeight);
   $("waveSplit").setAttribute(
     "aria-valuenow",
     String(Math.round(100 * (namesFraction ?? 0.3))),
@@ -827,11 +834,32 @@ function pumpCursor() {
     request: cursorFlight.request,
   });
 }
-function cursorValue(id) {
+function sampleValue(events: Block["events"], tick: number, signal: Signal) {
+  const index = valueAt(events, tick);
+  const left = events[index],
+    right = events[index + 1];
+  if (
+    left &&
+    right &&
+    signal.definition?.op === "samples" &&
+    signal.definition.linear &&
+    tick > Number(left[0])
+  ) {
+    const value = interpolateReal(
+      left[1],
+      right[1],
+      (tick - Number(left[0])) / (Number(right[0]) - Number(left[0])),
+    );
+    if (value !== undefined) return String(value);
+  }
+  return left?.[1];
+}
+function cursorValue(signal: Signal) {
+  const { id } = signal;
   const read = data[id];
   if (coversTick(read, cursorA)) {
     const events = read.block.events;
-    const value = events[valueAt(events, cursorA)]?.[1];
+    const value = sampleValue(events, cursorA, signal);
     cursorValues[id] = { time: cursorA, value };
     return value;
   }
@@ -1526,7 +1554,7 @@ function render() {
     );
     const value = document.createElement("span");
     value.className = "value";
-    const raw = cursorValue(s.id);
+    const raw = cursorValue(s);
     const rawValue = formatSignal(raw, s);
     const decoded =
       uartLabelAt(s, cursorA) ||
@@ -1704,7 +1732,16 @@ function draw() {
     const traceEnd = Math.min(end, read ? readEnd(read) : start);
     if (s.real && read) {
       ctx.strokeStyle = s.highlight || colors[i % colors.length];
-      const range = drawAnalog(ctx, events, traceStart, traceEnd, x, high, low);
+      const range = drawAnalog(
+        ctx,
+        events,
+        traceStart,
+        traceEnd,
+        x,
+        high,
+        low,
+        s.definition?.op === "samples" && s.definition.linear,
+      );
       if (range) {
         ctx.fillStyle = theme.foreground;
         ctx.fillText(Number(range.max.toPrecision(4)).toString(), 4, high);
@@ -1964,6 +2001,38 @@ function action(name) {
         signal: fullname,
         tick: String(cursorA),
       });
+  } else if (name.startsWith("measure-")) {
+    const operation = name.slice("measure-".length);
+    const signals = selectedSignals();
+    if (!signals.length) return status("请先选择要测量的信号。", "warn");
+    const hasRange = cursorB !== null && cursorA !== cursorB;
+    if (operation === "cursors" && !hasRange)
+      return status("请设置两个不同位置的 A/B 游标。", "warn");
+    const first = hasRange ? Math.min(cursorA, cursorB) : start;
+    const last = hasRange ? Math.max(cursorA, cursorB) : end;
+    const dialog = $("measurementDialog") as HTMLDialogElement;
+    const button = document.querySelector<HTMLButtonElement>(
+      '#measurementMenu [data-action="' + name + '"]',
+    );
+    $("measurementTitle").textContent = button?.textContent || "波形测量";
+    $("measurementRows").replaceChildren();
+    $("measurementStatus").textContent = "正在测量…";
+    if (!dialog.open) dialog.showModal();
+    vscode.postMessage({
+      type: "measureWave",
+      request: ++measurementRequest,
+      operation,
+      signals: signals.map(({ id, name, scope, bitOffset, unit }) => ({
+        id,
+        name,
+        scope,
+        bitOffset,
+        unit,
+      })),
+      start: String(first),
+      end: String(last),
+      reverse: hasRange && cursorA > cursorB,
+    });
   } else if (name.startsWith("math-")) {
     const selected = selectedSignals();
     if (!selected.length) return status("请先选中输入波形。", "warn");
@@ -1985,34 +2054,22 @@ function action(name) {
             ]
           : undefined,
     });
-  } else if (
-    name === "analogMeasure" ||
-    name === "analogThreshold" ||
-    name === "analogUnit"
-  ) {
+  } else if (name === "analogThreshold" || name === "analogUnit") {
     const signal = chosen[active];
     if (!signal?.real) return status("请选择一条实数波形。", "warn");
-    if (name === "analogMeasure" && (cursorB === null || cursorA === cursorB))
-      return status("请用 A/B 游标选择测量区间。", "warn");
     vscode.postMessage({
       type: "analogOperation",
       id: signal.id,
       scope: signal.scope,
       name: signal.name,
-      operation:
-        name === "analogMeasure"
-          ? "measure"
-          : name === "analogUnit"
-            ? "unit"
-            : "threshold",
+      operation: name === "analogUnit" ? "unit" : "threshold",
       unit: signal.unit,
-      start: String(Math.min(cursorA, cursorB ?? cursorA)),
-      end: String(Math.max(cursorA, cursorB ?? cursorA)),
     });
   } else if (
     name === "traceDrivers" ||
     name === "traceStaticContinuations" ||
     name === "traceLoads" ||
+    name === "traceLoadContinuations" ||
     name === "traceContext" ||
     name === "traceContinuations" ||
     name === "traceRecordedContext" ||
@@ -2020,7 +2077,7 @@ function action(name) {
   ) {
     postRtlTrace(
       chosen[active],
-      name === "traceLoads"
+      name === "traceLoads" || name === "traceLoadContinuations"
         ? "loads"
         : name === "traceContext" || name === "traceContinuations"
           ? "context"
@@ -2029,7 +2086,9 @@ function action(name) {
             : name === "traceExecution"
               ? "execution"
               : "drivers",
-      name === "traceContinuations" || name === "traceStaticContinuations",
+      name === "traceContinuations" ||
+        name === "traceStaticContinuations" ||
+        name === "traceLoadContinuations",
     );
   } else if (name === "attachKdb") vscode.postMessage({ type: "attachKdb" });
   else if (name === "instance" || name === "definition") source(name);
@@ -2231,8 +2290,7 @@ function setRowHeight(height: number) {
   }
   persist();
 }
-$("waveRowHeight").oninput = (event) =>
-  setRowHeight(Number((event.target as HTMLInputElement).value));
+rowHeightSlider.oninput = () => setRowHeight(rowHeightSlider.valueAsNumber);
 function setBusLabelMode(value: unknown) {
   busLabelMode = value === "full" ? "full" : "auto";
   $("busLabelMode").value = busLabelMode;
@@ -2332,6 +2390,24 @@ window.addEventListener("message", async (e) => {
       $("catalogPanel").open = false;
       document.body.dataset.sidebarLayout = "1";
     }
+  } else if (
+    msg.type === "waveMeasurement" &&
+    msg.request === measurementRequest
+  ) {
+    if (!($("measurementDialog") as HTMLDialogElement).open) return;
+    $("measurementStatus").textContent = msg.error || "";
+    $("measurementRows").replaceChildren(
+      ...(msg.rows || []).map(([label, value]) => {
+        const row = document.createElement("tr");
+        const name = document.createElement("th");
+        const result = document.createElement("td");
+        name.scope = "row";
+        name.textContent = label;
+        result.textContent = value;
+        row.append(name, result);
+        return row;
+      }),
+    );
   } else if (msg.type === "analogUnit") {
     const signal = chosen.find(
       (signal) => signal.real && key(signal) === key(msg.signal),
@@ -4320,7 +4396,7 @@ vscode.postMessage({ type: "ready" });
     const read = data[hit.signal.id];
     if (coversTick(read, hit.time)) {
       const events = read.block.events;
-      return { raw: events[valueAt(events, hit.time)]?.[1] };
+      return { raw: sampleValue(events, hit.time, hit.signal) };
     }
     return hoverCache.get(hit.signal.id + ":" + hit.time);
   }

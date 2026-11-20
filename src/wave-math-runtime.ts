@@ -136,6 +136,7 @@ export async function publishMath(
   output: WaveOperatorChannel,
   name: string,
   source: string,
+  linear = false,
 ) {
   const events = output.events.slice();
   const end = BigInt(request.end);
@@ -151,6 +152,7 @@ export async function publishMath(
       inputs: [],
       width,
       real: real ? true : undefined,
+      linear: real && linear ? true : undefined,
       source:
         "math:" +
         createHash("sha256")
@@ -269,7 +271,12 @@ export async function runWaveMath(
     throw Error("Choose a real waveform.");
   if (operation === "measure")
     return {
-      measurement: measureAnalog(request.inputs[0].events, start, end),
+      measurement: measureAnalog(
+        request.inputs[0].events,
+        start,
+        end,
+        first.definition?.op === "samples" && first.definition.linear,
+      ),
       unit: first.unit,
     };
   const samples = () =>
@@ -427,5 +434,6 @@ export async function runWaveMath(
     output,
     name.trim(),
     JSON.stringify({ operation, options }),
+    operation === "integral",
   );
 }

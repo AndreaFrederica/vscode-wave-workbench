@@ -11,10 +11,19 @@ export function realLabel(value?: string) {
   return realValue(value) === undefined ? "—" : value!;
 }
 
+export function interpolateReal(left: string, right: string, fraction: number) {
+  const a = realValue(left),
+    b = realValue(right);
+  return a === undefined || b === undefined
+    ? undefined
+    : (1 - fraction) * a + fraction * b;
+}
+
 export function measureAnalog(
   events: readonly [string, string][],
   start: bigint,
   end: bigint,
+  linear = false,
 ) {
   if (end <= start) throw Error("Choose a non-empty measurement interval.");
   let min = Infinity,
@@ -39,11 +48,29 @@ export function measureAnalog(
     const value = samples[index];
     if (value === undefined || last <= first) continue;
     const weight = Number(last - first) / duration;
-    const scaled = value / amplitude;
-    min = Math.min(min, value);
-    max = Math.max(max, value);
-    sum += scaled * weight;
-    squares += scaled * scaled * weight;
+    const a = value / amplitude;
+    const nextValue = linear ? samples[index + 1] : undefined;
+    const b = nextValue === undefined ? a : nextValue / amplitude;
+    const at = (time: bigint) => {
+      const fraction = Number(time - tick) / Number(next - tick);
+      return (1 - fraction) * a + fraction * b;
+    };
+    const left = a === b ? a : at(first);
+    const right = a === b ? a : at(last);
+    min = Math.min(
+      min,
+      a === b ? value : left * amplitude,
+      a === b ? value : right * amplitude,
+    );
+    max = Math.max(
+      max,
+      a === b ? value : left * amplitude,
+      a === b ? value : right * amplitude,
+    );
+    sum += (a === b ? a : (left + right) / 2) * weight;
+    squares +=
+      (a === b ? a * a : (left * left + left * right + right * right) / 3) *
+      weight;
     span += weight;
     covered += last - first;
   }

@@ -17,7 +17,7 @@ import {
 } from "./shared/decoders";
 import { scaleSeconds } from "./shared/time";
 import { decodeUart, uartBitTicks } from "./shared/uart";
-import type { Signal } from "./shared/protocol";
+import { WAVE_ROW_HEIGHT, type Signal } from "./shared/protocol";
 import type { DecoderInstance, DecodeResult } from "./decoder-runtime/types";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -475,7 +475,12 @@ class WaveCommands<V extends CommandViewer = Viewer> {
         if (block.truncated)
           throw Error("Measurement window contains too many samples.");
         return JSON.stringify(
-          measureAnalog(block.events, BigInt(start), BigInt(end)),
+          measureAnalog(
+            block.events,
+            BigInt(start),
+            BigInt(end),
+            signal.definition?.op === "samples" && signal.definition.linear,
+          ),
         );
       }
       case "waveDecodeEvents":
@@ -566,13 +571,15 @@ class WaveCommands<V extends CommandViewer = Viewer> {
         if (
           args.length &&
           (!Number.isInteger(rowHeight) ||
-            rowHeight < 24 ||
-            rowHeight > 80 ||
+            rowHeight < WAVE_ROW_HEIGHT.min ||
+            rowHeight > WAVE_ROW_HEIGHT.max ||
             !Number.isFinite(namesFraction) ||
             namesFraction < 0.1 ||
             namesFraction > 0.75)
         )
-          throw Error("Layout values must be 24–80 px and 10–75 percent");
+          throw Error(
+            `Layout values must be ${WAVE_ROW_HEIGHT.min}–${WAVE_ROW_HEIGHT.max} px and 10–75 percent`,
+          );
         return JSON.stringify(
           await ui("trackLayout", { rowHeight, namesFraction }),
         );

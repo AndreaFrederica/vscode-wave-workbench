@@ -106,6 +106,14 @@ body.sidebar-connected main>aside{display:none}
   cursor: pointer;
 }
 #toggleTooltip:focus-visible { outline-offset: 2px; }
+#measurementDialog{width:min(540px,calc(100% - 32px));max-height:calc(100% - 30px);overflow:auto;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:14px}
+#measurementDialog::backdrop{background:#0006}
+#measurementDialog header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
+#measurementDialog table{width:100%;border-collapse:collapse;table-layout:auto}
+#measurementDialog th,#measurementDialog td{padding:6px 3px;border-top:1px solid var(--grid);text-align:left;overflow-wrap:anywhere}
+#measurementDialog th{font-weight:normal;color:var(--muted);width:54%}
+#measurementDialog td{font-family:monospace;font-variant-numeric:tabular-nums}
+#measurementStatus:empty{display:none}
 .toolMenu{flex:0 0 auto}.toolMenu>summary{list-style:none;display:flex;gap:4px;align-items:center;cursor:pointer}.toolMenu>summary::after{content:'⌄';font-size:10px;color:var(--muted)}.toolMenu>summary::-webkit-details-marker{display:none}
 .menuPanel{position:fixed;z-index:101;min-width:190px;max-width:280px;max-height:70vh;overflow:auto;padding:5px;background:var(--vscode-menu-background,var(--panel));color:var(--text);border:1px solid var(--line);border-radius:5px;box-shadow:0 4px 15px #0005;display:flex;flex-direction:column;gap:2px}
 .toolMenu:not([open])>.menuPanel{display:none}.menuPanel button{display:block;text-align:left;padding:5px 9px;border:0;background:transparent;font-size:12px}.menuPanel button:hover{background:var(--selection);color:var(--selection-fg)}.menuPanel label{padding:5px 8px;font-size:12px}.menuPanel select{min-width:95px;max-width:140px}.menuPanel #file{display:block;font-size:12px;padding:5px 9px}.menuPanel #backend{display:block;margin:0;padding:0 9px 7px;font-size:10px;white-space:normal;color:var(--muted)}

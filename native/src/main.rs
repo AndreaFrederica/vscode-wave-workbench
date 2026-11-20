@@ -533,10 +533,16 @@ impl Store {
             limit,
             ordered: false,
         };
-        if let Some(block) = self.cache.get(&key) {
+        let virtual_signal = self.virtuals.get(id);
+        let cached = if virtual_signal.is_some_and(|v| v.definition.linear == Some(true)) {
+            self.cache.get_linear(&key)
+        } else {
+            self.cache.get(&key)
+        };
+        if let Some(block) = cached {
             return Ok(block);
         }
-        let block = if let Some(v) = self.virtuals.get(id) {
+        let block = if let Some(v) = virtual_signal {
             let def = v.definition.clone();
             let widths: Vec<_> = def
                 .inputs

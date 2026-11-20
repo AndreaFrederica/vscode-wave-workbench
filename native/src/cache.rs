@@ -52,6 +52,16 @@ impl Cache {
         }
     }
     pub fn get(&mut self, key: &Key) -> Option<Arc<Block>> {
+        self.get_with_window(key, window)
+    }
+    pub fn get_linear(&mut self, key: &Key) -> Option<Arc<Block>> {
+        self.get_with_window(key, crate::derived::linear_window)
+    }
+    fn get_with_window(
+        &mut self,
+        key: &Key,
+        clip: fn(&[(u64, String)], u64, u64, usize) -> (Events, bool),
+    ) -> Option<Arc<Block>> {
         self.clock += 1;
         if let Some(entry) = self.entries.get_mut(key) {
             entry.used = self.clock;
@@ -77,7 +87,7 @@ impl Cache {
             entry.used = self.clock;
             self.stats.hits += 1;
             self.stats.containing_hits += 1;
-            let (events, truncated) = window(&entry.block.events, key.start, key.end, key.limit);
+            let (events, truncated) = clip(&entry.block.events, key.start, key.end, key.limit);
             return Some(Arc::new(Block { events, truncated }));
         }
         self.stats.misses += 1;

@@ -86,6 +86,9 @@ test("known sine amplitude, phase and PSD reach the reopened frequency waveform"
   const csv = serializeClip({ timescale: meta.scale, traces: [{ path: "ac.amplitude", real: true, unit: "V", ...block }] }, "csv");
   assert(csv.includes("frequency_hz"));
   assert(Math.abs(Number(csv.trim().split(",").at(-1)) - 62_500) < 1e-8);
+  const { measureWave } = require("../dist/wave-measurements");
+  const peaks = await measureWave(backend, meta, "peaks", [meta.signals[0]], "0", meta.end);
+  assert.deepEqual(peaks[1], ["62.5 kHz", "3 V"]);
 });
 
 test("sampled real virtuals restore and support random time queries", { skip: !existsSync(binary) }, async (t) => {
@@ -124,4 +127,37 @@ test("JavaScript and native operator adapters exchange the same versioned payloa
     assert.deepEqual(validateOperatorOutput(await runWaveOperator("native", exe, request), request), expected);
   }
   assert.throws(() => validateOperatorOutput({ kind: "digital", width: 2, events: [["1", "01"], ["1", "10"]] }, request), /严格递增/);
+});
+
+test("integral retains slope changes and native reads interpolate between stored knots", { skip: !existsSync(binary) }, async (t) => {
+  const dir = await workdir(t);
+  const file = path.join(dir, "integral.vcd");
+  await writeFile(file, [
+    "$timescale 1ns $end", "$scope module tb $end", "$var real 64 ! voltage $end",
+    "$upscope $end", "$enddefinitions $end", "#0", "r0 !", "#5", "r2 !", "#20",
+  ].join("\n") + "\n");
+  const backend = new Backend(binary, { args: ["--independent"], useVerdiLibraries: false });
+  t.after(() => backend.dispose());
+  const meta = await backend.request("open", { path: file });
+  const { runWaveMath } = require("../dist/wave-math-runtime");
+  const result = await runWaveMath({ backend, meta }, "integral", ["/tb/voltage"],
+    "0", "20", { name: "area" }, dir, true, new AbortController().signal);
+  const definition = result.signal.definition;
+  assert.equal(definition.linear, true);
+  assert.deepEqual(definition.samples.map(([tick]) => tick), ["0", "5", "20"]);
+  await backend.request("open", { path: file });
+  const { signal } = await backend.request("defineVirtual", { name: "area", definition });
+  assert.equal(signal.id, result.signal.id);
+  const query = (start, end) => backend.request("query", { signals: [signal.id], start, end, limit: 20 }).then(block => block[signal.id].events);
+  const events = await query("2", "11");
+  assert.deepEqual(events.map(([tick]) => tick), ["2", "5", "11"]);
+  assert.equal(Number(events[0][1]), 0);
+  assert.ok(Math.abs(Number(events[2][1]) - 12e-9) < 1e-18);
+  assert.ok(Math.abs(Number((await query("8", "8"))[0][1]) - 6e-9) < 1e-18);
+  const { measureWave } = require("../dist/wave-measurements");
+  const edge = await measureWave(backend, meta, "edges", [meta.signals[0]], "0", "5");
+  assert.equal(edge.find(([name]) => name === "上升时间")[1], "4 ns · 1 次");
+  const measured = await measureWave(backend, meta, "analog", [signal], "5", "20");
+  assert.equal(measured.find(([name]) => name.endsWith("均值"))[1], "1.5e-8");
+  assert.equal(measured.find(([name]) => name.endsWith("RMS"))[1], "1.7320508e-8");
 });
