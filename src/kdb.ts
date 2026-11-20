@@ -3,18 +3,98 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-import type { Location } from "./shared/protocol";
+import type {
+  BackendProtocol,
+  DesignPortLink,
+  Location,
+} from "./shared/protocol";
+import { portSources } from "./shared/protocol";
 import { Backend } from "./backend";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+
+export type { DesignPortLink } from "./shared/protocol";
+
+export interface ConstantPortDriver {
+  bits: string;
+  signed: boolean;
+  file: string;
+  line: number;
+}
+
+export interface DesignGenerateLabel {
+  name: string;
+  file: string;
+  line: number;
+  column: number;
+}
+
+export interface DesignHierarchicalAccess {
+  file: string;
+  line: number;
+  column: number;
+  instance: string;
+  signal: string;
+  consumer?: { instance: string; signal: string };
+  owner: string;
+  write: boolean;
+}
+
+export interface DesignInterfaceUser {
+  instance: string;
+  interfacePath: string;
+  file: string;
+  line: number;
+  interfaceRange?: [number, number];
+}
+
+export interface VerilatorArtifacts {
+  treeSha256: string;
+  metadataSha256: string;
+}
+
 export interface DesignSession {
   readonly kind: "kdb" | "verilator";
   readonly path: string;
+  readonly verilatorArtifacts?: VerilatorArtifacts;
   resolve(fullname: string): Promise<Location | undefined>;
   children(fullname?: string, all?: boolean): Promise<Location[]>;
   instances(module: string): Promise<Location[]>;
   parent(fullname: string): Promise<string>;
+  portLinks?(instance: string, signal: string): Promise<DesignPortLink[]>;
+  interfaceMember?(
+    instance: string,
+    member: string,
+  ): Promise<Location | undefined>;
+  interfaceMembers?(instance: string, member: string): Promise<Location[]>;
+  interfaceUsers?(
+    instance: string,
+    member: string,
+  ): Promise<DesignInterfaceUser[]>;
+  genericInterfaceTypes?(
+    instance: string,
+  ): Promise<BackendProtocol["kdbGenericInterfaceTypes"]["result"]>;
+  generateLabels?(instance: string): readonly DesignGenerateLabel[];
+  hierarchicalAccesses?(instance: string): readonly DesignHierarchicalAccess[];
+  hierarchicalConsumers?(
+    instance: string,
+    signal: string,
+  ): readonly DesignHierarchicalAccess[];
+  hierarchicalWriters?(
+    instance: string,
+    signal: string,
+  ): readonly DesignHierarchicalAccess[];
+  hierarchicalAccessSites?(signal: string): readonly DesignHierarchicalAccess[];
+  constantPortDriver?(
+    instance: string,
+    signal: string,
+  ): ConstantPortDriver | undefined | Promise<ConstantPortDriver | undefined>;
+  unresolvedPortExpression?(
+    instance: string,
+    signal: string,
+    direction: "drivers" | "loads",
+  ): boolean | Promise<boolean>;
   dispose(): void;
 }
 
@@ -29,9 +109,36 @@ function mapPrefix(value: string, mappings: Record<string, string> = {}) {
 }
 class KdbSession implements DesignSession {
   readonly kind = "kdb";
+  private moduleSources?: Promise<string[]>;
   childrenCache: Map<string, Promise<Location[]>>;
   locationCache: Map<string, Promise<Location | undefined>>;
   instanceCache: Map<string, Promise<Location[]>>;
+  private portCache = new Map<
+    string,
+    Promise<BackendProtocol["kdbPortLinks"]["result"]>
+  >();
+  portLinks?: (instance: string, signal: string) => Promise<DesignPortLink[]>;
+  unresolvedPortExpression?: DesignSession["unresolvedPortExpression"];
+  constantPortDriver?: DesignSession["constantPortDriver"];
+  interfaceMember?: (
+    instance: string,
+    member: string,
+  ) => Promise<Location | undefined>;
+  interfaceMembers?: DesignSession["interfaceMembers"];
+  interfaceUsers?: (
+    instance: string,
+    member: string,
+  ) => Promise<DesignInterfaceUser[]>;
+  private interfaceMemberCache = new Map<string, Promise<Location[]>>();
+  private interfaceUserCache = new Map<
+    string,
+    Promise<DesignInterfaceUser[]>
+  >();
+  genericInterfaceTypes?: DesignSession["genericInterfaceTypes"];
+  private genericInterfaceTypeCache = new Map<
+    string,
+    Promise<BackendProtocol["kdbGenericInterfaceTypes"]["result"]>
+  >();
   scratch: string;
   backend: Backend;
   path: string = "";
@@ -83,7 +190,88 @@ class KdbSession implements DesignSession {
         "Choose a VCS simv.daidir directory containing simv.kdb / kdb.elab++.",
       );
     this.path = candidate;
-    return this.backend.request("kdbOpen", { path: candidate });
+    const opened = await this.backend.request("kdbOpen", { path: candidate });
+    if (opened.genericInterfaceTypes) {
+      this.genericInterfaceTypes = (instance) =>
+        this.cached(this.genericInterfaceTypeCache, instance, () =>
+          this.backend.request("kdbGenericInterfaceTypes", { query: instance }),
+        );
+    }
+    if (opened.interfaceMembers) {
+      const members = (instance: string, member: string) =>
+        this.cached(this.interfaceMemberCache, instance + "." + member, () =>
+          this.backend.request("kdbInterfaceMember", {
+            query: instance + "." + member,
+          }),
+        );
+      this.interfaceMembers = members;
+      this.interfaceMember = async (instance, member) => {
+        const result = await members(instance, member);
+        return result.length === 1 ? result[0] : undefined;
+      };
+      this.interfaceUsers = (instance, member) =>
+        this.cached(
+          this.interfaceUserCache,
+          instance + "." + member,
+          async () =>
+            (
+              await this.backend.request("kdbInterfaceUsers", {
+                query: instance + "." + member,
+              })
+            ).flatMap(({ fullname, instance, file, line, interfaceRange }) => {
+              if (
+                !instance ||
+                !fullname.startsWith(instance + ".") ||
+                !file ||
+                line < 1
+              )
+                return [];
+              const interfacePath = fullname.slice(instance.length + 1);
+              return /^[a-zA-Z_][\w$]*(?:\[-?\d+\])?\.[a-zA-Z_][\w$]*$/.test(
+                interfacePath,
+              )
+                ? [
+                    {
+                      instance,
+                      interfacePath,
+                      file,
+                      line,
+                      ...(interfaceRange && { interfaceRange }),
+                    },
+                  ]
+                : [];
+            }),
+        );
+    }
+    if (opened.portLinks) {
+      this.portLinks = async (instance, signal) => {
+        const { links, truncated } = await this.scanPorts(instance);
+        if (truncated)
+          throw Error("KDB port scan exceeded its relation budget.");
+        const matches = (endpoint: { instance: string; signal: string }) =>
+          endpoint.instance === instance && endpoint.signal === signal;
+        return links.filter(
+          (link) => matches(link.to) || portSources(link).some(matches),
+        );
+      };
+      this.unresolvedPortExpression = async (instance, signal, direction) =>
+        (await this.portCache.get(instance))?.gaps?.some(
+          (gap) =>
+            gap.instance === instance &&
+            (gap.signal === null || gap.signal === signal) &&
+            gap.direction === direction,
+        ) ?? false;
+      this.constantPortDriver = async (instance, signal) =>
+        (await this.portCache.get(instance))?.constants?.find(
+          (value) => value.instance === instance && value.signal === signal,
+        );
+    }
+    return opened;
+  }
+  scanPorts(instance: string) {
+    return this.cached(this.portCache, instance, () =>
+      this.backend.request("kdbPortLinks", { query: instance }),
+    );
   }
   cached<T>(
     cache: Map<string, Promise<T>>,
@@ -127,6 +315,14 @@ class KdbSession implements DesignSession {
       this.backend.request("kdbInstances", { query: module }),
     );
   }
+  moduleSourceFiles() {
+    return (this.moduleSources ??= this.backend
+      .request("kdbModuleSources", {})
+      .catch((error) => {
+        this.moduleSources = undefined;
+        throw error;
+      }));
+  }
   async parent(fullname: string) {
     return (
       (await this.backend.request("kdbParent", { query: fullname }))[0]
@@ -137,4 +333,11 @@ class KdbSession implements DesignSession {
     this.backend.dispose();
   }
 }
+export function isMissingKdbDeclaration(error: unknown) {
+  return (
+    error instanceof Error &&
+    /^KDB (?:object|declaration) not found:/.test(error.message)
+  );
+}
+
 export { KdbSession, mapPrefix };

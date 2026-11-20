@@ -47,6 +47,88 @@
         "title": "Wave Workbench: Show Vide Integration"
       },
       {
+        "command": "waveWorkbench.traceDrivers",
+        "title": "Wave Workbench: Trace Drivers from RTL Cursor"
+      },
+      {
+        "command": "waveWorkbench.traceLoads",
+        "title": "Wave Workbench: Trace Loads from RTL Cursor"
+      },
+      {
+        "command": "waveWorkbench.traceWaveDrivers",
+        "title": "追踪波形信号的驱动",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "waveWorkbench.traceWaveLoads",
+        "title": "追踪波形信号的负载",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "waveWorkbench.traceWaveAtCursor",
+        "title": "追踪 A 游标处的波形信号",
+        "icon": "$(target)"
+      },
+      {
+        "command": "waveWorkbench.openTraceSchematic",
+        "title": "打开本次追踪原理图",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "waveWorkbench.previewVideProject",
+        "title": "Wave Workbench: Preview VIDE Project from Simulation Filelist"
+      },
+      {
+        "command": "waveWorkbench.useVideProject",
+        "title": "Wave Workbench: Set Simulation Filelist for Active Waveform Trace"
+      },
+      {
+        "command": "waveWorkbench.startLiveTrace",
+        "title": "Wave Workbench: Start Live Trace Harness"
+      },
+      {
+        "command": "waveWorkbench.startVcsLiveTrace",
+        "title": "Wave Workbench: Start VCS Live Trace"
+      },
+      {
+        "command": "waveWorkbench.openExecutionRecording",
+        "title": "Wave Workbench: Open Execution Recording"
+      },
+      {
+        "command": "waveWorkbench.controlLiveTrace",
+        "title": "Wave Workbench: Control Live Trace"
+      },
+      {
+        "command": "waveWorkbench.traceLiveSignal",
+        "title": "Wave Workbench: Trace Live Signal"
+      },
+      {
+        "command": "waveWorkbench.traceLiveContinuations",
+        "title": "Wave Workbench: Trace Live Signal with Continuations"
+      },
+      {
+        "command": "waveWorkbench.traceAddSignal",
+        "title": "添加到波形",
+        "icon": "$(add)"
+      },
+      {
+        "command": "waveWorkbench.traceOpenNodeSource",
+        "title": "跳转到 RTL 源码",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "waveWorkbench.traceCopySignal",
+        "title": "Copy Trace Signal Path"
+      },
+      {
+        "command": "waveWorkbench.traceFromSignal",
+        "title": "Continue Trace from This Signal"
+      },
+      {
+        "command": "waveWorkbench.openModuleSchematic",
+        "title": "Wave Workbench: Open RTL Module Schematic"
+      },
+      {
         "command": "waveWorkbench.attachKdb",
         "title": "Wave Workbench: Attach Design Database (KDB / Verilator JSON)"
       },
@@ -198,7 +280,52 @@
           "group": "navigation@3"
         }
       ],
+      "view/item/context": [
+        {
+          "command": "waveWorkbench.traceOpenNodeSource",
+          "when": "view == waveWorkbench.traceExplorer && viewItem =~ /traceSource/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "waveWorkbench.traceAddSignal",
+          "when": "view == waveWorkbench.traceExplorer && viewItem =~ /traceSignal.*traceWaveform/",
+          "group": "inline"
+        },
+        {
+          "command": "waveWorkbench.traceAddSignal",
+          "when": "view == waveWorkbench.traceExplorer && viewItem =~ /traceWaveform/",
+          "group": "navigation@2"
+        },
+        {
+          "command": "waveWorkbench.traceCopySignal",
+          "when": "view == waveWorkbench.traceExplorer && viewItem =~ /traceSignal/"
+        },
+        {
+          "command": "waveWorkbench.traceFromSignal",
+          "when": "view == waveWorkbench.traceExplorer && viewItem =~ /traceSignal|traceTemporalFrontier/"
+        }
+      ],
       "view/title": [
+        {
+          "command": "waveWorkbench.traceWaveDrivers",
+          "when": "view == waveWorkbench.traceExplorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "waveWorkbench.traceWaveLoads",
+          "when": "view == waveWorkbench.traceExplorer",
+          "group": "navigation@2"
+        },
+        {
+          "command": "waveWorkbench.traceWaveAtCursor",
+          "when": "view == waveWorkbench.traceExplorer",
+          "group": "navigation@3"
+        },
+        {
+          "command": "waveWorkbench.openTraceSchematic",
+          "when": "view == waveWorkbench.traceExplorer",
+          "group": "navigation@4"
+        },
         {
           "command": "waveWorkbench.open",
           "when": "view == workbench.explorer.fileView",
@@ -358,6 +485,12 @@
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "waveWorkbench.traceExplorer",
+        "contents": "选中一条 RTL 波形信号，再开始追踪。\n[追踪驱动](command:waveWorkbench.traceWaveDrivers)\n[追踪负载](command:waveWorkbench.traceWaveLoads)\n[追踪 A 游标](command:waveWorkbench.traceWaveAtCursor)"
+      }
+    ],
     "views": {
       "waveWorkbench": [
         {
@@ -365,6 +498,10 @@
           "id": "waveWorkbench.control",
           "name": "波形与 Tcl 指令",
           "contextualTitle": "Wave Workbench"
+        },
+        {
+          "id": "waveWorkbench.traceExplorer",
+          "name": "RTL Trace"
         }
       ]
     }
@@ -389,6 +526,7 @@
     "@vscode/vsce": "^4.1.1",
     "esbuild": "^0.27.7",
     "prettier": "3.6.2",
+    "pureimage": "0.4.20",
     "typescript": "~5.9.3"
   },
   "repository": {
@@ -398,5 +536,8 @@
   "homepage": "https://github.com/AndreaFrederica/vscode-wave-workbench#readme",
   "bugs": {
     "url": "https://github.com/AndreaFrederica/vscode-wave-workbench/issues"
+  },
+  "dependencies": {
+    "elkjs": "0.12.1"
   }
 }

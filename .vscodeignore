@@ -1,6 +1,9 @@
 node_modules/**
 native/**
 !native/README.md
+!native/verilator_execution.cc
+!native/verilator_execution.h
+!native/vpi_execution.c
 test/**
 .vscode/**
 .gitignore
@@ -11,9 +14,13 @@ playwright-report/**
 *.vsix
 src/**
 scripts/**
+!scripts/verilator-execution.mjs
+!scripts/verilator-scheduler.mjs
+!scripts/record-trace-run.mjs
 tsconfig*.json
 dist/**/*.map
 type-tests/**
 .github/**
 **/__pycache__/**
 bin/.tcl-*/**
+flex*.log

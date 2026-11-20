@@ -1,0 +1,40 @@
+body{margin:0;display:flex;flex-direction:column;height:100vh;background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);font-family:var(--vscode-font-family,sans-serif)}
+header,footer{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--vscode-panel-border)}
+footer{border-bottom:0;border-top:1px solid var(--vscode-panel-border)}
+output{flex:1;overflow-wrap:anywhere}
+button{font:inherit;border:1px solid var(--vscode-panel-border);border-radius:4px;padding:4px 9px;background:var(--vscode-button-secondaryBackground,#354354);color:var(--vscode-button-secondaryForeground,#fff);cursor:pointer}
+button:disabled{opacity:.45;cursor:default}
+#scene{min-height:0;flex:1;overflow:hidden;touch-action:none;user-select:none;cursor:grab;background-image:radial-gradient(var(--vscode-panel-border,#485363) 1px,transparent 1px);background-size:16px 16px}
+.edge{fill:none;stroke:var(--vscode-charts-blue,#6ca9e9);stroke-width:1.5}
+.edge.control{stroke:var(--vscode-charts-orange,#cf9e63);stroke-dasharray:5 3}
+.node{cursor:pointer}
+.node rect{fill:var(--vscode-editor-background);stroke:var(--vscode-charts-blue,#6ca9e9);stroke-width:1.5}
+.node.logic rect,.node.mux rect{stroke:var(--vscode-charts-purple,#b99ae5)}
+.node.register rect{stroke:var(--vscode-charts-green,#79b787)}
+.node.selected rect,.node.root rect,.node:focus-visible rect{stroke:var(--vscode-focusBorder,#6cf);stroke-width:3}
+.node text{fill:currentColor;font-size:13px;pointer-events:none}
+.node .detail{fill:var(--vscode-descriptionForeground,#9eabbd);font-size:11px}
+.node.module rect{stroke:var(--vscode-charts-purple,#b99ae5)}
+.node.port rect{stroke:var(--vscode-charts-green,#79b787)}
+.node.net rect,.node.constant rect{stroke:var(--vscode-descriptionForeground,#9eabbd);stroke-dasharray:3 2}
+.node.module.selected rect,.node.module:focus-visible rect,.node.port.selected rect,.node.net.selected rect{stroke:var(--vscode-focusBorder,#6cf);stroke-width:3;stroke-dasharray:none}
+.pin circle{fill:var(--vscode-charts-blue,#6ca9e9);stroke:var(--vscode-editor-background);stroke-width:1}
+.pin.open circle{fill:var(--vscode-editor-background);stroke:var(--vscode-descriptionForeground,#9eabbd)}
+.pin.unresolved circle{fill:var(--vscode-charts-orange,#cf9e63)}
+.pin text,.wire-label{fill:var(--vscode-editor-foreground,#eee);font-size:11px}
+.edge.bidirectional{stroke-dasharray:3 2}
+.edge.active{stroke:var(--vscode-focusBorder,#6cf);stroke-width:3}
+
+.node.gap rect{stroke:var(--vscode-charts-orange);stroke-dasharray:4 3}
+
+#diagram{display:block;width:100%;height:100%}
+#scene.panning,#scene.panning .node{cursor:grabbing}
+#gestureHint{color:var(--vscode-descriptionForeground);white-space:nowrap;font-size:.85em}
+
+#title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+header button{flex-shrink:0}
+@media(max-width:680px){#gestureHint{display:none}header,footer{gap:5px;padding-inline:8px}}
+
+#scene{position:relative}
+#trace-edges{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+#diagram{position:relative}

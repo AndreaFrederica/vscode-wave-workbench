@@ -50,38 +50,41 @@ export function backendPlan(
     process.arch === "x64" &&
     existsSync(context.asAbsolutePath("bin/verdi-sdk"));
   const verdiConfigured = Boolean(binary || (home && useBundledVerdi));
-  if (
-    isFsdb(filename) &&
-    (choice === "independent" || (choice === "auto" && !verdiConfigured))
-  ) {
-    const binary =
-      independent ||
-      context.asAbsolutePath(
-        `bin/wave-backend-independent${process.platform === "win32" ? ".exe" : ""}`,
-      );
-    const args = independent ? [] : ["--independent"];
-    const env = { ...process.env };
-    const lzo = cfg.get<string>("lzoLibraryPath");
-    if (lzo) env.WAVE_WORKBENCH_LZO_LIBRARY = lzo;
-    const options = { args, env, useVerdiLibraries: false, onLog: log };
-    return {
-      kind: "independent" as const,
-      label: "独立后端",
-      createWave: () => new Backend(binary, options),
-      createKdb: () => new KdbSession(binary, undefined, log, options),
-    };
-  }
-  const env = { ...process.env };
-  if (home) env.VERDI_HOME = home;
-  const fst = /\.fst$/i.test(filename);
-  const fsdb = isFsdb(filename);
+  const preferIndependent =
+    choice === "independent" || (choice === "auto" && !verdiConfigured);
   const standalone = context.asAbsolutePath(
     `bin/wave-backend-independent${process.platform === "win32" ? ".exe" : ""}`,
   );
+  const independentBinary = independent || standalone;
+  const env = { ...process.env };
+  const independentEnv = { ...env };
+  const lzo = cfg.get<string>("lzoLibraryPath");
+  if (lzo) independentEnv.WAVE_WORKBENCH_LZO_LIBRARY = lzo;
+  const independentOptions = {
+    args: independent ? [] : ["--independent"],
+    env: independentEnv,
+    useVerdiLibraries: false,
+    onLog: log,
+  };
+  const createIndependentKdb = () =>
+    new KdbSession(independentBinary, undefined, log, independentOptions);
+  const fsdb = isFsdb(filename);
+  if (fsdb && preferIndependent) {
+    return {
+      kind: "independent" as const,
+      kdbKind: "independent" as const,
+      label: "独立后端",
+      createWave: () => new Backend(independentBinary, independentOptions),
+      createKdb: createIndependentKdb,
+    };
+  }
+  if (home) env.VERDI_HOME = home;
+  const fst = /\.fst$/i.test(filename);
   const waveBinary =
     !fsdb && existsSync(standalone) ? standalone : defaultBinary;
   return {
     kind: fsdb ? ("verdi" as const) : fst ? ("fst" as const) : ("vcd" as const),
+    kdbKind: preferIndependent ? ("independent" as const) : ("verdi" as const),
     label: fsdb ? "Verdi 后端" : fst ? "FST" : "VCD",
     createWave: () =>
       new Backend(binary || waveBinary, {
@@ -89,10 +92,14 @@ export function backendPlan(
         onLog: log,
         useVerdiLibraries: fsdb || Boolean(binary),
       }),
-    createKdb: () => {
-      if (!home && !binary)
-        throw Error("请设置 waveWorkbench.verdiHome 或 VERDI_HOME 后接入 KDB");
-      return new KdbSession(binary || defaultBinary, home, log);
-    },
+    createKdb: preferIndependent
+      ? createIndependentKdb
+      : () => {
+          if (!home && !binary)
+            throw Error(
+              "请设置 waveWorkbench.verdiHome 或 VERDI_HOME 后接入 KDB",
+            );
+          return new KdbSession(binary || defaultBinary, home, log);
+        },
   };
 }

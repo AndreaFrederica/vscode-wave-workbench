@@ -9,7 +9,7 @@ import type { FsdbBackend } from "./backend-selection";
 import type { DesignSession } from "./kdb";
 import type { TclRunner } from "./tcl";
 import type { Metadata, Location, WaveState } from "./shared/protocol";
-import type { DesignView } from "./project";
+import type { DesignView, TraceProjectSelection } from "./project";
 
 export interface WaveDocument extends vscode.CustomDocument {
   view?: WaveState;
@@ -17,6 +17,8 @@ export interface WaveDocument extends vscode.CustomDocument {
   projectPath?: string;
   savedKdb?: string;
   savedDesignView?: DesignView;
+  traceProject?: TraceProjectSelection | null;
+  savedTraceProject?: TraceProjectSelection | null;
   backup?: {
     view: WaveState;
     kdb?: string;
@@ -24,6 +26,8 @@ export interface WaveDocument extends vscode.CustomDocument {
     savedKdb?: string;
     designView?: DesignView;
     savedDesignView?: DesignView;
+    traceProject?: TraceProjectSelection | null;
+    savedTraceProject?: TraceProjectSelection | null;
     projectPath?: string;
   };
   dirty?: boolean;
@@ -59,6 +63,7 @@ export interface Viewer {
   >;
   uiSequence: number;
   ready: Promise<Viewer>;
+  openError?: string;
   resolveReady: (viewer: Viewer) => void;
   ui: (action: string, payload?: any) => Promise<any>;
   showHierarchy: (scope?: string) => Promise<void>;

@@ -26,8 +26,38 @@
     <button id="decoderWorkspace" data-action="editDecoderConfig">新建工作区规则文件…</button>
   </div>
 </details>
-<details class="toolMenu" id="signalMenu"><summary>信号</summary><div class="menuPanel" id="signalTools"><button id="renameSignal">重命名信号</button><button id="editAnnotation">标签和注释…</button><button id="moveUp">上移</button><button id="moveDown">下移</button><button id="createVirtual">拼接 / 逻辑</button><button id="expandBus">展开 Bus</button><button id="collapseBus">收回 Bus</button><button data-action="exportClip">截取 / 导出波形…</button><button id="signalReport">事件报告</button><button data-action="remove">移除信号</button></div></details>
-<details class="toolMenu" id="sourceMenu"><summary>源码</summary><div class="menuPanel"><button data-action="attachKdb">接入设计数据库</button><button data-action="source">信号声明</button><button data-action="instance">实例位置</button><button data-action="definition">模块定义</button></div></details>
+<details class="toolMenu" id="signalMenu"><summary>信号</summary><div class="menuPanel" id="signalTools"><button id="renameSignal">重命名信号</button><button id="editAnnotation">标签和注释…</button><button id="moveUp">上移</button><button id="moveDown">下移</button><button id="createVirtual">拼接 / 逻辑</button><button id="expandBus">展开 Bus</button><button id="collapseBus">收回 Bus</button><button data-action="exportClip">截取 / 导出波形…</button><button id="signalReport">事件报告</button><button data-action="analogUnit">设置实数单位…</button><button data-action="analogMeasure">实数 A/B 测量</button><button data-action="analogThreshold">生成滞回数字波形…</button><button data-action="remove">移除信号</button></div></details>
+<details class="toolMenu" id="sourceMenu">
+  <summary>源码</summary>
+  <div class="menuPanel">
+    <button data-action="attachKdb">接入设计数据库</button>
+    <button data-action="source">信号声明</button>
+    <button data-action="instance">实例位置</button>
+    <button data-action="definition">模块定义</button>
+  </div>
+</details>
+<details class="toolMenu" id="traceMenu">
+  <summary>追踪</summary>
+  <div class="menuPanel">
+    <button data-action="traceDrivers">追踪驱动</button>
+    <button data-action="traceLoads">追踪负载</button>
+    <button data-action="traceContext">查看 A 游标追踪证据</button>
+    <button data-action="traceStaticContinuations">自动续查上游驱动</button>
+    <button data-action="traceContinuations">自动续查 A 游标的上游</button>
+    <button data-action="traceRecordedContext">结合执行记录追踪 A 游标…</button>
+    <button data-action="traceExecution">回放 A 游标处的执行记录…</button>
+  </div>
+</details>
+<details class="toolMenu" id="schematicMenu">
+  <summary>原理图</summary>
+  <div class="menuPanel">
+    <button data-action="rtlTraceSchematic">打开本次追踪原理图</button>
+    <button data-action="rtlSchematic">打开驱动原理图</button>
+    <button data-action="rtlSchematicLoads">打开负载原理图</button>
+    <button data-action="rtlSchematicModule">信号所属模块</button>
+    <button data-action="rtlSchematicTop">顶层模块原理图</button>
+  </div>
+</details>
 <details class="toolMenu" id="markerMenu"><summary>标记</summary><div class="menuPanel"><button id="addMarker">在 A 处添加标记 M</button><button id="manageMarkers">管理时间标记…</button><button id="previousMarker">上一个标记</button><button id="nextMarker">下一个标记</button><button id="toggleMarkers">显示 / 隐藏标记</button></div></details>
 <select id="radix" aria-label="信号进制" title="信号进制"><option value="hex">Hex</option><option value="bin">Binary</option><option value="oct">Octal</option><option value="unsigned">Unsigned</option><option value="signed">Signed</option></select>
 <label class="tooltipToggle">

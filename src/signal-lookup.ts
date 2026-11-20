@@ -20,19 +20,44 @@ function normalName(name: string, delimiter = "/") {
     .join(".")
     .replace(/\s*\[\s*-?\d+\s*:\s*-?\d+\s*\]$/, "");
 }
-async function lookupSignal(backend: Backend, normalized: string) {
-  let result = await backend.request("search", {
-    query: normalized,
-  });
-  const exact = result.signals.find(
-    (s) => normalName(`${s.scope}.${s.name}`, ".") === normalized,
+export function kdbGenerateScope(scope: string) {
+  // VCS FSDB escapes negative generate indices that KDB spells directly.
+  return scope.replace(
+    /(^|\.)\\([a-zA-Z_][\w$]*) \[(-\d+)\](?=\.|$)/g,
+    "$1$2[$3]",
   );
+}
+
+export function fsdbGenerateScope(scope: string) {
+  return scope.replace(
+    /(^|\.)([a-zA-Z_][\w$]*)\[(-\d+)\](?=\.|$)/g,
+    "$1\\$2 [$3]",
+  );
+}
+
+async function exactSignal(backend: Backend, fullname: string) {
+  const boundary = fullname.lastIndexOf(".");
+  const alias =
+    boundary < 0
+      ? fullname
+      : fsdbGenerateScope(fullname.slice(0, boundary)) +
+        fullname.slice(boundary);
+  for (const query of new Set([fullname, alias])) {
+    const { signals } = await backend.request("search", { query });
+    const exact = signals.find(
+      (signal) => normalName(signal.scope + "." + signal.name, ".") === query,
+    );
+    if (exact) return exact;
+  }
+}
+
+async function lookupSignal(backend: Backend, normalized: string) {
+  const exact = await exactSignal(backend, normalized);
   if (exact) return exact;
   const bit = /^(.*)\[(-?\d+)\]$/.exec(normalized);
   if (bit) {
-    result = await backend.request("search", { query: bit[1] });
-    for (const s of result.signals) {
-      if (normalName(`${s.scope}.${s.name}`, ".") !== bit[1]) continue;
+    const s = await exactSignal(backend, bit[1]);
+    if (s) {
       const range = /\[\s*(-?\d+)\s*:\s*(-?\d+)\s*\]$/.exec(s.name),
         right = range ? Number(range[2]) : 0,
         direction = range && Number(range[1]) < right ? -1 : 1,

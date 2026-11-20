@@ -1,3 +1,4 @@
+import { measureAnalog, thresholdSamples } from "./shared/analog";
 // SPDX-License-Identifier: MPL-2.0
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -24,6 +25,11 @@ import { registerVirtuals, restoreView } from "./view-state";
 import * as WaveSignal from "./shared/signals";
 
 interface EditorActions {
+  trackTask<T>(
+    label: string,
+    filename: string | undefined,
+    work: () => Promise<T>,
+  ): Promise<T>;
   viewers: Set<Viewer>;
   projectChanges: vscode.EventEmitter<
     vscode.CustomDocumentContentChangeEvent<WaveDocument>
@@ -33,6 +39,7 @@ interface EditorActions {
   setCurrent(viewer: Viewer): void;
   removeCurrent(viewer: Viewer): void;
   scheduleEditorSync(editor?: vscode.TextEditor): void;
+  refreshTraceCursor(viewer: Viewer, tick: number): void;
   rememberFile(filename: string): Thenable<void>;
   applyDebugLayout(viewer: Viewer): Promise<void>;
   executeTcl(viewer: Viewer, script: string): Promise<unknown>;
@@ -67,6 +74,23 @@ interface EditorActions {
     fullname: string,
     target: string,
   ): Promise<void>;
+  showSignalTrace(
+    viewer: Viewer,
+    signal: string,
+    mode: "drivers" | "loads" | "context" | "recordedContext" | "execution",
+    tick?: string,
+    executionFile?: string,
+    changeOrder?: number,
+    followContinuations?: boolean,
+  ): Promise<void>;
+  showWaveSchematic(
+    viewer: Viewer,
+    signal: string,
+    tick?: string,
+    direction?: "drivers" | "loads",
+  ): Promise<void>;
+  showWaveModuleSchematic(viewer: Viewer, signal?: string): Promise<void>;
+  showCurrentTraceSchematic(viewer: Viewer): Promise<void>;
   sidebarTree(scope: string, action: string): Promise<unknown>;
 }
 
@@ -76,6 +100,7 @@ export function createWaveEditor(
   actions: EditorActions,
 ) {
   const {
+    trackTask,
     viewers,
     projectChanges,
     output,
@@ -83,6 +108,7 @@ export function createWaveEditor(
     setCurrent,
     removeCurrent,
     scheduleEditorSync,
+    refreshTraceCursor,
     rememberFile,
     applyDebugLayout,
     executeTcl,
@@ -101,6 +127,10 @@ export function createWaveEditor(
     chooseClipExport,
     runScript,
     openKdbSource,
+    showSignalTrace,
+    showWaveSchematic,
+    showWaveModuleSchematic,
+    showCurrentTraceSchematic,
     sidebarTree,
   } = actions;
   return async function resolveCustomEditor(
@@ -271,7 +301,11 @@ export function createWaveEditor(
         return session;
       } catch (error) {
         session.dispose();
-        if (choice !== "auto" || selected.kind !== "verdi" || viewer.disposed)
+        if (
+          choice !== "auto" ||
+          selected.kdbKind !== "verdi" ||
+          viewer.disposed
+        )
           throw error;
         log(`Verdi KDB open failed; trying WaveBench Reader: ${error}\n`);
         const fallback = choosePlan("independent").createKdb();
@@ -552,20 +586,22 @@ export function createWaveEditor(
               await initialize(backend, viewer.meta);
               return;
             }
-            const opened = await (initialOpen ??= readWithFallback(
-              plan,
-              backend,
-              preference,
-            ));
-            if (viewer.disposed) {
-              opened.backend.dispose();
-              return;
-            }
-            plan = opened.plan;
-            backend = opened.backend;
-            viewer.backend = backend;
-            viewer.backendKind = plan.kind;
-            await initialize(backend, opened.meta);
+            await trackTask("打开波形", viewer.uri.fsPath, async () => {
+              const opened = await (initialOpen ??= readWithFallback(
+                plan,
+                backend,
+                preference,
+              ));
+              if (viewer.disposed) {
+                opened.backend.dispose();
+                return;
+              }
+              plan = opened.plan;
+              backend = opened.backend;
+              viewer.backend = backend;
+              viewer.backendKind = plan.kind;
+              await initialize(backend, opened.meta);
+            });
           } else if (msg.type === "rtlCursor") {
             if (
               viewer.meta &&
@@ -583,6 +619,7 @@ export function createWaveEditor(
                     ? msg.displayScale
                     : null,
               };
+              refreshTraceCursor(viewer, msg.tick);
             }
           } else if (msg.type === "projectState" && msg.view) {
             document.view = msg.view;
@@ -848,6 +885,143 @@ export function createWaveEditor(
             msg.text.length < 16000000
           ) {
             await vscode.env.clipboard.writeText(msg.text);
+          } else if (
+            msg.type === "rtlSchematic" &&
+            typeof msg.signal === "string"
+          ) {
+            await showWaveSchematic(
+              viewer,
+              msg.signal,
+              typeof msg.tick === "string" ? msg.tick : undefined,
+              msg.direction === "loads" ? "loads" : "drivers",
+            );
+          } else if (msg.type === "rtlTraceSchematic") {
+            await showCurrentTraceSchematic(viewer);
+          } else if (msg.type === "rtlModuleSchematic") {
+            if (msg.signal === undefined || typeof msg.signal === "string")
+              await showWaveModuleSchematic(viewer, msg.signal);
+          } else if (msg.type === "analogOperation") {
+            const id = msg.id;
+            if (typeof id !== "string") return;
+            const [signal] = await backend.request("describe", {
+              descriptors: [{ id, scope: msg.scope, name: msg.name }],
+            });
+            if (!signal?.real || !signal.supported)
+              throw Error("请选择一条实数信号。");
+            if (msg.operation === "unit") {
+              const unit = await vscode.window.showInputBox({
+                title: "设置实数单位",
+                prompt: "输入显示单位，留空可清除",
+                value:
+                  typeof msg.unit === "string" ? msg.unit.slice(0, 24) : "",
+                validateInput: (unit) =>
+                  unit.trim().length > 24 ? "单位最多 24 字符。" : undefined,
+              });
+              if (unit !== undefined && viewer.backend === backend)
+                await panel.webview.postMessage({
+                  type: "analogUnit",
+                  signal,
+                  unit: unit.trim(),
+                });
+            } else if (msg.operation === "measure") {
+              if (
+                typeof msg.start !== "string" ||
+                typeof msg.end !== "string" ||
+                !/^\d+$/.test(msg.start) ||
+                !/^\d+$/.test(msg.end)
+              )
+                return;
+              const { start, end } = msg;
+              const block = (
+                await backend.request("query", {
+                  signals: [id],
+                  start,
+                  end,
+                  limit: 100000,
+                })
+              )[id];
+              if (block.truncated)
+                throw Error("测量区间采样过多，请缩小 A/B 范围。");
+              const result = measureAnalog(
+                block.events,
+                BigInt(start),
+                BigInt(end),
+              );
+              const unit =
+                typeof msg.unit === "string" && msg.unit.length <= 24
+                  ? msg.unit
+                  : "";
+              const text = (value: number | null) =>
+                value === null
+                  ? "—"
+                  : [Number(value.toPrecision(7)), unit]
+                      .filter((item) => item !== "")
+                      .join(" ");
+              vscode.window.showInformationMessage(
+                `${signal.name}  Min ${text(result.min)}  Max ${text(result.max)}  Vpp ${text(result.peakToPeak)}  Mean ${text(result.mean)}  RMS ${text(result.rms)}  覆盖 ${result.coveredTicks}/${result.durationTicks} tick`,
+              );
+            } else if (msg.operation === "threshold") {
+              const value = await vscode.window.showInputBox({
+                title: "生成带滞回的数字波形",
+                prompt: "输入低阈值和高阈值，用逗号分隔",
+                value: "0.3, 0.7",
+              });
+              if (value === undefined || viewer.backend !== backend) return;
+              const thresholds = value.split(",").map((s) => s.trim());
+              if (thresholds.length !== 2 || thresholds.some((s) => !s))
+                throw Error("请输入两个阈值。");
+              const [low, high] = thresholds.map(Number);
+              const { start, end } = viewer.meta;
+              const block = (
+                await backend.request("query", {
+                  signals: [id],
+                  start,
+                  end,
+                  limit: 100000,
+                })
+              )[id];
+              if (block.truncated) throw Error("实数波形超过全波形处理上限。");
+              const samples = thresholdSamples(block.events, low, high);
+              if (!samples.length || samples.length > 4096)
+                throw Error("派生信号的采样数超出范围。");
+              if (BigInt(samples[0][0]) > BigInt(start))
+                samples.unshift([start, "x"]);
+              const result = await backend.request("defineVirtual", {
+                name: signal.name + " 滞回",
+                definition: {
+                  op: "samples",
+                  inputs: [],
+                  width: 1,
+                  source: ("threshold:" + id + ":" + signal.name).slice(0, 120),
+                  samples,
+                },
+              });
+              await panel.webview.postMessage({
+                type: "virtualCreated",
+                ...result,
+              });
+            }
+          } else if (
+            msg.type === "rtlTrace" &&
+            typeof msg.signal === "string" &&
+            (msg.mode === "drivers" ||
+              msg.mode === "loads" ||
+              msg.mode === "context" ||
+              msg.mode === "recordedContext" ||
+              msg.mode === "execution")
+          ) {
+            await showSignalTrace(
+              viewer,
+              msg.signal,
+              msg.mode,
+              typeof msg.tick === "string" ? msg.tick : undefined,
+              undefined,
+              undefined,
+              (msg.mode === "context" ||
+                msg.mode === "drivers" ||
+                msg.mode === "loads") &&
+                msg.followContinuations === true,
+            );
           } else if (msg.type === "source") {
             if (String(msg.id).startsWith("@virtual:")) {
               vscode.window.showInformationMessage(
@@ -872,7 +1046,11 @@ export function createWaveEditor(
           }
         } catch (e) {
           if (backend !== viewer.backend) return;
-          if (msg.type === "ready") viewer.resolveReady(null);
+          if (msg.type === "ready") {
+            if (!viewer.meta)
+              viewer.openError = e instanceof Error ? e.message : String(e);
+            viewer.resolveReady(null);
+          }
           output.appendLine(String(e));
           await sendError(e, msg.type, msg.request);
         }

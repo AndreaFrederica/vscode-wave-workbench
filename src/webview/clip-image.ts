@@ -1,8 +1,27 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import type { BusLabelMode, WaveClip } from "../shared/protocol";
+import { drawAnalog } from "./analog-render";
 import { drawBusLabel } from "./bus-label";
 import { decodeWord } from "../shared/decoders";
+
+export type ClipDrawingContext = Pick<
+  CanvasRenderingContext2D,
+  | "fillStyle"
+  | "strokeStyle"
+  | "font"
+  | "textAlign"
+  | "fillRect"
+  | "strokeRect"
+  | "fillText"
+  | "beginPath"
+  | "moveTo"
+  | "lineTo"
+  | "stroke"
+> & {
+  measureText(text: string): { width: number };
+  setLineDash?(segments: number[]): void;
+};
 
 const colors = {
   background: "#101722",
@@ -26,19 +45,38 @@ export function renderClipImage(
   showDecodedValues: boolean,
 ): string {
   const canvas = document.createElement("canvas");
-  const width = 1440,
-    header = 94,
-    rowHeight = 42,
-    left = 360,
-    right = width - 28;
-  const height =
-    header +
-    rowHeight * (clip.traces.length + (clip.decoders?.length ?? 0)) +
-    34;
+  const { width, height } = clipImageSize(clip);
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw Error("Unable to render waveform PNG");
+  paintClipImage(ctx, clip, busLabelMode, showDecodedValues);
+  return canvas.toDataURL("image/png").slice("data:image/png;base64,".length);
+}
+
+const header = 94;
+const rowHeight = 42;
+
+export function clipImageSize(clip: WaveClip) {
+  return {
+    width: 1440,
+    height:
+      header +
+      rowHeight * (clip.traces.length + (clip.decoders?.length ?? 0)) +
+      34,
+  };
+}
+
+export function paintClipImage(
+  ctx: ClipDrawingContext,
+  clip: WaveClip,
+  busLabelMode: BusLabelMode,
+  showDecodedValues: boolean,
+  titleFont = "bold 21px sans-serif",
+) {
+  const { width, height } = clipImageSize(clip);
+  const left = 360;
+  const right = width - 28;
   const from = Number(clip.start),
     to = Number(clip.end);
   const xAt = (tick: number) =>
@@ -54,7 +92,7 @@ export function renderClipImage(
   };
   ctx.fillStyle = colors.background;
   ctx.fillRect(0, 0, width, height);
-  ctx.font = "bold 21px sans-serif";
+  ctx.font = titleFont;
   ctx.fillStyle = colors.foreground;
   ctx.fillText(
     clip.waveform.split(/[\\/]/).at(-1) || "Waveform",
@@ -108,6 +146,26 @@ export function renderClipImage(
     if (trace.group) {
       ctx.fillStyle = colors.muted;
       label(trace.group, 18, mid + 15, left - 36);
+    }
+    if (trace.real) {
+      ctx.strokeStyle = colors.bus;
+      const end = trace.truncated
+        ? Number(trace.events.at(-1)?.[0] ?? from)
+        : to;
+      const range = drawAnalog(ctx, trace.events, from, end, xAt, high, low);
+      if (range) {
+        ctx.fillStyle = colors.muted;
+        label(
+          range.min.toPrecision(4) +
+            " – " +
+            range.max.toPrecision(4) +
+            (trace.unit ? " " + trace.unit : ""),
+          18,
+          mid + 15,
+          left - 36,
+        );
+      }
+      continue;
     }
     const scalarY = (value: string) =>
       value === "1" ? high : value === "0" ? low : mid;
@@ -177,12 +235,12 @@ export function renderClipImage(
     const color = /^#[0-9a-f]{6}$/i.test(marker.color || "")
       ? marker.color
       : "#e8b86d";
-    ctx.setLineDash([4, 4]);
+    ctx.setLineDash?.([4, 4]);
     stroke(color, [
       [x, header],
       [x, height - 31],
     ]);
-    ctx.setLineDash([]);
+    ctx.setLineDash?.([]);
   }
   for (const [index, decoder] of (clip.decoders ?? []).entries()) {
     const middle = header + rowHeight * (clip.traces.length + index + 0.5);
@@ -210,5 +268,4 @@ export function renderClipImage(
     height - 10,
     width - 36,
   );
-  return canvas.toDataURL("image/png").slice("data:image/png;base64,".length);
 }

@@ -1,3 +1,4 @@
+import { realValue } from "./shared/analog";
 // SPDX-License-Identifier: MPL-2.0
 
 import type { Viewer } from "./viewer";
@@ -17,13 +18,32 @@ export interface ClipOptions {
   limit?: number;
 }
 
-export async function collectClip(
+export function collectClip(
   viewer: Viewer,
   options: ClipOptions,
   inline: boolean,
   context?: ClipContext,
+) {
+  const source = {
+    backend: viewer.backend,
+    meta: viewer.meta,
+    filename: viewer.uri.fsPath,
+  };
+  return (context ? Promise.resolve(context) : viewer.ui("clipContext")).then(
+    (view: ClipContext) => readClip(source, view, options, inline),
+  );
+}
+
+export async function readClip(
+  source: {
+    backend: Viewer["backend"];
+    meta: Viewer["meta"];
+    filename: string;
+  },
+  view: ClipContext,
+  options: ClipOptions,
+  inline: boolean,
 ): Promise<WaveClip> {
-  const view: ClipContext = context ?? (await viewer.ui("clipContext"));
   const range =
     options.range ??
     (options.start !== undefined || options.end !== undefined
@@ -52,8 +72,8 @@ export async function collectClip(
     !Number.isSafeInteger(start) ||
     !Number.isSafeInteger(end) ||
     start >= end ||
-    start < Number(viewer.meta.start) ||
-    end > Number(viewer.meta.end)
+    start < Number(source.meta.start) ||
+    end > Number(source.meta.end)
   )
     throw Error("Choose a non-empty range within the waveform time bounds");
 
@@ -61,7 +81,7 @@ export async function collectClip(
   if (count < 1 || count > 64) throw Error("Choose 1–64 signals to clip");
   const signals = options.signals
     ? await Promise.all(
-        options.signals.map((name) => findSignal(viewer.backend, name)),
+        options.signals.map((name) => findSignal(source.backend, name)),
       )
     : view.selected;
   const styled = new Map(
@@ -83,7 +103,7 @@ export async function collectClip(
   const limit = Math.min(options.limit ?? (inline ? 256 : 5000), countLimit);
   if (!Number.isSafeInteger(limit) || limit < 1)
     throw Error("Invalid event limit");
-  const blocks = await viewer.backend.request("query", {
+  const blocks = await source.backend.request("query", {
     signals: [...new Set(distinct.map((signal) => signal.id))],
     start: String(start),
     end: String(end),
@@ -99,7 +119,10 @@ export async function collectClip(
       else if (events.at(-1)?.[1] !== value) events.push([tick, value]);
     }
     if (events[0]?.[0] !== String(start))
-      events.unshift([String(start), "x".repeat(signal.width)]);
+      events.unshift([
+        String(start),
+        signal.real ? "NaN" : "x".repeat(signal.width),
+      ]);
     return {
       path: [
         signal.scope,
@@ -110,6 +133,7 @@ export async function collectClip(
       label: WaveSignal.label(signal),
       group: signal.group,
       width: signal.width,
+      ...(signal.real ? { real: true, unit: signal.unit } : {}),
       decoder: signal.decoder,
       annotation: signal.annotation,
       events,
@@ -117,8 +141,8 @@ export async function collectClip(
     };
   });
   return {
-    waveform: viewer.uri.fsPath,
-    timescale: viewer.meta.scale,
+    waveform: source.filename,
+    timescale: source.meta.scale,
     start: String(start),
     end: String(end),
     traces,
@@ -136,7 +160,12 @@ export function serializeClip(
 ) {
   if (format === "json") return JSON.stringify(clip, null, 2) + "\n";
   if (format === "csv") {
-    const rows = ["signal,tick,timescale,value_binary,truncated"];
+    const mixed = clip.traces.some((trace) => trace.real);
+    const rows = [
+      mixed
+        ? "signal,tick,timescale,value,truncated,value_type,unit"
+        : "signal,tick,timescale,value_binary,truncated",
+    ];
     const csvField = (value: string) => '"' + value.replaceAll('"', '""') + '"';
     for (const trace of clip.traces) {
       for (const [time, value] of trace.events)
@@ -147,6 +176,9 @@ export function serializeClip(
             csvField(clip.timescale),
             csvField(value),
             String(trace.truncated),
+            ...(mixed
+              ? [trace.real ? "real" : "digital", csvField(trace.unit ?? "")]
+              : []),
           ].join(","),
         );
     }
@@ -170,16 +202,22 @@ export function serializeClip(
     const original = trace.path.replace(/[\r\n$]/g, "_");
     rows.push(
       `$comment ${ref} = ${original} $end`,
-      `$var wire ${trace.width} ${ref} ${ref}_${leaf} $end`,
+      `$var ${trace.real ? "real 64" : "wire " + trace.width} ${ref} ${ref}_${leaf} $end`,
     );
     for (const [time, value] of trace.events) {
       const offset = Number(time) - Number(clip.start);
-      if (!/^[01xz]+$/i.test(value))
-        throw Error("VCD export requires digital signal values");
+      if (!trace.real && !/^[01xz]+$/i.test(value))
+        throw Error("Invalid digital signal value in VCD export");
       if (!transitions.has(offset)) transitions.set(offset, []);
       transitions
         .get(offset)
-        .push(trace.width === 1 ? value + ref : `b${value} ${ref}`);
+        .push(
+          trace.real
+            ? `r${realValue(value) ?? "NaN"} ${ref}`
+            : trace.width === 1
+              ? value + ref
+              : `b${value} ${ref}`,
+        );
     }
   }
   rows.push("$upscope $end", "$enddefinitions $end");

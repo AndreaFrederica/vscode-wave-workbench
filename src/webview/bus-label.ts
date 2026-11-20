@@ -3,7 +3,9 @@
 import type { BusLabelMode } from "../shared/protocol";
 
 export function drawBusLabel(
-  ctx: CanvasRenderingContext2D,
+  ctx: Pick<CanvasRenderingContext2D, "fillText"> & {
+    measureText(text: string): { width: number };
+  },
   value: string,
   left: number,
   right: number,

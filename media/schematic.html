@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-{{nonce}}'; style-src {{csp}};">
+<link rel="stylesheet" href="{{css}}">
+<title>RTL 原理图</title>
+</head>
+<body>
+<header><button id="back" disabled>返回</button><button id="parent" hidden disabled>上一级</button><strong id="title">RTL 原理图</strong><button id="out" aria-label="缩小">−</button><button id="in" aria-label="放大">+</button><button id="fit">适应视图</button><button id="refresh" disabled>刷新 A 游标</button><span id="status" role="status"></span><span id="gestureHint">滚轮缩放 · 拖动平移</span></header>
+<div id="scene"><canvas id="trace-edges" hidden aria-hidden="true"></canvas><svg id="diagram" xmlns="http://www.w3.org/2000/svg" aria-label="RTL 原理图"></svg></div>
+<footer><output id="selected"></output><button id="drivers" disabled>展开上游</button><button id="loads" disabled>展开下游</button><button id="enter" hidden disabled>打开实例</button><button id="module-view" hidden disabled>所属模块</button><button id="source" disabled>查看源码</button><button id="wave" disabled>加入波形</button></footer>
+<script nonce="{{nonce}}" src="{{script}}"></script>
+</body>
+</html>

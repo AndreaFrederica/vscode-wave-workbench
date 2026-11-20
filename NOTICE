@@ -15,3 +15,7 @@ Tcl source: https://github.com/tcltk/tcl/tree/core-8-6-18
 
 Platform packages include LuaJIT through the mlua Rust binding.
 The LuaJIT license and bundled Lua notices are in licenses/LuaJIT.txt.
+
+The RTL schematic webview includes elkjs 0.12.1 under EPL-2.0.
+The license is in licenses/ELK.md. The corresponding source is available at
+https://github.com/kieler/elkjs/tree/v0.12.1.

@@ -5,6 +5,8 @@
 
 import { getElement as $ } from "./dom";
 import { renderClipImage } from "./clip-image";
+import { realLabel } from "../shared/analog";
+import { drawAnalog } from "./analog-render";
 import {
   validDecoderInstances,
   type DecoderInstance,
@@ -368,6 +370,7 @@ function persist() {
           parentBus: s.parentBus,
           decoder: s.decoder,
           annotation: s.annotation,
+          unit: s.unit,
         })),
         start,
         end,
@@ -437,6 +440,10 @@ function format(raw, width, mode = radix) {
   }
 }
 function formatSignal(raw, s) {
+  if (s.real) {
+    const value = realLabel(raw);
+    return s.unit && value !== "—" ? value + " " + s.unit : value;
+  }
   const value = format(
     WaveSignal.project(raw, s),
     s.width,
@@ -1534,8 +1541,8 @@ function render() {
     const toggle = document.createElement("button");
     toggle.className = "busToggle";
     toggle.textContent =
-      s.width > 1 ? (expandedBuses.has(key(s)) ? "▾" : "▸") : "";
-    toggle.disabled = s.width <= 1;
+      !s.real && s.width > 1 ? (expandedBuses.has(key(s)) ? "▾" : "▸") : "";
+    toggle.disabled = !!s.real || s.width <= 1;
     toggle.title = "展开/收回 Bus 位";
     toggle.onclick = (e) => {
       e.stopPropagation();
@@ -1688,96 +1695,108 @@ function draw() {
     const read = data[s.id];
     const traceStart = Math.max(start, read?.start ?? start);
     const traceEnd = Math.min(end, read ? readEnd(read) : start);
-    let index = Math.max(0, valueAt(events, traceStart)),
-      lastPixel = -2;
-    for (; index < events.length; index++) {
-      const [t, raw] = events[index];
-      const v = WaveSignal.project(raw, s);
-      if (Number(t) > traceEnd) break;
-      const left = x(Math.max(traceStart, Number(t)));
-      const right = x(
-        Math.min(traceEnd, Number(events[index + 1]?.[0] ?? traceEnd)),
-      );
-      if (right < left) continue;
-      const invalid = /[xz]/i.test(v),
-        color = /x/i.test(v)
-          ? theme.error
-          : /z/i.test(v)
-            ? theme.warning
-            : s.highlight || colors[i % colors.length];
-      ctx.strokeStyle = color;
-      ctx.fillStyle = color;
-      if (right - left < 0.8 && Math.floor(left) === lastPixel) continue;
-      lastPixel = Math.floor(left);
-      ctx.beginPath();
-      if (s.width === 1 && !invalid) {
-        const level = v === "1" ? high : low;
-        ctx.moveTo(left, high);
-        ctx.lineTo(left, low);
-        ctx.moveTo(left, level);
-        ctx.lineTo(right, level);
-      } else {
-        const bevel = Math.min(4, (right - left) / 2);
-        ctx.moveTo(left, middle);
-        ctx.lineTo(left + bevel, high);
-        ctx.lineTo(right - bevel, high);
-        ctx.lineTo(right, middle);
-        ctx.lineTo(right - bevel, low);
-        ctx.lineTo(left + bevel, low);
-        ctx.closePath();
-      }
-      ctx.stroke();
-      if (s.width > 1 && right - left >= 10) {
-        const decoded =
-          showDecodedValues.checked &&
-          s.decoder &&
-          decodeWord(s.decoder, v, s.width);
-        const value = decoded || formatSignal(raw, s),
-          mode = s.displayRadix || radix;
-        const compact = decoded
-          ? decoded.split(" ", 1)[0]
-          : (mode === "hex" || mode === "bin") &&
-              s.notation !== "verilog" &&
-              value.startsWith("0") &&
-              /^[01]+$/.test(v)
-            ? value.replace(/^0+(?=.)/, "")
-            : undefined;
-        drawBusLabel(
-          ctx,
-          value,
-          left,
-          right,
-          middle,
-          busLabelMode,
-          compact,
-          !!decoded,
-        );
+    if (s.real && read) {
+      ctx.strokeStyle = s.highlight || colors[i % colors.length];
+      const range = drawAnalog(ctx, events, traceStart, traceEnd, x, high, low);
+      if (range) {
+        ctx.fillStyle = theme.foreground;
+        ctx.fillText(Number(range.max.toPrecision(4)).toString(), 4, high);
+        if (range.min !== range.max)
+          ctx.fillText(Number(range.min.toPrecision(4)).toString(), 4, low);
       }
     }
-    if (s.decoder?.uart) {
-      const frames = uartFrames(s);
-      for (
-        let index = firstUartFrameEndingAfter(frames, start);
-        index < frames.length;
-        index++
-      ) {
-        const frame = frames[index];
-        if (frame.start >= end) break;
-        const left = Math.max(0, x(frame.start)),
-          right = Math.min(width, x(frame.end));
-        ctx.fillStyle = frame.errors.length
-          ? theme.error
-          : s.highlight || colors[i % colors.length];
-        drawBusLabel(
-          ctx,
-          uartFrameLabel(s.decoder, frame),
-          left,
-          right,
-          middle,
-          busLabelMode,
-          undefined,
-          true,
+    if (!s.real) {
+      let index = Math.max(0, valueAt(events, traceStart)),
+        lastPixel = -2;
+      for (; index < events.length; index++) {
+        const [t, raw] = events[index];
+        const v = WaveSignal.project(raw, s);
+        if (Number(t) > traceEnd) break;
+        const left = x(Math.max(traceStart, Number(t)));
+        const right = x(
+          Math.min(traceEnd, Number(events[index + 1]?.[0] ?? traceEnd)),
         );
+        if (right < left) continue;
+        const invalid = /[xz]/i.test(v),
+          color = /x/i.test(v)
+            ? theme.error
+            : /z/i.test(v)
+              ? theme.warning
+              : s.highlight || colors[i % colors.length];
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        if (right - left < 0.8 && Math.floor(left) === lastPixel) continue;
+        lastPixel = Math.floor(left);
+        ctx.beginPath();
+        if (s.width === 1 && !invalid) {
+          const level = v === "1" ? high : low;
+          ctx.moveTo(left, high);
+          ctx.lineTo(left, low);
+          ctx.moveTo(left, level);
+          ctx.lineTo(right, level);
+        } else {
+          const bevel = Math.min(4, (right - left) / 2);
+          ctx.moveTo(left, middle);
+          ctx.lineTo(left + bevel, high);
+          ctx.lineTo(right - bevel, high);
+          ctx.lineTo(right, middle);
+          ctx.lineTo(right - bevel, low);
+          ctx.lineTo(left + bevel, low);
+          ctx.closePath();
+        }
+        ctx.stroke();
+        if (s.width > 1 && right - left >= 10) {
+          const decoded =
+            showDecodedValues.checked &&
+            s.decoder &&
+            decodeWord(s.decoder, v, s.width);
+          const value = decoded || formatSignal(raw, s),
+            mode = s.displayRadix || radix;
+          const compact = decoded
+            ? decoded.split(" ", 1)[0]
+            : (mode === "hex" || mode === "bin") &&
+                s.notation !== "verilog" &&
+                value.startsWith("0") &&
+                /^[01]+$/.test(v)
+              ? value.replace(/^0+(?=.)/, "")
+              : undefined;
+          drawBusLabel(
+            ctx,
+            value,
+            left,
+            right,
+            middle,
+            busLabelMode,
+            compact,
+            !!decoded,
+          );
+        }
+      }
+      if (s.decoder?.uart) {
+        const frames = uartFrames(s);
+        for (
+          let index = firstUartFrameEndingAfter(frames, start);
+          index < frames.length;
+          index++
+        ) {
+          const frame = frames[index];
+          if (frame.start >= end) break;
+          const left = Math.max(0, x(frame.start)),
+            right = Math.min(width, x(frame.end));
+          ctx.fillStyle = frame.errors.length
+            ? theme.error
+            : s.highlight || colors[i % colors.length];
+          drawBusLabel(
+            ctx,
+            uartFrameLabel(s.decoder, frame),
+            left,
+            right,
+            middle,
+            busLabelMode,
+            undefined,
+            true,
+          );
+        }
       }
     }
     if (read?.block.truncated && read.start <= start && readEnd(read) < end) {
@@ -1847,6 +1866,25 @@ function source(target = "declaration") {
       target,
     });
 }
+function postRtlTrace(
+  signal: Signal | undefined,
+  mode: "drivers" | "loads" | "context" | "recordedContext" | "execution",
+  followContinuations = false,
+) {
+  if (!signal || signal.definition)
+    return status("请选择一条 RTL 波形信号。", "warn");
+  vscode.postMessage({
+    type: "rtlTrace",
+    signal:
+      signal.scope +
+      "." +
+      WaveSignal.label({ ...signal, displayName: undefined }),
+    mode,
+    tick: String(cursorA),
+    ...(followContinuations ? { followContinuations } : {}),
+  });
+}
+
 function action(name) {
   if (
     [
@@ -1889,7 +1927,83 @@ function action(name) {
     if (cursorB !== null && cursorA !== cursorB)
       setWindow(Math.min(cursorA, cursorB), Math.max(cursorA, cursorB));
   } else if (name === "source") source();
-  else if (name === "attachKdb") vscode.postMessage({ type: "attachKdb" });
+  else if (name === "rtlTraceSchematic")
+    vscode.postMessage({ type: "rtlTraceSchematic" });
+  else if (
+    name === "rtlSchematic" ||
+    name === "rtlSchematicLoads" ||
+    name === "rtlSchematicModule" ||
+    name === "rtlSchematicTop"
+  ) {
+    const signal = chosen[active];
+    if (name === "rtlSchematicTop") {
+      vscode.postMessage({ type: "rtlModuleSchematic" });
+      return;
+    }
+    if (!signal || signal.definition)
+      return status("请选择一条 RTL 波形信号。", "warn");
+    const fullname = [
+      signal.scope,
+      WaveSignal.label({ ...signal, displayName: undefined }),
+    ]
+      .filter(Boolean)
+      .join(".");
+    if (name === "rtlSchematicModule")
+      vscode.postMessage({ type: "rtlModuleSchematic", signal: fullname });
+    else
+      vscode.postMessage({
+        type: "rtlSchematic",
+        direction: name === "rtlSchematicLoads" ? "loads" : "drivers",
+        signal: fullname,
+        tick: String(cursorA),
+      });
+  } else if (
+    name === "analogMeasure" ||
+    name === "analogThreshold" ||
+    name === "analogUnit"
+  ) {
+    const signal = chosen[active];
+    if (!signal?.real) return status("请选择一条实数波形。", "warn");
+    if (name === "analogMeasure" && (cursorB === null || cursorA === cursorB))
+      return status("请用 A/B 游标选择测量区间。", "warn");
+    vscode.postMessage({
+      type: "analogOperation",
+      id: signal.id,
+      scope: signal.scope,
+      name: signal.name,
+      operation:
+        name === "analogMeasure"
+          ? "measure"
+          : name === "analogUnit"
+            ? "unit"
+            : "threshold",
+      unit: signal.unit,
+      start: String(Math.min(cursorA, cursorB ?? cursorA)),
+      end: String(Math.max(cursorA, cursorB ?? cursorA)),
+    });
+  } else if (
+    name === "traceDrivers" ||
+    name === "traceStaticContinuations" ||
+    name === "traceLoads" ||
+    name === "traceContext" ||
+    name === "traceContinuations" ||
+    name === "traceRecordedContext" ||
+    name === "traceExecution"
+  ) {
+    postRtlTrace(
+      chosen[active],
+      name === "traceLoads"
+        ? "loads"
+        : name === "traceContext" || name === "traceContinuations"
+          ? "context"
+          : name === "traceRecordedContext"
+            ? "recordedContext"
+            : name === "traceExecution"
+              ? "execution"
+              : "drivers",
+      name === "traceContinuations" || name === "traceStaticContinuations",
+    );
+  } else if (name === "attachKdb") vscode.postMessage({ type: "attachKdb" });
   else if (name === "instance" || name === "definition") source(name);
   else if (name === "expandBus") {
     expandBus();
@@ -2190,6 +2304,14 @@ window.addEventListener("message", async (e) => {
       $("catalogPanel").open = false;
       document.body.dataset.sidebarLayout = "1";
     }
+  } else if (msg.type === "analogUnit") {
+    const signal = chosen.find(
+      (signal) => signal.real && key(signal) === key(msg.signal),
+    );
+    if (signal) {
+      signal.unit = msg.unit || undefined;
+      request();
+    }
   } else if (msg.type === "virtualCreated") {
     virtualDefinitions = msg.definitions;
     add(msg.signal);
@@ -2404,7 +2526,7 @@ async function uiAction(name, p) {
     if (!signal) throw Error("信号还未添加到当前波形");
     if (name === "setDecoder") {
       const profile = p.profile && validateProfile(p.profile);
-      if (profile && !supportsProfile(profile, signal.width))
+      if (profile && (signal.real || !supportsProfile(profile, signal.width)))
         throw Error("解码配置与信号位宽不符");
       signal.decoder = profile;
     } else {
@@ -2607,6 +2729,10 @@ async function uiAction(name, p) {
   }
   if (name === "cursor") {
     cursorA = p.time;
+    if (p.reveal && (cursorA < start || cursorA > end)) {
+      const width = Math.max(1, end - start);
+      setWindow(cursorA - width / 2, cursorA + width / 2);
+    }
     persist();
     render();
     return 1;
@@ -2789,7 +2915,13 @@ vscode.postMessage({ type: "ready" });
   addButton.textContent = "添加选中 → 波形";
   const sourceButton = document.createElement("button");
   sourceButton.textContent = "打开声明";
-  bar.append(addButton, sourceButton);
+  const driversButton = document.createElement("button");
+  driversButton.textContent = "追踪驱动";
+  driversButton.disabled = true;
+  const loadsButton = document.createElement("button");
+  loadsButton.textContent = "追踪负载";
+  loadsButton.disabled = true;
+  bar.append(addButton, sourceButton, driversButton, loadsButton);
   pane.before(bar);
   space.className = "scopeSpace";
   viewport.className = "scopeViewport";
@@ -2812,6 +2944,7 @@ vscode.postMessage({ type: "ready" });
     });
   }
   function scopeRows() {
+    driversButton.disabled = loadsButton.disabled = selection.size !== 1;
     const height = Math.max(24, pane.clientHeight),
       top = pane.scrollTop;
     space.style.height = Math.max(24, total * 24) + "px";
@@ -2900,6 +3033,10 @@ vscode.postMessage({ type: "ready" });
         target: "declaration",
       });
   };
+  driversButton.onclick = () =>
+    postRtlTrace(selection.values().next().value, "drivers");
+  loadsButton.onclick = () =>
+    postRtlTrace(selection.values().next().value, "loads");
   pane.addEventListener("scroll", () => requestAnimationFrame(scopeRows), {
     passive: true,
   });
@@ -3507,7 +3644,8 @@ vscode.postMessage({ type: "ready" });
         const choice = document.createElement("input");
         choice.type = "radio";
         choice.name = "decoderProfile";
-        const compatible = !!signal && supportsProfile(profile, signal.width);
+        const compatible =
+          !!signal && !signal.real && supportsProfile(profile, signal.width);
         choice.checked = profile.id === activeId;
         choice.disabled = !compatible;
         choice.onchange = async () => {

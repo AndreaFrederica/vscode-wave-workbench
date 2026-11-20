@@ -7,7 +7,11 @@ import { build } from "esbuild";
 import { readdir, rm, mkdir, copyFile } from "node:fs/promises";
 await rm("dist", { recursive: true, force: true });
 const host = (await readdir("src"))
-  .filter((s) => s.endsWith(".ts"))
+  .filter(
+    (s) =>
+      s.endsWith(".ts") &&
+      !["mcp-headless.ts", "headless-clip-image.ts"].includes(s),
+  )
   .map((s) => "src/" + s);
 const shared = (await readdir("src/shared"))
   .filter((s) => s.endsWith(".ts"))
@@ -25,7 +29,11 @@ await build({
   sourcemap: true,
 });
 await build({
-  entryPoints: ["src/webview/wave.ts", "src/webview/sidebar.ts"],
+  entryPoints: [
+    "src/webview/wave.ts",
+    "src/webview/sidebar.ts",
+    "src/webview/schematic.ts",
+  ],
   outdir: "dist/webview",
   bundle: true,
   platform: "browser",
@@ -35,3 +43,13 @@ await build({
 });
 await mkdir("dist/tcl", { recursive: true });
 await copyFile("src/tcl/bridge.tcl", "dist/tcl/bridge.tcl");
+await build({
+  entryPoints: ["src/mcp-headless.ts"],
+  outfile: "dist/mcp-headless.js",
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  target: "node18",
+  legalComments: "linked",
+});
+await copyFile("node_modules/pureimage/LICENSE", "dist/pureimage-license.txt");

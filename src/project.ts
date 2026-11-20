@@ -13,8 +13,13 @@ interface WaveProject {
   kdb?: string;
   verilator?: string;
   designView?: DesignView;
+  traceProject?: TraceProjectSelection | null;
   view: WaveState;
 }
+
+export type TraceProjectSelection =
+  | { filelist: string; workingDirectory: string }
+  | { videManifest: string };
 
 export interface DesignView {
   selected: string;
@@ -38,6 +43,7 @@ export async function saveWaveProject(
   kdb?: string,
   verilator?: string,
   designView?: DesignView,
+  traceProject?: TraceProjectSelection | null,
 ) {
   const directory = path.dirname(filename);
   const document: WaveProject = {
@@ -47,6 +53,17 @@ export async function saveWaveProject(
     kdb: kdb ? path.relative(directory, kdb) : undefined,
     verilator: verilator ? path.relative(directory, verilator) : undefined,
     designView,
+    traceProject:
+      traceProject &&
+      ("videManifest" in traceProject
+        ? { videManifest: path.relative(directory, traceProject.videManifest) }
+        : {
+            filelist: path.relative(directory, traceProject.filelist),
+            workingDirectory: path.relative(
+              directory,
+              traceProject.workingDirectory,
+            ),
+          }),
     view,
   };
   const temporary = path.join(directory, ".wave-project-" + randomUUID());
@@ -78,6 +95,14 @@ export async function readWaveProject(filename: string) {
       (typeof document.verilator !== "string" ||
         !/\.tree\.json$/i.test(document.verilator))) ||
     Boolean(document.kdb && document.verilator) ||
+    (document.traceProject != null &&
+      (typeof document.traceProject !== "object" ||
+        ("videManifest" in document.traceProject
+          ? typeof document.traceProject.videManifest !== "string" ||
+            !document.traceProject.videManifest
+          : typeof document.traceProject.filelist !== "string" ||
+            !document.traceProject.filelist ||
+            typeof document.traceProject.workingDirectory !== "string"))) ||
     (document.designView !== undefined &&
       (typeof document.designView?.selected !== "string" ||
         !Array.isArray(document.designView.expanded) ||
@@ -97,5 +122,21 @@ export async function readWaveProject(filename: string) {
     verilator: document.verilator
       ? path.resolve(directory, document.verilator)
       : undefined,
+    traceProject:
+      document.traceProject &&
+      ("videManifest" in document.traceProject
+        ? {
+            videManifest: path.resolve(
+              directory,
+              document.traceProject.videManifest,
+            ),
+          }
+        : {
+            filelist: path.resolve(directory, document.traceProject.filelist),
+            workingDirectory: path.resolve(
+              directory,
+              document.traceProject.workingDirectory,
+            ),
+          }),
   };
 }

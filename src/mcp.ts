@@ -1,50 +1,130 @@
 // SPDX-License-Identifier: MPL-2.0
 
-import { createHash } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
-import * as os from "node:os";
 import * as path from "node:path";
-import * as readline from "node:readline";
-import { version as extensionVersion } from "../package.json";
+import {
+  clipProperties,
+  serveMcpStdio,
+  socketDirectory,
+  tool,
+  validateCall,
+} from "./mcp-stdio";
 
 type Arguments = Record<string, unknown>;
 const maxMessage = 2 * 1024 * 1024;
-const clipProperties = {
+const pipePrefix = "\\\\.\\pipe\\wave-workbench-";
+const traceProperties = {
   waveform: {
     type: "string",
     description:
       "Absolute path of an open waveform. Defaults to the active view.",
   },
-  signals: {
-    type: "array",
-    items: { type: "string" },
-    minItems: 1,
-    maxItems: 64,
-    description:
-      "Full signal paths. Defaults to selected signal rows, or displayed rows if none are selected.",
-  },
-  range: {
+  signal: {
     type: "string",
-    enum: ["view", "cursors", "explicit"],
-    description:
-      "Visible time window, A/B cursor interval, or explicit tick bounds.",
+    description: "Full dumped signal path with its instance.",
   },
-  start: {
+  filelist: {
     type: "string",
     description:
-      "Start tick, as an integer string. Together with end, defaults to explicit range.",
+      "Compile the trace against this simulator filelist in an isolated VIDE project.",
   },
-  end: { type: "string", description: "End tick, as an integer string." },
-  limit: {
+  videManifest: {
+    type: "string",
+    description:
+      "Analyze against an existing vide.toml and its project directory.",
+  },
+  buildManifest: {
+    type: "string",
+    description:
+      "Build manifest with waveform and source hashes. Supplies the VIDE project when no filelist or vide.toml is selected.",
+  },
+  simulationDirectory: {
+    type: "string",
+    description:
+      "Working directory for relative filelist paths. Defaults to the filelist directory.",
+  },
+  maxDepth: { type: "integer", minimum: 0, maximum: 256 },
+  maxSignals: { type: "integer", minimum: 1, maximum: 4096 },
+  maxAssignments: {
     type: "integer",
-    minimum: 1,
-    maximum: 5000,
+    minimum: 0,
+    maximum: 8192,
+    description: "Maximum static assignments in the connected trace.",
+  },
+  expandReachable: {
+    type: "boolean",
     description:
-      "Maximum events per signal before the total clip budget is applied.",
+      "Use expanded defaults for unspecified limits. The result reports any frontier that prevents complete coverage.",
+  },
+  format: {
+    type: "string",
+    enum: ["json", "mermaid"],
+    description: "Include a Mermaid graph alongside the trace data.",
+  },
+  detail: {
+    type: "string",
+    enum: ["summary", "full"],
+    description: "Include a detailed Markdown report with source locations.",
   },
 };
+const pagedTraceProperties = {
+  ...traceProperties,
+  signal: {
+    type: "string",
+    description:
+      "Full dumped signal path. May end with a packed bit [index] or a constant slice [left:right].",
+  },
+  pageSize: { type: "integer", minimum: 1, maximum: 128 },
+  output: {
+    type: "string",
+    enum: ["trace", "graph", "paged"],
+    description:
+      "Return the trace, the combined dependency graph, or a cursor for paged graph output. In graph mode, page bounds apply to the combined graph.",
+  },
+  followContinuations: {
+    type: "integer",
+    minimum: 1,
+    maximum: 8,
+    description:
+      "Automatically query up to this many distinct signals from the static frontier.",
+  },
+  pageCursor: {
+    type: "string",
+    description: "Continue a previous static trace using its next page cursor.",
+  },
+};
+const temporalLimits = {
+  maxTemporalNodes: { type: "integer", minimum: 1, maximum: 4096 },
+  maxTemporalEdges: { type: "integer", minimum: 1, maximum: 16384 },
+  followContinuations: {
+    type: "integer",
+    minimum: 1,
+    maximum: 8,
+    description:
+      "Automatically query up to this many distinct upstream transitions from the temporal frontier.",
+  },
+  output: {
+    type: "string",
+    enum: ["trace", "report", "temporal", "paged"],
+    description:
+      "Return the full trace, its report, the time graph with source references, or a cursor for paged graph output.",
+  },
+} as const;
 const toolDefinitions = [
+  tool(
+    "wave_schematic",
+    "Read a local RTL schematic with source locations and optional waveform values.",
+    {
+      waveform: { type: "string" },
+      signal: { type: "string" },
+      tick: { type: "string" },
+      direction: { type: "string", enum: ["drivers", "loads"] },
+    },
+    ["signal"],
+  ),
+
   tool(
     "wave_decoder_list",
     "List installed waveform decoders.",
@@ -108,6 +188,234 @@ const toolDefinitions = [
     [],
   ),
   tool(
+    "wave_live_status",
+    "Read the live simulation state and recent execution events.",
+    {},
+    [],
+  ),
+  tool(
+    "wave_live_control",
+    "Control the running simulation using the provider's declared capabilities.",
+    {
+      action: {
+        type: "string",
+        enum: [
+          "pause",
+          "resume",
+          "stepClock",
+          "setBreakpoint",
+          "setStatementBreakpoint",
+          "clearBreakpoint",
+        ],
+      },
+      signal: { type: "string" },
+      cycles: { type: "integer", minimum: 1, maximum: 1000 },
+      value: { type: "string" },
+      instance: { type: "string" },
+      statementId: { type: "string" },
+      eventKind: {
+        type: "string",
+        enum: [
+          "branch-taken",
+          "assignment-entered",
+          "assignment-evaluated",
+          "assignment-committed",
+          "assignment-superseded",
+        ],
+        description:
+          "Statement event to match. Defaults to assignment evaluation.",
+      },
+      timing: {
+        type: "string",
+        enum: ["simulator-commit", "end-of-slot"],
+        description:
+          "Optional timing filter for an assignment-committed breakpoint.",
+      },
+    },
+    ["action"],
+  ),
+  tool(
+    "wave_live_trace",
+    "Trace a selected RTL signal against retained live simulation samples. Attach the corresponding elaborated design to a reference waveform first.",
+    {
+      ...traceProperties,
+      ...temporalLimits,
+      tick: {
+        type: "string",
+        description:
+          "Optional retained end-of-slot snapshot tick. Defaults to the latest snapshot.",
+      },
+      liveSessionId: {
+        type: "string",
+        description: "Require the live session that supplied the continuation.",
+      },
+      historyStart: {
+        type: "string",
+        description: "Optional first tick of retained live history.",
+      },
+      executionLog: {
+        type: "string",
+        description:
+          "Execution JSONL for this build. With a matching build manifest and live event sequence, it provides source mappings for exact writer attribution.",
+      },
+    },
+    ["signal"],
+  ),
+  tool(
+    "wave_trace_drivers",
+    "Trace upstream RTL assignments from a dumped signal using VIDE and supported elaborated port connections.",
+    pagedTraceProperties,
+    ["signal"],
+  ),
+  tool(
+    "wave_trace_loads",
+    "Trace downstream RTL assignments from a dumped signal using VIDE and supported elaborated port connections.",
+    pagedTraceProperties,
+    ["signal"],
+  ),
+  tool(
+    "wave_execution_map",
+    "Generate stable statement and process IDs for direct assignments to a signal in a Verilator or VCS design.",
+    {
+      waveform: traceProperties.waveform,
+      instance: {
+        type: "string",
+        description: "Elaborated RTL instance path.",
+      },
+      signal: {
+        type: "string",
+        description:
+          "Signal name within the instance. VCS also accepts a concrete array word such as mem[36].",
+      },
+      captureOperands: {
+        type: "boolean",
+        description:
+          "For VCS, add operand capture to eligible fixed-target NBA statements.",
+      },
+      captureGuards: {
+        type: "boolean",
+        description:
+          "For VCS, sample eligible local guard operands at fixed-target or array-word NBA evaluations.",
+      },
+      captureGuardEntry: {
+        type: "boolean",
+        description:
+          "For VCS array-word maps, also capture eligible guard operands on entry to a taken if block.",
+      },
+    },
+    ["instance", "signal"],
+  ),
+  tool(
+    "wave_execution_trace",
+    "Replay recorded execution for an instance signal, optionally verified against an open waveform.",
+    {
+      waveform: traceProperties.waveform,
+      recordingOnly: {
+        type: "boolean",
+        description: "Read the recording independently of the active waveform.",
+      },
+      instance: {
+        type: "string",
+        description: "Exact recorded RTL instance path.",
+      },
+      signal: {
+        type: "string",
+        description: "Signal name within the recorded instance.",
+      },
+      executionLog: {
+        type: "string",
+        description: "Path to the execution JSONL recording.",
+      },
+      tick: {
+        type: "string",
+        description: "Final tick of the requested execution window.",
+      },
+      historyStart: {
+        type: "string",
+        description: "First tick of the requested window. Defaults to tick.",
+      },
+      detail: traceProperties.detail,
+      format: traceProperties.format,
+    },
+    ["instance", "signal", "executionLog", "tick"],
+  ),
+  tool(
+    "wave_trace_context",
+    "Sample waveform values and bounded history for an upstream RTL trace.",
+    {
+      ...traceProperties,
+      ...temporalLimits,
+      tick: {
+        type: "string",
+        description: "Observation tick as a decimal string.",
+      },
+      changeOrder: {
+        type: "integer",
+        minimum: 1,
+        description:
+          "One-based order of the selected signal change at this tick.",
+      },
+      historyStart: {
+        type: "string",
+        description:
+          "First tick for waveform history or 'auto' for history near the latest observed change.",
+      },
+      executionLog: {
+        type: "string",
+        description: "Optional execution recording matching the open waveform.",
+      },
+    },
+    ["signal", "tick"],
+  ),
+  tool(
+    "wave_trace_resume",
+    "Follow another batch of dependencies and extend the combined graph from an earlier trace.",
+    {
+      continuationCursor: {
+        type: "string",
+        description:
+          "Continuation cursor returned by a static, waveform, or live trace.",
+      },
+      followContinuations: temporalLimits.followContinuations,
+      format: traceProperties.format,
+      detail: traceProperties.detail,
+      output: {
+        type: "string",
+        enum: ["graph", "temporal", "report", "paged"],
+        description:
+          "Return the matching dependency graph, its detailed Markdown report, or a cursor for paged graph output.",
+      },
+    },
+    ["continuationCursor"],
+  ),
+  tool(
+    "wave_trace_graph_page",
+    "Read a page of an existing dependency graph snapshot.",
+    {
+      graphCursor: {
+        type: "string",
+        description: "Graph cursor returned by paged trace output.",
+      },
+      section: {
+        type: "string",
+        enum: [
+          "signals",
+          "assignments",
+          "feedbackEdges",
+          "nodes",
+          "edges",
+          "gaps",
+          "assignmentSources",
+          "mermaid",
+          "report",
+        ],
+      },
+      offset: { type: "integer", minimum: 0 },
+      limit: { type: "integer", minimum: 1, maximum: 128 },
+    },
+    ["graphCursor", "section"],
+  ),
+  tool(
     "wave_clip",
     "Read a clipped segment from open waveform signals. Returns initial values, transitions, tick scale, markers and truncation flags.",
     clipProperties,
@@ -164,90 +472,26 @@ const toolDefinitions = [
   ),
 ];
 
-type InputProperty = {
-  type: string;
-  enum?: readonly string[];
-  minimum?: number;
-  maximum?: number;
-  minItems?: number;
-  maxItems?: number;
-  items?: { type: string };
-  description?: string;
-};
-
-function validArgument(value: unknown, property: InputProperty) {
-  if (property.type === "object")
-    return !!value && typeof value === "object" && !Array.isArray(value);
-  if (property.type === "string")
-    return (
-      typeof value === "string" &&
-      value.length > 0 &&
-      (!property.enum || property.enum.includes(value))
-    );
-  if (property.type === "integer")
-    return (
-      typeof value === "number" &&
-      Number.isSafeInteger(value) &&
-      value >= (property.minimum ?? -Infinity) &&
-      value <= (property.maximum ?? Infinity)
-    );
-  return (
-    property.type === "array" &&
-    Array.isArray(value) &&
-    value.length >= (property.minItems ?? 0) &&
-    value.length <= (property.maxItems ?? Infinity) &&
-    value.every(
-      (item) => typeof item === property.items?.type && item.length > 0,
-    )
-  );
-}
-
-function tool(
-  name: string,
-  description: string,
-  properties: Record<string, InputProperty>,
-  required: string[],
-) {
-  return {
-    name,
-    description,
-    inputSchema: {
-      type: "object",
-      properties,
-      required,
-      additionalProperties: false,
-    },
-  };
-}
-
-function socketDirectory(workspace: string) {
-  const id = createHash("sha256")
-    .update(fs.realpathSync(workspace))
-    .digest("hex")
-    .slice(0, 20);
-  const directory = path.join(
-    os.tmpdir(),
-    `wave-workbench-${process.getuid()}-${id}`,
-  );
-  try {
-    fs.mkdirSync(directory, { mode: 0o700 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  }
-  const info = fs.lstatSync(directory);
-  if (!info.isDirectory() || info.uid !== process.getuid() || info.mode & 0o077)
-    throw Error(
-      "Wave Workbench socket directory must be private and owned by the current user",
-    );
-  return directory;
-}
-
 export function serveWaveMcp(
   workspace: string,
-  call: (name: string, args: Arguments) => Promise<unknown>,
+  call: (
+    name: string,
+    args: Arguments,
+    signal: AbortSignal,
+  ) => Promise<unknown>,
   log: (message: string) => void,
 ) {
-  const filename = path.join(socketDirectory(workspace), `${process.pid}.sock`);
+  const directory = socketDirectory(workspace);
+  const pipeToken =
+    process.platform === "win32" ? randomBytes(32).toString("hex") : undefined;
+  const pipeId =
+    pipeToken && process.pid + "-" + randomBytes(16).toString("hex");
+  const registration = pipeId
+    ? path.join(directory, pipeId + ".pipe")
+    : undefined;
+  const filename = pipeId
+    ? pipePrefix + pipeId
+    : path.join(directory, `${process.pid}.sock`);
   const sockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
     sockets.add(socket);
@@ -265,59 +509,96 @@ export function serveWaveMcp(
       const lineEnd = buffer.indexOf("\n");
       if (lineEnd === -1) return;
       socket.removeAllListeners("data");
+      const operation = new AbortController();
+      socket.once("close", () => operation.abort());
       try {
-        const { name, args } = JSON.parse(buffer.slice(0, lineEnd));
-        const definition = toolDefinitions.find((entry) => entry.name === name);
-        if (
-          !definition ||
-          !args ||
-          typeof args !== "object" ||
-          Array.isArray(args)
-        )
-          throw Error("Invalid Wave Workbench tool call");
-        if (
-          definition.inputSchema.required.some(
-            (key) => !Object.hasOwn(args, key),
-          ) ||
-          Object.keys(args).some(
-            (key) =>
-              !Object.hasOwn(definition.inputSchema.properties, key) ||
-              !validArgument(args[key], definition.inputSchema.properties[key]),
-          )
-        )
-          throw Error("Invalid Wave Workbench tool arguments");
-        const result = await call(name, args);
-        socket.end(JSON.stringify({ result }) + "\n");
+        const { name, args, token } = JSON.parse(buffer.slice(0, lineEnd));
+        if (pipeToken && token !== pipeToken)
+          throw Error("Invalid Wave Workbench pipe token.");
+        validateCall(toolDefinitions, name, args);
+        const result = await call(name, args, operation.signal);
+        if (!operation.signal.aborted)
+          socket.end(JSON.stringify({ result }) + "\n");
       } catch (error) {
-        socket.end(JSON.stringify({ error: String(error) }) + "\n");
+        if (!operation.signal.aborted)
+          socket.end(JSON.stringify({ error: String(error) }) + "\n");
       }
     });
   });
-  server.on("error", log);
+  let disposed = false;
+  let published = false;
+  server.on("error", (error) => log(String(error)));
   server.listen(filename, () => {
-    fs.chmodSync(filename, 0o600);
+    if (disposed) {
+      server.close();
+      return;
+    }
+    try {
+      if (registration) {
+        const temporary = registration + ".tmp";
+        fs.writeFileSync(
+          temporary,
+          JSON.stringify({ filename, token: pipeToken }),
+          { flag: "wx", mode: 0o600 },
+        );
+        try {
+          fs.renameSync(temporary, registration);
+        } finally {
+          fs.rmSync(temporary, { force: true });
+        }
+        published = true;
+      } else fs.chmodSync(filename, 0o600);
+    } catch (error) {
+      server.close();
+      log(String(error));
+      return;
+    }
     log("MCP socket " + filename);
   });
   return {
     dispose() {
+      if (disposed) return;
+      disposed = true;
+      if (registration && published) {
+        try {
+          fs.rmSync(registration, { force: true });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+            log(String(error));
+        }
+      }
       for (const socket of sockets) socket.destroy();
       server.close();
     },
   };
 }
 
-function exchange(filename: string, request: Arguments) {
+function exchange(
+  filename: string,
+  request: Arguments,
+  signal?: AbortSignal,
+  timeout = 130000,
+) {
+  signal?.throwIfAborted();
   return new Promise<unknown>((resolve, reject) => {
     const socket = net.createConnection(filename);
+    const cancel = () =>
+      socket.destroy(Error("Wave Workbench request cancelled"));
+    signal?.addEventListener("abort", cancel, { once: true });
     socket.setEncoding("utf8");
-    socket.setTimeout(130000, () =>
-      socket.destroy(Error("Wave Workbench request timed out")),
+    socket.setTimeout(timeout, () =>
+      socket.destroy(
+        Object.assign(Error("Wave Workbench request timed out"), {
+          code: "ETIMEDOUT",
+        }),
+      ),
     );
     socket.once("connect", () => socket.write(JSON.stringify(request) + "\n"));
     socket.on("error", reject);
-    socket.once("close", () =>
-      reject(Error("Wave Workbench closed the connection")),
-    );
+    socket.once("close", () => {
+      signal?.removeEventListener("abort", cancel);
+      reject(Error("Wave Workbench closed the connection"));
+    });
     let buffer = "";
     socket.on("data", (chunk) => {
       buffer += chunk;
@@ -340,30 +621,118 @@ function exchange(filename: string, request: Arguments) {
   });
 }
 
+function readPipeRegistration(file: string, pid: number, nonce?: string) {
+  try {
+    const attributes = fs.lstatSync(file);
+    if (!attributes.isFile() || attributes.size > 512) return;
+    const registration = JSON.parse(fs.readFileSync(file, "utf8"));
+    const prefix = pipePrefix + pid + "-";
+    const filename = registration?.filename;
+    const token = registration?.token;
+    if (
+      typeof filename === "string" &&
+      filename.startsWith(prefix) &&
+      /^[a-f0-9]{32}$/.test(filename.slice(prefix.length)) &&
+      (!nonce || filename === prefix + nonce) &&
+      typeof token === "string" &&
+      /^[a-f0-9]{64}$/.test(token)
+    )
+      return { filename, token };
+  } catch (error) {
+    if (
+      !(error instanceof SyntaxError) &&
+      !["ENOENT", "EACCES", "EPERM"].includes(
+        (error as NodeJS.ErrnoException).code ?? "",
+      )
+    )
+      throw error;
+  }
+}
+
 async function connectToWorkbench(
   directory: string,
   name: string,
   args: Arguments,
+  signal: AbortSignal,
 ) {
-  const candidates = fs
-    .readdirSync(directory)
-    .filter((file) => /^\d+\.sock$/.test(file));
-  const active = [];
-  for (const file of candidates) {
-    const filename = path.join(directory, file);
+  const windows = process.platform === "win32";
+  const pattern = windows
+    ? /^([1-9]\d*)(?:-([a-f0-9]{32}))?\.pipe$/
+    : /^([1-9]\d*)\.sock$/;
+  const cursorField =
+    name === "wave_trace_graph_page"
+      ? "graphCursor"
+      : name === "wave_trace_resume"
+        ? "continuationCursor"
+        : undefined;
+  const cursorHost =
+    cursorField &&
+    /^([1-9]\d{0,9})\.[a-f0-9-]{36}$/.exec(String(args[cursorField]))?.[1];
+  const cursorUnavailable =
+    cursorField === "graphCursor"
+      ? "This trace graph cursor is unavailable. Start a new trace."
+      : "This trace continuation cursor is unavailable. Start a new trace.";
+  if (cursorField && !cursorHost) throw Error(cursorUnavailable);
+  async function probe(file: string) {
+    signal.throwIfAborted();
+    const candidate = pattern.exec(file);
+    if (!candidate) return;
+    const pid = Number(candidate[1]);
+    if (pid > 0x7fffffff) return;
+    const record = path.join(directory, file);
     try {
-      process.kill(Number.parseInt(file, 10), 0);
-      const result = await exchange(filename, { name: "wave_list", args: {} });
-      active.push({ filename, result });
+      process.kill(pid, 0);
+      const endpoint = windows
+        ? readPipeRegistration(record, pid, candidate[2])
+        : { filename: record, token: undefined };
+      if (!endpoint) return;
+      const result = await exchange(
+        endpoint.filename,
+        {
+          name: "wave_list",
+          args: {},
+          token: endpoint.token,
+        },
+        signal,
+        3000,
+      );
+      if (
+        result &&
+        typeof result === "object" &&
+        "views" in result &&
+        Array.isArray(result.views)
+      )
+        return { ...endpoint, result };
     } catch (error) {
       if (
-        !["ESRCH", "ENOENT", "ECONNREFUSED"].includes(
-          (error as NodeJS.ErrnoException).code ?? "",
-        )
+        !(error instanceof SyntaxError) &&
+        ![
+          "ESRCH",
+          "ENOENT",
+          "ECONNREFUSED",
+          "ECONNRESET",
+          "ECONNABORTED",
+          "EPIPE",
+          "ETIMEDOUT",
+          "EACCES",
+          "EPERM",
+        ].includes((error as NodeJS.ErrnoException).code ?? "")
       )
         throw error;
     }
   }
+  const entries = fs.readdirSync(directory).filter((file) => {
+    const endpoint = pattern.exec(file);
+    return endpoint && (!cursorHost || endpoint[1] === cursorHost);
+  });
+  const active = [];
+  for (let offset = 0; offset < entries.length; offset += 8) {
+    const batch = await Promise.all(
+      entries.slice(offset, offset + 8).map(probe),
+    );
+    for (const endpoint of batch) if (endpoint) active.push(endpoint);
+  }
+  if (!active.length && cursorHost) throw Error(cursorUnavailable);
   if (!active.length)
     throw Error(
       "Open the workspace in Wave Workbench with waveWorkbench.mcpEnabled enabled",
@@ -381,85 +750,26 @@ async function connectToWorkbench(
     );
   return name === "wave_list"
     ? matches[0].result
-    : exchange(matches[0].filename, { name, args });
-}
-
-async function stdio(workspace: string) {
-  const directory = socketDirectory(workspace);
-  const supportedVersions = [
-    "2025-11-25",
-    "2025-06-18",
-    "2025-03-26",
-    "2024-11-05",
-  ];
-  for await (const line of readline.createInterface({ input: process.stdin })) {
-    let request;
-    try {
-      request = JSON.parse(line);
-    } catch {
-      process.stdout.write(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          id: null,
-          error: { code: -32700, message: "Invalid JSON" },
-        }) + "\n",
+    : exchange(
+        matches[0].filename,
+        { name, args, token: matches[0].token },
+        signal,
       );
-      continue;
-    }
-    if (!request || !Object.hasOwn(request, "id")) continue;
-    const response: Arguments = { jsonrpc: "2.0", id: request.id };
-    if (request.method === "initialize") {
-      const version = request.params?.protocolVersion;
-      response.result = {
-        protocolVersion: supportedVersions.includes(version)
-          ? version
-          : supportedVersions[0],
-        capabilities: { tools: {} },
-        serverInfo: { name: "wave-workbench", version: extensionVersion },
-      };
-    } else if (request.method === "ping") response.result = {};
-    else if (request.method === "tools/list")
-      response.result = { tools: toolDefinitions };
-    else if (request.method === "tools/call") {
-      try {
-        const result = await connectToWorkbench(
-          directory,
-          request.params?.name,
-          request.params?.arguments ?? {},
-        );
-        if (
-          request.params?.name === "wave_export" &&
-          result &&
-          typeof result === "object" &&
-          "imagePng" in result &&
-          typeof result.imagePng === "string"
-        ) {
-          const { imagePng, ...metadata } = result;
-          response.result = {
-            content: [
-              { type: "text", text: JSON.stringify(metadata) },
-              { type: "image", mimeType: "image/png", data: imagePng },
-            ],
-          };
-        } else {
-          response.result = {
-            content: [{ type: "text", text: JSON.stringify(result) }],
-          };
-        }
-      } catch (error) {
-        response.result = {
-          isError: true,
-          content: [{ type: "text", text: String(error) }],
-        };
-      }
-    } else response.error = { code: -32601, message: "Method not found" };
-    process.stdout.write(JSON.stringify(response) + "\n");
-  }
 }
 
 if (require.main === module) {
-  stdio(process.argv[2] ?? process.cwd()).catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
+  Promise.resolve()
+    .then(() => {
+      const directory = socketDirectory(process.argv[2] ?? process.cwd());
+      return serveMcpStdio(
+        "wave-workbench",
+        toolDefinitions,
+        (name, args, signal) =>
+          connectToWorkbench(directory, name, args, signal),
+      );
+    })
+    .catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
 }

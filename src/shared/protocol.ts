@@ -99,7 +99,10 @@ export type AssignmentValue =
   | { op: "signal"; args: number }
   | { op: "scopedSignal"; args: [number, number] }
   | { op: "scopedSelect"; args: [number, number, number, number] }
-  | { op: "scopedComponent"; args: [number, number, number, [number, number] | null] }
+  | {
+      op: "scopedComponent";
+      args: [number, number, number, [number, number] | null];
+    }
   | { op: "generateIndex"; args: string }
   | { op: "unsignedBit" | "fillBit"; args: boolean }
   | { op: "fillUnknown"; args: "x" | "z" }
@@ -122,7 +125,13 @@ export type AssignmentValue =
       args: [AssignmentValue, AssignmentValue, AssignmentValue];
     };
 
-type ValueUnary = "bitNot" | "negate" | "not" | "reduceAnd" | "reduceOr" | "reduceXor";
+type ValueUnary =
+  | "bitNot"
+  | "negate"
+  | "not"
+  | "reduceAnd"
+  | "reduceOr"
+  | "reduceXor";
 type ValueBinary =
   | "bitAnd"
   | "bitOr"

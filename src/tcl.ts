@@ -134,6 +134,9 @@ class TclRunner {
   dispose() {
     this.fail(new Error("Tcl interpreter closed"));
     this.child.kill();
+    this.child.stdin.destroy();
+    this.child.stdout.destroy();
+    this.child.stderr.destroy();
   }
 }
 export { TclRunner };

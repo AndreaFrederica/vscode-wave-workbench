@@ -17,6 +17,105 @@ function codeOnly(text: string) {
     (s) => " ".repeat(s.length),
   );
 }
+
+export function vscOperandExpression(text: string) {
+  const code = text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (comment) =>
+    comment.replace(/[^\r\n]/g, " "),
+  );
+  const tokens = code.match(/&&|\|\||~[&|^]|\^~|[A-Za-z_][\w$]*|[^\s]/g);
+  if (!tokens) return;
+  const names = new Set<string>();
+  let expectOperand = true;
+  let depth = 0;
+  for (const token of tokens) {
+    if (expectOperand) {
+      if (token === "(") {
+        depth++;
+      } else if (!/^(?:~[&|^]?|\^~|[&|^])$/.test(token)) {
+        if (
+          !/^[A-Za-z_][\w$]{0,63}$/.test(token) ||
+          KEYWORDS.has(token) ||
+          names.has(token) ||
+          names.size === 8
+        )
+          return;
+        names.add(token);
+        expectOperand = false;
+      }
+    } else if (token === ")" && depth) {
+      depth--;
+    } else if (/^(?:[&|^]|~\^|\^~)$/.test(token)) {
+      expectOperand = true;
+    } else {
+      return;
+    }
+  }
+  if (!depth && !expectOperand) return { code, names: [...names] };
+}
+
+export function vcsGuardEntry(
+  code: string,
+  first: number,
+  last: number,
+  assignment: number,
+  takenWhenTrue = true,
+) {
+  // The probe runs inside the chosen branch, after the original condition evaluates.
+  if (
+    first < 0 ||
+    last <= first ||
+    assignment <= last ||
+    !/\bif\s*\(\s*$/.test(code.slice(Math.max(0, first - 256), first)) ||
+    /[\x60#]/.test(code.slice(first, last))
+  )
+    return;
+  const close = /^\s*\)\s*/.exec(code.slice(last, assignment));
+  if (!close) return;
+  let branch = last + close[0].length;
+  const beginPattern = /^begin\b(?:\s*:\s*[A-Za-z_][\w$]*)?/;
+  if (!takenWhenTrue) {
+    const beforeElse = code.slice(branch, assignment);
+    const block = beginPattern.exec(beforeElse);
+    let ending: number | undefined;
+    if (block) {
+      let depth = 1;
+      for (const token of beforeElse
+        .slice(block[0].length)
+        .matchAll(/\b(begin|end)\b/g)) {
+        depth += token[1] === "begin" ? 1 : -1;
+        if (depth === 0) {
+          ending = block[0].length + token.index + token[0].length;
+          break;
+        }
+      }
+    } else {
+      // A bare true assignment has no nested conditional that can own the else.
+      const simple =
+        /^[A-Za-z_][\w$]*(?:\s*\[[^;\]]+\])*\s*(?:<=|=(?!=))[^;]*;/.exec(
+          beforeElse,
+        );
+      ending = simple?.[0].length;
+    }
+    if (ending === undefined) return;
+    const next = /^(?:\s*:\s*[A-Za-z_][\w$]*)?\s*else\b\s*/.exec(
+      beforeElse.slice(ending),
+    );
+    if (!next) return;
+    branch += ending + next[0].length;
+  }
+  if (branch === assignment) return { at: assignment, bare: true };
+  const begin = beginPattern.exec(code.slice(branch, assignment));
+  if (!begin) return;
+  const entry = branch + begin[0].length;
+  let depth = 1;
+  for (const token of code
+    .slice(entry, assignment)
+    .matchAll(/\b(begin|end)\b/g)) {
+    depth += token[1] === "begin" ? 1 : -1;
+    if (!depth) return;
+  }
+  return { at: entry, bare: false };
+}
 function identifiers(text: string) {
   if (text.length > 2 * 1024 * 1024) throw Error("选区超过 2 MiB，请分批添加");
   const clean = codeOnly(text);

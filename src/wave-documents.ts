@@ -27,6 +27,7 @@ export function createWaveDocuments(
     cancellation?: vscode.CancellationToken,
   ) => Promise<string>,
   refreshSidebar: () => void,
+  onTraceProjectChanged: (viewer: Viewer) => void,
 ): DocumentMethods {
   return {
     onDidChangeCustomDocument: projectChanges.event,
@@ -42,6 +43,8 @@ export function createWaveDocuments(
         savedView: backup?.savedView,
         savedKdb: backup?.savedKdb,
         savedDesignView: backup?.savedDesignView,
+        traceProject: backup?.traceProject,
+        savedTraceProject: backup?.savedTraceProject,
         dirty: !!backup,
         dispose() {},
       };
@@ -56,6 +59,7 @@ export function createWaveDocuments(
           document.view &&
           document.view === document.savedView &&
           viewer.kdb?.path === document.savedKdb &&
+          document.traceProject === document.savedTraceProject &&
           JSON.stringify(designSnapshot(viewer)) ===
             JSON.stringify(document.savedDesignView)
         )
@@ -107,6 +111,8 @@ export function createWaveDocuments(
         }
       }
       await viewer.restoreDesignView?.(document.savedDesignView);
+      document.traceProject = document.savedTraceProject;
+      onTraceProjectChanged(viewer);
       await viewer.ui("restoreView", { ...restored, projectBaseline: true });
       document.dirty = false;
     },
@@ -124,6 +130,8 @@ export function createWaveDocuments(
         savedView: document.savedView,
         savedKdb: document.savedKdb,
         savedDesignView: document.savedDesignView,
+        traceProject: document.traceProject,
+        savedTraceProject: document.savedTraceProject,
         projectPath: document.projectPath,
       };
       await fs.promises.writeFile(filename, JSON.stringify(backup), {

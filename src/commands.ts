@@ -3,6 +3,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import { measureAnalog, realLabel } from "./shared/analog";
 import { findSignal, normalName, readSignalAt } from "./signal-lookup";
 import type { Viewer } from "./viewer";
 import type { TclNode } from "./tcl";
@@ -35,6 +36,7 @@ wvSearchNext / wvSearchPrev (current loaded window, transition search)
 waveRestoreView json; waveView
 waveFindSignals query ?offset? ?limit?
 waveGetEvents signal start end ?limit?
+waveMeasureAnalog signal start end
 waveDecode list | set signal decoderId | clear signal
 waveDecodeEvents signal start end ?limit?
 waveDecodeTransactions decoderId bindingsJson start end ?optionsJson?
@@ -334,6 +336,7 @@ class WaveCommands {
           snapshot = o["-time"] ? null : await ui("snapshot");
         const t = o["-time"] ? ticks(text(o["-time"])) : snapshot.cursorA;
         const raw = await readSignalAt(viewer.backend, signal, t);
+        if (signal.real) return realLabel(raw);
         return raw == null
           ? ""
           : formatValue(
@@ -447,6 +450,27 @@ class WaveCommands {
           (item) => WaveSignal.key(item) === WaveSignal.key(signal),
         );
         return JSON.stringify(row?.annotation ?? null);
+      }
+      case "waveMeasureAnalog": {
+        count(3);
+        const signal = await find(args[0]);
+        if (!signal.real) throw Error("Choose a real signal.");
+        const start = ticks(args[1]),
+          end = ticks(args[2]);
+        if (end <= start) throw Error("Invalid measurement window");
+        const block = (
+          await viewer.backend.request("query", {
+            signals: [signal.id],
+            start: String(start),
+            end: String(end),
+            limit: 100000,
+          })
+        )[signal.id];
+        if (block.truncated)
+          throw Error("Measurement window contains too many samples.");
+        return JSON.stringify(
+          measureAnalog(block.events, BigInt(start), BigInt(end)),
+        );
       }
       case "waveDecodeEvents":
       case "waveGetEvents": {
