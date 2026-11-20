@@ -1,6 +1,6 @@
 # Wave Workbench 多引擎解码器实施计划
 
-当前开发优先级是多引擎解码器。RTL Trace 的待检查项见 [检查 TODO](CHECK_TODO.md)。阶段验收证据也记录在该清单。
+[当前实现目标](IMPLEMENTATION_GOAL.md) 优先交付模拟波形和原理图。RTL Trace 的待检查项见 [检查 TODO](CHECK_TODO.md)。阶段验收证据也记录在该清单。实数输入、混合信号解码和派生波形见 [模拟波形计划](ANALOG_WAVE_PLAN.md)。
 
 ## 现状审计
 

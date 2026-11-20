@@ -9,6 +9,7 @@
 | **原生波形** | 小仿真用 VCD，长仿真用 FST。扩展按信号批次和时间窗读取，可分页搜索信号。 |
 | **实例树与 RTL** | 浏览参数化实例和 generate 作用域，从波形定位信号声明、模块定义或例化位置。选中 RTL 信号可批量加到波形。 |
 | **按时刻查看 RTL** | 设置 A 游标后，在 RTL 信号上悬停即可查看这一时刻的采样值。 |
+| **RTL 追踪** | 从实例信号查找驱动、负载和跨周期上游，展开 Trace Explorer 或通过 MCP 导出 Mermaid 与 Markdown。 |
 | **保存调试现场** | `.waveproj` 恢复信号顺序、分组、标签、解码、游标、标记以及实例树的选中和展开状态。 |
 | **自动化** | 通过 Tcl 或 MCP 打开工程、查询信号、截取区间、导出 PNG／CSV／JSON／VCD，并直接保存工程。 |
 
@@ -28,6 +29,8 @@ npm run package:native
 平台 VSIX 内置 Tcl 8.6、标准脚本库及许可文件，安装后可直接运行 Tcl。Windows 源码打包请在对应架构的 Visual Studio Developer Command Prompt 运行。跨平台打包时，可用 `--tcl-runtime` 指定为目标平台构建好的 Tcl 运行时目录。目录包含 `bin/tclsh`（Windows 为 `bin/tclsh.exe`）、`lib/tcl8.6`、`LICENSE-Tcl.txt`、`LICENSE-zlib.txt` 和 `LICENSE-LibTomMath.txt`。 [Tcl 构建说明](https://www.tcl-lang.org/doc/howto/compile.html)
 
 **RTL 语言服务（LSP）建议安装 Vide。** 在 VS Code 扩展视图搜索 `pascal-lab.vide-code-extension`。Vide 为 Verilog 和 SystemVerilog 提供代码补全、诊断和语义高亮，Wave Workbench 负责波形浏览和 RTL 联动。 [Vide 扩展](https://marketplace.visualstudio.com/items?itemName=pascal-lab.vide-code-extension)
+
+**RTL 追踪和 VCS KDB 模块内部逻辑图需要 Wave Workbench 修改版 VIDE。** 从本项目的 VIDE fork 的 `wave-workbench-trace` 分支构建 VSIX，安装到运行 Wave Workbench 的同一个扩展宿主。Remote SSH 场景请安装到远端。该版本提供 RTL Trace schema 1、隔离仿真工程和模块内部赋值查询。 [修改版 VIDE](https://github.com/AndreaFrederica/vide/tree/wave-workbench-trace) · [构建安装与 RTL 追踪快速入门](RTL_TRACE_QUICKSTART.md#安装两份扩展)
 
 ## 跑通第一个 Verilator 示例
 
