@@ -1,0 +1,29 @@
+{
+  "apiVersion": 1,
+  "id": "example.js.spi",
+  "name": "SPI (javascript)",
+  "version": "1",
+  "engine": "javascript",
+  "entry": "main.cjs",
+  "inputs": [
+    {
+      "id": "clock",
+      "width": 1
+    },
+    {
+      "id": "mosi",
+      "width": 1
+    },
+    {
+      "id": "cs",
+      "width": 1
+    }
+  ],
+  "options": {
+    "cpol": 0,
+    "cpha": 0
+  },
+  "capabilities": {
+    "checkpoints": true
+  }
+}

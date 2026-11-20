@@ -1,0 +1,29 @@
+{
+  "apiVersion": 1,
+  "id": "example.lua.spi",
+  "name": "SPI (lua)",
+  "version": "1",
+  "engine": "lua",
+  "entry": "main.lua",
+  "inputs": [
+    {
+      "id": "clock",
+      "width": 1
+    },
+    {
+      "id": "mosi",
+      "width": 1
+    },
+    {
+      "id": "cs",
+      "width": 1
+    }
+  ],
+  "options": {
+    "cpol": 0,
+    "cpha": 0
+  },
+  "capabilities": {
+    "checkpoints": true
+  }
+}

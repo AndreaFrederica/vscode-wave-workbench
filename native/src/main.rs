@@ -753,7 +753,16 @@ fn run(
         _ => Err("Unknown method".into()),
     }
 }
+mod decoder;
+
 fn main() {
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "--decoder-lua") {
+        if let Err(error) = decoder::run() {
+            eprintln!("Lua decoder: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let independent = std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg == "--independent");

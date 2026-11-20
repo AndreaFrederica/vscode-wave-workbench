@@ -129,6 +129,14 @@ export interface CacheStats {
   containingHits: number;
 }
 export interface BackendProtocol {
+  decoderInit: { args: { source: string; context: import("../decoder-runtime/types").DecoderContext }; result: null };
+  decoderBatch: {
+    args: { start: string; end: string; initial: (string | null)[]; times: string[]; inputs: number[]; offsets: number[]; values: string };
+    result: import("../decoder-runtime/types").DecodeResult;
+  };
+  decoderFlush: { args: Record<string, never>; result: import("../decoder-runtime/types").DecodeResult };
+  decoderSaveState: { args: Record<string, never>; result: import("../decoder-runtime/types").Json };
+  decoderRestoreState: { args: { state: import("../decoder-runtime/types").Json }; result: null };
   open: { args: { path: string }; result: Metadata };
   query: {
     args: { signals: string[]; start: string; end: string; limit?: number };

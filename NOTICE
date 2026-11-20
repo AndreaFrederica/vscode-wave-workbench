@@ -12,3 +12,6 @@ Third-party npm and Cargo dependencies retain their own licenses.
 Platform packages include the Tcl 8.6 runtime and standard scripts.
 Tcl, zlib and LibTomMath license texts are included in bin/tcl/.
 Tcl source: https://github.com/tcltk/tcl/tree/core-8-6-18
+
+Platform packages include LuaJIT through the mlua Rust binding.
+The LuaJIT license and bundled Lua notices are in licenses/LuaJIT.txt.

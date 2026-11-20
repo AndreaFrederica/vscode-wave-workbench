@@ -20,6 +20,7 @@ verdi-sdk = []
 flate2 = "1"
 fst-reader = "0.17.1"
 libloading = "0.8"
+mlua = { version = "0.12.2", features = ["luajit", "vendored", "serde"] }
 num-bigint = "0.4"
 num-traits = "0.2"
 ruzstd = "0.8"

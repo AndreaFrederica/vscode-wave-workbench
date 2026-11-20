@@ -1,0 +1,16 @@
+{
+  "apiVersion": 1,
+  "id": "example.js.word",
+  "name": "Word intervals (JavaScript)",
+  "version": "1",
+  "engine": "javascript",
+  "entry": "main.cjs",
+  "inputs": [
+    {
+      "id": "data"
+    }
+  ],
+  "capabilities": {
+    "checkpoints": true
+  }
+}

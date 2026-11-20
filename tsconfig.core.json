@@ -10,6 +10,7 @@
   },
   "include": [
     "src/shared/**/*.ts",
+    "src/decoder-runtime/**/*.ts",
     "src/backend.ts",
     "src/kdb.ts",
     "src/source-sync.ts",

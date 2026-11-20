@@ -1,0 +1,16 @@
+{
+  "apiVersion": 1,
+  "id": "example.lua.word",
+  "name": "Word intervals (Lua)",
+  "version": "1",
+  "engine": "lua",
+  "entry": "main.lua",
+  "inputs": [
+    {
+      "id": "data"
+    }
+  ],
+  "capabilities": {
+    "checkpoints": true
+  }
+}

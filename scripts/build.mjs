@@ -12,8 +12,11 @@ const host = (await readdir("src"))
 const shared = (await readdir("src/shared"))
   .filter((s) => s.endsWith(".ts"))
   .map((s) => "src/shared/" + s);
+const decoders = (await readdir("src/decoder-runtime"))
+  .filter((s) => s.endsWith(".ts"))
+  .map((s) => "src/decoder-runtime/" + s);
 await build({
-  entryPoints: [...host, ...shared],
+  entryPoints: [...host, ...shared, ...decoders],
   outdir: "dist",
   outbase: "src",
   platform: "node",
