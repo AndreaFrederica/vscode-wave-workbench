@@ -11,6 +11,7 @@ import type { Viewer, WaveDocument } from "./viewer";
 import type { Backend } from "./backend";
 import type { Metadata, WaveState } from "./shared/protocol";
 import { loadDecoderCatalog, saveDecoderProfile } from "./decoder-config";
+import type { DecoderInstance, DecodeResult } from "./decoder-runtime/types";
 import { backendPlan, isFsdb, type FsdbBackend } from "./backend-selection";
 import { mapPrefix, type DesignSession } from "./kdb";
 import {
@@ -42,6 +43,8 @@ interface EditorActions {
   selectDecoder(viewer: Viewer): Promise<void>;
   editDecoderConfig(viewer: Viewer): Promise<void>;
   decoderConfigPath(viewer: Viewer): string | undefined;
+  configureWaveDecoder(viewer: Viewer): Promise<void>;
+  decodeWindow(viewer: Viewer, instance: DecoderInstance, start: string, end: string, signal?: AbortSignal): Promise<DecodeResult>;
   updateSidebarTags(viewer: Viewer, view: WaveState): void;
   saveActiveProject(viewer: Viewer): Promise<unknown>;
   openProject(filename?: string): Promise<unknown>;
@@ -76,6 +79,8 @@ export function createWaveEditor(
     selectDecoder,
     editDecoderConfig,
     decoderConfigPath,
+    configureWaveDecoder,
+    decodeWindow,
     updateSidebarTags,
     saveActiveProject,
     openProject,
@@ -145,7 +150,9 @@ export function createWaveEditor(
         refreshSidebar();
       }
     });
+    const decoderQueries = new Map<string, AbortController>();
     panel.onDidDispose(() => {
+      for (const query of decoderQueries.values()) query.abort();
       viewer.disposed = true;
       viewer.resolveReady(null);
       viewer.backend.dispose();
@@ -593,6 +600,26 @@ export function createWaveEditor(
             await selectDecoder(viewer);
           } else if (msg.type === "editDecoderConfig") {
             await editDecoderConfig(viewer);
+          } else if (msg.type === "configureWaveDecoder") {
+            await configureWaveDecoder(viewer);
+          } else if (msg.type === "cancelWaveDecoder") {
+            decoderQueries.get(msg.instanceId)?.abort();
+          } else if (msg.type === "queryWaveDecoder") {
+            const id = msg.instance?.instanceId;
+            if (typeof id !== "string" || id.length > 64) throw Error("Invalid decoder instance.");
+            decoderQueries.get(id)?.abort();
+            const controller = new AbortController();
+            decoderQueries.set(id, controller);
+            try {
+              const decoded = await decodeWindow(viewer, msg.instance, msg.start, msg.end, controller.signal);
+              if (!controller.signal.aborted)
+                await panel.webview.postMessage({ type: "waveDecoderResult", instanceId: id, request: msg.request, decoded });
+            } catch (error) {
+              if (!controller.signal.aborted)
+                await panel.webview.postMessage({ type: "waveDecoderResult", instanceId: id, request: msg.request, error: error.message });
+            } finally {
+              if (decoderQueries.get(id) === controller) decoderQueries.delete(id);
+            }
           } else if (msg.type === "decoderCatalog") {
             const legacy = decoderConfigPath(viewer);
             await panel.webview.postMessage({

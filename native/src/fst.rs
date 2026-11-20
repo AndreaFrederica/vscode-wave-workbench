@@ -97,6 +97,17 @@ impl Fst {
         end: u64,
         limit: usize,
     ) -> Result<Vec<(Events, bool)>, String> {
+        self.query_with_order(ids, start, end, limit, false)
+    }
+
+    pub fn query_with_order(
+        &mut self,
+        ids: &[&str],
+        start: u64,
+        end: u64,
+        limit: usize,
+        preserve_same_tick: bool,
+    ) -> Result<Vec<(Events, bool)>, String> {
         if ids.len() > 64 || end < start || !(1..=100000).contains(&limit) {
             return Err("Invalid FST query bounds".into());
         }
@@ -149,9 +160,13 @@ impl Fst {
             if bits.len() != width {
                 return Err("Digital value width differs from FST signal declaration");
             }
-            let replace = events
-                .last()
-                .is_some_and(|(last, _)| tick <= start || *last == tick);
+            let replace = events.last().is_some_and(|(last, _)| {
+                if preserve_same_tick {
+                    tick < start
+                } else {
+                    tick <= start || *last == tick
+                }
+            });
             if !replace && events.len() == limit {
                 *truncated = true;
                 remaining -= 1;
@@ -176,17 +191,20 @@ impl Fst {
         let mut missing: Vec<_> = positions
             .iter()
             .filter_map(|(&handle, &(index, _))| {
-                (!output[index]
-                    .0
-                    .first()
-                    .is_some_and(|(tick, _)| *tick <= start))
+                (!output[index].0.first().is_some_and(|(tick, _)| {
+                    *tick < start || (!preserve_same_tick && *tick == start)
+                }))
                 .then_some(handle)
             })
             .collect();
         let mut seeds = HashMap::new();
-        let mut bound = start.min(self.end);
+        let mut bound = if preserve_same_tick {
+            start.saturating_sub(1).min(self.end)
+        } else {
+            start.min(self.end)
+        };
         let mut span = (end - start).max(256);
-        while !missing.is_empty() && bound > self.start {
+        while !missing.is_empty() && start > self.start && bound >= self.start {
             let previous = bound.saturating_sub(span).max(self.start);
             let filter = FstFilter::new(
                 previous,
@@ -209,6 +227,9 @@ impl Fst {
                     ReadSignalsError::CallbackError(()) => unreachable!(),
                 })?;
             missing.retain(|handle| !seeds.contains_key(handle));
+            if previous == self.start {
+                break;
+            }
             span = span.saturating_mul(4);
             bound = previous;
         }

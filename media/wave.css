@@ -292,3 +292,13 @@ button.signalAnnotation:hover, button.signalAnnotation:focus-visible {
   font-size: 0;
 }
 .tagOverflow { color: var(--vscode-descriptionForeground, inherit); flex: none; }
+
+.decoderTrack{display:flex;min-height:32px;border-bottom:1px solid var(--line)}
+.decoderTrackControls{flex:0 0 calc(var(--wave-names-width,280px) + 6px);display:flex;align-items:center;gap:4px;min-width:0;padding:3px 6px}
+.decoderTrackName{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.decoderTrackPlot{flex:1;position:relative;min-width:0}
+.decoderTrackItems{position:absolute;inset:3px 0;overflow:hidden}
+.decoderTransaction{position:absolute;height:100%;min-width:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:var(--vscode-editor-inactiveSelectionBackground);border:1px solid var(--vscode-focusBorder)}
+.decoderTransaction.warning{border-color:var(--vscode-editorWarning-foreground)}
+.decoderTransaction.error{border-color:var(--vscode-editorError-foreground)}
+.decoderTrackStatus{position:absolute;pointer-events:none;inset-inline:8px;top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}

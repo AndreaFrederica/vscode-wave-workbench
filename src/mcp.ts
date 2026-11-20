@@ -45,6 +45,26 @@ const clipProperties = {
   },
 };
 const toolDefinitions = [
+  tool("wave_decoder_list", "List installed waveform decoders.", {
+    waveform: { type: "string", description: "Optional path of an open waveform." },
+  }, []),
+  tool("wave_decoder_query", "Decode waveform transactions over a half-open tick window.", {
+    waveform: { type: "string", description: "Optional path of an open waveform." },
+    decoderId: { type: "string" },
+    bindings: { type: "object", description: "Map input IDs to waveform signal paths." },
+    options: { type: "object", description: "Optional JSON decoder parameters." },
+    start: { type: "string", description: "First tick, inclusive." },
+    end: { type: "string", description: "Last tick, exclusive." },
+  }, ["decoderId", "bindings", "start", "end"]),
+  tool("wave_decoder_attach", "Bind a decoder to the waveform transaction row.", {
+    waveform: { type: "string" },
+    decoderId: { type: "string" },
+    bindings: { type: "object" },
+    options: { type: "object" },
+  }, ["decoderId", "bindings"]),
+  tool("wave_decoder_detach", "Remove a waveform transaction row.", { waveform: { type: "string" }, instanceId: { type: "string" } }, []),
+  tool("wave_decoder_reload", "Reload the script and decode the current viewport.", { waveform: { type: "string" }, instanceId: { type: "string" } }, []),
+  tool("wave_decoder_status", "Read the waveform transaction row configuration.", { waveform: { type: "string" } }, []),
   tool(
     "wave_clip",
     "Read a clipped segment from open waveform signals. Returns initial values, transitions, tick scale, markers and truncation flags.",
@@ -114,6 +134,8 @@ type InputProperty = {
 };
 
 function validArgument(value: unknown, property: InputProperty) {
+  if (property.type === "object")
+    return !!value && typeof value === "object" && !Array.isArray(value);
   if (property.type === "string")
     return (
       typeof value === "string" &&

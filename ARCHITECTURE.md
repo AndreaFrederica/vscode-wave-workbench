@@ -61,3 +61,7 @@ VSIX 包含 `dist/`、`media/`、Tcl 桥与原生二进制，不分发 TypeScrip
 ## MCP
 
 `src/mcp.ts` 提供 MCP 入口，通过扩展宿主的会话访问已打开的波形。切换波形后端后，MCP 工具使用同一个会话。 [接口与配置](COMMANDS.md#波形工程布局与-mcp090)
+
+## 多引擎波形解码
+
+`src/decoder-runtime` 负责脚本目录注册、信号事件批次、检查点、结果缓存和运行调度，复用原生波形查询。JSON 适配器复用现有逐字规则和 UART。JavaScript 使用扩展宿主的 V8 Worker，LuaJIT 通过 `wave-backend --decoder-lua` 在独立 Rust 进程中运行。UI、MCP、Tcl 和图片导出的事务查询共用宿主调度器。 [解码 API](DECODER_API.md)

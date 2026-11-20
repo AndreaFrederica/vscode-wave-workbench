@@ -277,6 +277,7 @@ impl Store {
         start: u64,
         end: u64,
         limit: usize,
+        preserve_same_tick: bool,
     ) -> Result<Value, String> {
         if ids.len() > 64 || start > end || limit == 0 || limit > 100000 {
             return Err("Invalid query bounds (max 64 signals, 100000 events each)".into());
@@ -301,7 +302,10 @@ impl Store {
                     end,
                     limit,
                 };
-                if let Some(block) = self.cache.get(&key) {
+                if let Some(block) = (!preserve_same_tick)
+                    .then(|| self.cache.get(&key))
+                    .flatten()
+                {
                     physical_blocks.insert(id.clone(), block);
                 } else {
                     missing.push(key);
@@ -309,18 +313,40 @@ impl Store {
             }
             if !missing.is_empty() {
                 let requests: Vec<_> = missing.iter().map(|key| key.signal.as_str()).collect();
-                let decoded = reader.borrow_mut().query(&requests, start, end, limit)?;
+                let decoded = reader.borrow_mut().query_with_order(
+                    &requests,
+                    start,
+                    end,
+                    limit,
+                    preserve_same_tick,
+                )?;
                 self.cache.stats.reads += 1;
                 for (key, (events, truncated)) in missing.into_iter().zip(decoded) {
                     let block = Arc::new(cache::Block { events, truncated });
                     physical_blocks.insert(key.signal.clone(), block.clone());
-                    self.cache.insert(key, block);
+                    if !preserve_same_tick {
+                        self.cache.insert(key, block);
+                    }
                 }
             }
         }
         for id in ids {
             let block = match physical_blocks.get(id) {
                 Some(block) => block.clone(),
+                None if preserve_same_tick
+                    && !self.virtuals.contains_key(id)
+                    && matches!(self.database, Database::Vcd(_)) =>
+                {
+                    if !self.signal(id).ok_or("Unknown signal")?.supported {
+                        return Err("Unsupported signal encoding".into());
+                    }
+                    let Database::Vcd(vcd) = &self.database else {
+                        unreachable!()
+                    };
+                    let (events, truncated) = vcd.query_with_order(id, start, end, limit, true)?;
+                    self.cache.stats.reads += 1;
+                    Arc::new(cache::Block { events, truncated })
+                }
                 None => self.read_block(id, start, end, limit)?,
             };
             output.insert(id.clone(),json!({"events":block.events.iter().map(|(t,v)|(t.to_string(),v)).collect::<Vec<_>>(),"truncated":block.truncated}));
@@ -587,6 +613,8 @@ struct Request {
     start: Option<String>,
     end: Option<String>,
     limit: Option<usize>,
+    #[serde(rename = "preserveSameTick")]
+    preserve_same_tick: Option<bool>,
     query: Option<String>,
     offset: Option<usize>,
     descriptors: Option<Vec<Descriptor>>,
@@ -749,6 +777,7 @@ fn run(
                 .parse()
                 .map_err(|_| "Invalid end")?,
             r.limit.unwrap_or(20000),
+            r.preserve_same_tick.unwrap_or(false),
         ),
         _ => Err("Unknown method".into()),
     }

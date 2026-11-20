@@ -204,3 +204,10 @@ MCP 客户端可以直接使用两个工具，无需编排 Tcl。
 「信号 → 标签和注释」为选中的信号添加逗号分隔的标签和多行注释。信号行悬停及波形悬停可查看注释。筛选框可输入 `tag:ID` 等标签。标签与注释随 `.waveproj` 保存。
 
 Tcl 和 MCP 的 `wave_tcl` 可使用 `waveDecode list`、`waveDecode set signal decoderId`、`waveDecode clear signal`、`waveDecodeEvents signal start end ?limit?` 和 `waveAnnotate signal ?commaSeparatedTags note?`。`waveDecodeEvents` 的事件项包含时间、原始二进制值和解码结果。UART 串行配置返回 `frames`，其中包含帧的起止时间、数据字、错误和文本。
+
+## 多引擎事务解码
+
+- MCP `wave_decoder_list` 查询注册的解码器，`wave_decoder_query` 查询指定半开时间窗口的事务。
+- MCP `wave_decoder_attach`、`wave_decoder_detach`、`wave_decoder_reload`、`wave_decoder_status` 配置波形事务行。
+- Tcl `waveDecodeTransactions decoderId bindingsJson start end ?optionsJson?` 批量查询事务。旧 `waveDecode` 和 `waveDecodeEvents` 仍用于既有标签与串行解码。
+- `wave_clip` 和 PNG/JSON 导出包括已配置事务行的结果。 [扩展 API](DECODER_API.md)

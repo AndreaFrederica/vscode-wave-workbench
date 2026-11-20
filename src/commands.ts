@@ -17,6 +17,7 @@ import {
 import { scaleSeconds } from "./shared/time";
 import { decodeUart, uartBitTicks } from "./shared/uart";
 import type { Signal } from "./shared/protocol";
+import type { DecoderInstance, DecodeResult } from "./decoder-runtime/types";
 import * as fs from "node:fs";
 import * as path from "node:path";
 const HELP = `Supported nWave Tcl commands (current window):
@@ -36,6 +37,7 @@ waveFindSignals query ?offset? ?limit?
 waveGetEvents signal start end ?limit?
 waveDecode list | set signal decoderId | clear signal
 waveDecodeEvents signal start end ?limit?
+waveDecodeTransactions decoderId bindingsJson start end ?optionsJson?
 waveAnnotate signal ?commaSeparatedTags note?
 waveGroup list | create name | target name | move name target before|after
 waveGroup rename name newName | remove name | expand name | collapse name | assign name signal...
@@ -114,6 +116,12 @@ interface CommandHooks {
   source?: unknown;
   scope?: (scope: string) => Promise<void>;
   decoderProfiles?: (viewer: Viewer) => Promise<DecoderProfile[]>;
+  decodeTransactions?: (
+    viewer: Viewer,
+    instance: DecoderInstance,
+    start: string,
+    end: string,
+  ) => Promise<DecodeResult>;
 }
 class WaveCommands {
   getViewer: CommandHooks["getViewer"];
@@ -121,6 +129,7 @@ class WaveCommands {
   source: unknown;
   scope: CommandHooks["scope"];
   decoderProfiles: CommandHooks["decoderProfiles"];
+  decodeTransactions: CommandHooks["decodeTransactions"];
   windowScale: string;
   constructor({
     getViewer,
@@ -128,8 +137,16 @@ class WaveCommands {
     source,
     scope,
     decoderProfiles,
+    decodeTransactions,
   }: CommandHooks) {
-    Object.assign(this, { getViewer, open, source, scope, decoderProfiles });
+    Object.assign(this, {
+      getViewer,
+      open,
+      source,
+      scope,
+      decoderProfiles,
+      decodeTransactions,
+    });
   }
   async execute(command: string, nodes: TclNode[]) {
     if (command === "waveHelp") return HELP;
@@ -372,6 +389,25 @@ class WaveCommands {
           limit,
         });
         return JSON.stringify(result);
+      }
+      case "waveDecodeTransactions": {
+        count(4, 5);
+        if (!this.decodeTransactions)
+          throw Error("Transaction decoders are unavailable.");
+        return JSON.stringify(
+          await this.decodeTransactions(
+            viewer,
+            {
+              decoderId: args[0],
+              bindings: JSON.parse(args[1]),
+              ...(args[4] === undefined
+                ? {}
+                : { options: JSON.parse(args[4]) }),
+            },
+            args[2],
+            args[3],
+          ),
+        );
       }
       case "waveDecode": {
         const [operation, name, id] = args;

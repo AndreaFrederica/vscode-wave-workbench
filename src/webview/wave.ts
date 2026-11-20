@@ -5,6 +5,7 @@
 
 import { getElement as $ } from "./dom";
 import { renderClipImage } from "./clip-image";
+import { validDecoderInstances, type DecoderInstance, type DecodeResult } from "../decoder-runtime/types";
 import { drawBusLabel } from "./bus-label";
 import { scaleSeconds } from "../shared/time";
 import { renderTags } from "./tags";
@@ -90,6 +91,117 @@ let generation = 0,
   searchRequest = 0,
   searchTimer;
 const saved = vscode.getState() || {};
+let decoderInstances = validDecoderInstances(saved.decoderInstances) ? saved.decoderInstances : [];
+let decoderRequest = 0;
+interface DecoderLane {
+  lane: HTMLElement;
+  items: HTMLElement;
+  status: HTMLElement;
+  key?: string;
+  request?: number;
+  timer?: ReturnType<typeof setTimeout>;
+}
+const decoderLanes = new Map<string, DecoderLane>();
+
+function cancelDecoder(id: string) {
+  const lane = decoderLanes.get(id);
+  if (!lane) return;
+  clearTimeout(lane.timer);
+  lane.request = undefined;
+  vscode.postMessage({ type: "cancelWaveDecoder", instanceId: id });
+}
+
+function detachDecoder(id: string) {
+  cancelDecoder(id);
+  decoderLanes.get(id)?.lane.remove();
+  decoderLanes.delete(id);
+  decoderInstances = decoderInstances.filter((instance) => instance.instanceId !== id);
+  publishProjectState();
+}
+
+function mountDecoder(id: string, name: string): DecoderLane {
+  const lane = document.createElement("div");
+  lane.className = "decoderTrack";
+  const controls = document.createElement("div");
+  controls.className = "decoderTrackControls";
+  const label = document.createElement("strong");
+  label.className = "decoderTrackName";
+  label.textContent = name;
+  controls.append(label);
+  for (const [title, action] of [
+    ["重载", () => scheduleDecoder(id)],
+    ["取消", () => {
+      cancelDecoder(id);
+      decoderLanes.get(id)!.status.textContent = "已取消";
+    }],
+    ["移除", () => detachDecoder(id)],
+  ] as const) {
+    const button = document.createElement("button");
+    button.textContent = title;
+    button.onclick = action;
+    controls.append(button);
+  }
+  const plot = document.createElement("div");
+  plot.className = "decoderTrackPlot";
+  const items = document.createElement("div");
+  items.className = "decoderTrackItems";
+  const status = document.createElement("span");
+  status.className = "decoderTrackStatus";
+  status.setAttribute("role", "status");
+  plot.append(items, status);
+  lane.append(controls, plot);
+  $("decoderTracks").append(lane);
+  const mounted = { lane, items, status };
+  decoderLanes.set(id, mounted);
+  return mounted;
+}
+
+function scheduleDecoder(refresh?: string) {
+  if (!meta || !Number.isSafeInteger(start) || !Number.isSafeInteger(end)) return;
+  const last = end === Number(meta.end) ? BigInt(end) + 1n : BigInt(end);
+  for (const instance of decoderInstances) {
+    const id = instance.instanceId!;
+    const lane = decoderLanes.get(id) ?? mountDecoder(id, instance.decoderId);
+    const key = JSON.stringify([instance, start, String(last)]);
+    if (lane.key === key && refresh !== id) continue;
+    cancelDecoder(id);
+    lane.key = key;
+    const request = lane.request = ++decoderRequest;
+    lane.items.replaceChildren();
+    lane.status.textContent = "解码中…";
+    lane.timer = setTimeout(() => vscode.postMessage({
+      type: "queryWaveDecoder", instance, request, start: String(start), end: String(last),
+    }), 180);
+  }
+}
+
+function showDecoderResult(
+  lane: { items: HTMLElement; status: HTMLElement },
+  result: DecodeResult,
+) {
+  lane.items.replaceChildren();
+  for (const item of result.transactions) {
+    const first = Math.max(start, Number(item.start));
+    const last = Math.min(end, Number(item.end));
+    if (first >= last) continue;
+    const button = document.createElement("button");
+    button.className = "decoderTransaction " + (item.severity ?? "");
+    button.textContent = item.label;
+    button.title = [item.start + " → " + item.end, item.label,
+      ...Object.entries(item.fields ?? {}).map(([name, value]) => name + " = " + JSON.stringify(value))].join("\n");
+    button.style.left = ((first - start) / (end - start)) * 100 + "%";
+    button.style.width = ((last - first) / (end - start)) * 100 + "%";
+    button.onclick = () => {
+      cursorA = first;
+      request();
+    };
+    lane.items.append(button);
+  }
+  lane.status.textContent = result.warnings[0] ??
+    (result.truncated ? "结果已截断" : result.transactions.length ? "" : "窗口内无事务");
+}
+
+$("configureWaveDecoder").onclick = () => vscode.postMessage({ type: "configureWaveDecoder" });
 const key = WaveSignal.key;
 let selectedKeys = new Set<string>(),
   selectionAnchor = 0,
@@ -715,6 +827,7 @@ function add(signal) {
   request();
 }
 function request() {
+  scheduleDecoder();
   rebuildRows();
   persist();
   render();
@@ -2046,6 +2159,12 @@ window.addEventListener("message", async (e) => {
       });
       window.waveWorkflow?.editAnnotation();
     }
+  } else if (msg.type === "waveDecoderResult") {
+    const lane = decoderLanes.get(msg.instanceId);
+    if (lane && msg.request === lane.request) {
+      if (msg.error) lane.status.textContent = msg.error;
+      else showDecoderResult(lane, msg.decoded);
+    }
   } else if (msg.type === "scopeSelected") {
     window.waveWorkflow?.scope(msg.scope);
   } else if (msg.type === "commandLog") {
@@ -2180,6 +2299,7 @@ function snapshot(): WaveState & { chosen: Signal[] } {
     tagStyle: tagStyle(waveTagStyle.value),
     tagColors,
     showDecodedValues: showDecodedValues.checked,
+    ...(decoderInstances.length ? { decoderInstances } : {}),
     busLabelMode,
     rowHeight,
     namesFraction,
@@ -2191,6 +2311,33 @@ function snapshot(): WaveState & { chosen: Signal[] } {
 }
 async function uiAction(name, p) {
   if (name === "snapshot") return snapshot();
+  if (name === "decoderAttach") {
+    if (decoderInstances.length >= 4) throw Error("最多同时显示四条解码行。");
+    const instances = [...decoderInstances, p];
+    if (!validDecoderInstances(instances)) throw Error("无效的解码实例。");
+    decoderInstances = instances;
+    scheduleDecoder(p.instanceId);
+    publishProjectState();
+    return { instance: p };
+  }
+  if (name === "decoderDetach") {
+    const id = p?.instanceId ?? decoderInstances.at(-1)?.instanceId;
+    if (id) detachDecoder(id);
+    return { detached: !!id };
+  }
+  if (name === "decoderReload") {
+    const id = p?.instanceId ?? decoderInstances.at(-1)?.instanceId;
+    if (id) scheduleDecoder(id);
+    return { reloaded: !!id };
+  }
+  if (name === "decoderStatus")
+    return { instances: decoderInstances.map(instance => ({
+      instance, status: decoderLanes.get(instance.instanceId!)?.status.textContent ?? "",
+    })) };
+  if (name === "decoderRefresh") {
+    for (const { instanceId } of decoderInstances) scheduleDecoder(instanceId);
+    return;
+  }
   if (name === "tagAppearance") {
     if (p.style !== undefined) waveTagStyle.value = tagStyle(p.style);
     if (
@@ -2231,6 +2378,12 @@ async function uiAction(name, p) {
     return renderClipImage(p, busLabelMode, showDecodedValues.checked);
   if (name === "restoreView") {
     if (p.projectBaseline) projectSignature = undefined;
+    for (const [id, lane] of decoderLanes) {
+      cancelDecoder(id);
+      lane.lane.remove();
+    }
+    decoderLanes.clear();
+    decoderInstances = validDecoderInstances(p.decoderInstances) ? p.decoderInstances : [];
     virtualDefinitions = p.virtualDefinitions || [];
     chosen = p.chosen;
     data = {};

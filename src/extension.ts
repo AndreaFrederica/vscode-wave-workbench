@@ -17,6 +17,7 @@ import { normalizeTagColors, tagStyle } from "./shared/tags";
 import * as vscode from "vscode";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import { createWaveDocuments } from "./wave-documents";
 import { createWaveEditor } from "./wave-editor";
 import {
@@ -34,12 +35,15 @@ import {
 import { restoreView } from "./view-state";
 import { designSnapshot, readWaveProject, saveWaveProject } from "./project";
 import { createDecoderGroup, loadDecoderProfiles } from "./decoder-config";
+import { decoderRegistry } from "./decoder-runtime/registry";
+import { DecoderScheduler } from "./decoder-runtime/scheduler";
+import type { DecoderInstance } from "./decoder-runtime/types";
 import {
   builtinProfiles,
   decodeWord,
   supportsProfile,
 } from "./shared/decoders";
-import { findRtlSignals, readSignalsAt } from "./signal-lookup";
+import { findRtlSignals, findSignal, readSignalsAt } from "./signal-lookup";
 import { serveWaveMcp } from "./mcp";
 import {
   clipFormats,
@@ -64,9 +68,37 @@ function rtlValue(raw: string, width: number) {
 }
 
 function activate(context: vscode.ExtensionContext) {
+  const decoderScheduler = new DecoderScheduler(context.asAbsolutePath(
+    "bin/wave-backend-independent" + (process.platform === "win32" ? ".exe" : ""),
+  ));
   const output = vscode.window.createOutputChannel("Wave Workbench");
   context.subscriptions.push(output);
   const viewers = new Set<Viewer>();
+  const decoderFileWatch = vscode.workspace.createFileSystemWatcher?.(
+    "**/wave-decoders/{lua,javascript}/**/*",
+  );
+  if (decoderFileWatch) {
+    let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+    const reload = (uri: vscode.Uri) => {
+      clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => {
+        const root = vscode.workspace.getWorkspaceFolder(uri)?.uri.fsPath;
+        for (const viewer of viewers) {
+          const config = decoderConfigPath(viewer);
+          if (viewer.disposed || !viewer.meta || (root && config &&
+              path.dirname(path.dirname(config)) !== root)) continue;
+          void viewer.ui("decoderRefresh").catch(() => {});
+        }
+      }, 150);
+    };
+    context.subscriptions.push(
+      decoderFileWatch,
+      decoderFileWatch.onDidCreate(reload),
+      decoderFileWatch.onDidChange(reload),
+      decoderFileWatch.onDidDelete(reload),
+      { dispose: () => clearTimeout(reloadTimer) },
+    );
+  }
   const projectChanges = new vscode.EventEmitter<
     vscode.CustomDocumentContentChangeEvent<WaveDocument>
   >();
@@ -871,6 +903,7 @@ function activate(context: vscode.ExtensionContext) {
         getViewer: () => target,
         decoderProfiles: (viewer) =>
           loadDecoderProfiles(decoderConfigPath(viewer)),
+        decodeTransactions: decodeWindow,
         open: async (file) => {
           const filename = resolvePath(
             file,
@@ -981,6 +1014,73 @@ function activate(context: vscode.ExtensionContext) {
       vscode.workspace.workspaceFolders?.[0]
     )?.uri.fsPath;
     return root ? path.join(root, ".vscode", "wave-decoders.json") : undefined;
+  }
+  async function listWaveDecoders(viewer: Viewer) {
+    const config = decoderConfigPath(viewer);
+    const root = config && path.dirname(path.dirname(config));
+    return decoderRegistry(await loadDecoderProfiles(config), vscode.workspace.isTrusted ? root : undefined);
+  }
+  async function decodeWindow(viewer: Viewer, instance: DecoderInstance, start: string, end: string, signal?: AbortSignal) {
+    await viewer.ready;
+    const { definitions } = await listWaveDecoders(viewer);
+    const definition = definitions.get(instance.decoderId);
+    if (!definition) throw Error("Decoder not found or disabled: " + instance.decoderId);
+    if (instance.engine !== undefined && instance.engine !== definition.manifest.engine)
+      throw Error("The saved decoder engine no longer matches its definition.");
+    const backend = viewer.backend;
+    const meta = viewer.meta;
+    if (!instance.bindings || typeof instance.bindings !== "object" || Array.isArray(instance.bindings) ||
+        Object.keys(instance.bindings).some(id => !definition.manifest.inputs.some(input => input.id === id)))
+      throw Error("Invalid decoder signal binding.");
+    const bindings = await Promise.all(definition.manifest.inputs.map(async ({ id, width, required }) => {
+      const name = instance.bindings[id];
+      if (name === undefined && required === false) return null;
+      if (typeof name !== "string" || !name || name.length > 1024) throw Error("Bind decoder input " + id);
+      const bound = await findSignal(backend, name);
+      if (bound.width < 1 || bound.width > 4096 || (width !== undefined && bound.width !== width))
+        throw Error("Incompatible width for decoder input " + id);
+      return bound;
+    }));
+    if (!bindings.some(Boolean)) throw Error("Select at least one waveform signal.");
+    const decoded = await decoderScheduler.decode({ provider: { backend, meta }, definition, bindings,
+      options: instance.options, start, end, signal });
+    if (viewer.disposed || viewer.backend !== backend || viewer.meta !== meta) throw Error("The waveform changed during decoder replay.");
+    return decoded;
+  }
+  async function configureWaveDecoder(viewer: Viewer) {
+    const { definitions, warnings } = await listWaveDecoders(viewer);
+    for (const warning of warnings) output.appendLine(warning);
+    const choice = await vscode.window.showQuickPick([...definitions.values()].map(({ manifest }) => ({
+      label: manifest.name, description: manifest.engine + " · " + manifest.version, manifest,
+    })), { placeHolder: "选择波形事务解码器" });
+    if (!choice) return;
+    const selected: Signal | undefined = await viewer.ui("activeSignal");
+    const bindings: Record<string, string> = {};
+    for (const input of choice.manifest.inputs) {
+      const name = await vscode.window.showInputBox({
+        prompt: "绑定输入 " + input.id,
+        value: selected ? selected.scope + "." + selected.name : "",
+        validateInput: value => !value.trim() && input.required !== false ? "输入波形信号路径" : undefined,
+      });
+      if (name === undefined) return;
+      if (name.trim()) bindings[input.id] = name.trim();
+    }
+    const options = await vscode.window.showInputBox({
+      prompt: "解码参数（JSON 对象）", value: JSON.stringify(choice.manifest.options ?? {}),
+      validateInput(value) {
+        try {
+          const object = JSON.parse(value);
+          return !object || typeof object !== "object" || Array.isArray(object) ? "请输入 JSON 对象" : undefined;
+        } catch {
+          return "无效的 JSON";
+        }
+      },
+    });
+    if (options === undefined) return;
+    await viewer.ui("decoderAttach", {
+      instanceId: randomUUID(), decoderId: choice.manifest.id, engine: choice.manifest.engine,
+      bindings, options: JSON.parse(options),
+    });
   }
   async function editDecoderConfig(viewer: Viewer) {
     const legacy = decoderConfigPath(viewer);
@@ -1159,6 +1259,7 @@ function activate(context: vscode.ExtensionContext) {
       ...view,
       selected: scope.signals,
     });
+    await includeClipDecoder(viewer, clip, kind.format);
     const destination = await vscode.window.showSaveDialog({
       defaultUri: vscode.Uri.file(
         path.join(
@@ -1181,6 +1282,21 @@ function activate(context: vscode.ExtensionContext) {
         ? "波形已导出。部分信号达到事件上限，文件中已标记。"
         : "波形片段已导出。",
     );
+  }
+
+  async function includeClipDecoder(viewer: Viewer, clip: WaveClip, format: ClipFormat, signal?: AbortSignal) {
+    if (format !== "png" && format !== "json") return;
+    const view: WaveState = await viewer.ui("snapshot");
+    for (const instance of view?.decoderInstances ?? []) {
+      let result;
+      try {
+        result = await decodeWindow(viewer, instance, clip.start, String(BigInt(clip.end) + 1n), signal);
+      } catch (error) {
+        signal?.throwIfAborted();
+        result = { transactions: [], warnings: [String(error)], truncated: true };
+      }
+      (clip.decoders ??= []).push({ id: instance.decoderId, result });
+    }
   }
 
   async function runScript(uri?: vscode.Uri) {
@@ -1287,6 +1403,8 @@ function activate(context: vscode.ExtensionContext) {
       selectDecoder,
       editDecoderConfig,
       decoderConfigPath,
+      configureWaveDecoder,
+      decodeWindow,
       updateSidebarTags,
       saveActiveProject,
       openProject,
@@ -1614,6 +1732,34 @@ function activate(context: vscode.ExtensionContext) {
               ? [...viewers].find((v) => v.uri.fsPath === args.waveform)
               : current;
             if (!viewer) throw Error("Open a waveform first");
+            if (name === "wave_decoder_list") {
+              const { definitions, warnings } = await listWaveDecoders(viewer);
+              return { decoders: [...definitions.values()].map(({ manifest }) => manifest), warnings };
+            }
+            if (name === "wave_decoder_query") {
+              return decodeWindow(viewer, {
+                decoderId: String(args.decoderId),
+                bindings: args.bindings as DecoderInstance["bindings"],
+                options: args.options as DecoderInstance["options"],
+              }, String(args.start), String(args.end));
+            }
+            if (name === "wave_decoder_attach") {
+              const { definitions } = await listWaveDecoders(viewer);
+              const definition = definitions.get(String(args.decoderId));
+              if (!definition) throw Error("Decoder not found or disabled: " + args.decoderId);
+              const instance = {
+                instanceId: randomUUID(), decoderId: definition.manifest.id, engine: definition.manifest.engine,
+                bindings: args.bindings as DecoderInstance["bindings"], options: args.options as DecoderInstance["options"],
+              };
+              await viewer.ui("decoderAttach", instance);
+              return instance;
+            }
+            if (name === "wave_decoder_detach" || name === "wave_decoder_reload" || name === "wave_decoder_status") {
+              await viewer.ready;
+              return await viewer.ui(name === "wave_decoder_detach" ? "decoderDetach"
+                : name === "wave_decoder_reload" ? "decoderReload" : "decoderStatus",
+                { instanceId: args.instanceId });
+            }
             if (name === "wave_clip" || name === "wave_export") {
               await viewer.ready;
               if (!viewer.meta) throw Error("Waveform did not load");
@@ -1623,10 +1769,12 @@ function activate(context: vscode.ExtensionContext) {
                 args as ClipOptions,
                 name === "wave_clip",
               );
+              if (name === "wave_clip") await includeClipDecoder(viewer, clip, "json");
               if (name === "wave_clip") return clip;
               const format = args.format as ClipFormat;
               if (!clipFormats.includes(format))
                 throw Error("Unsupported clip format");
+              await includeClipDecoder(viewer, clip, format);
               return exportClipArtifact(
                 viewer,
                 clip,

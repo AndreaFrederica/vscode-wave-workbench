@@ -31,7 +31,10 @@ export function renderClipImage(
     rowHeight = 42,
     left = 360,
     right = width - 28;
-  const height = header + rowHeight * clip.traces.length + 34;
+  const height =
+    header +
+    rowHeight * (clip.traces.length + (clip.decoders?.length ?? 0)) +
+    34;
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
@@ -180,6 +183,20 @@ export function renderClipImage(
       [x, height - 31],
     ]);
     ctx.setLineDash([]);
+  }
+  for (const [index, decoder] of (clip.decoders ?? []).entries()) {
+    const middle = header + rowHeight * (clip.traces.length + index + 0.5);
+    ctx.fillStyle = colors.foreground;
+    label(decoder.id, 18, middle, left - 36);
+    for (const item of decoder.result.transactions) {
+      const first = xAt(Math.max(from, Number(item.start)));
+      const last = xAt(Math.min(to, Number(item.end)));
+      if (last <= first) continue;
+      ctx.strokeStyle =
+        item.severity && item.severity !== "info" ? colors.unknown : colors.bus;
+      ctx.strokeRect(first, middle - 11, last - first, 22);
+      label(item.label, first + 3, middle, last - first - 6);
+    }
   }
   ctx.fillStyle = clip.truncated ? colors.unknown : colors.muted;
   const markers = clip.markers

@@ -96,6 +96,7 @@ export interface WaveState {
   tagColors?: TagColors;
   tagStyle?: TagStyle;
   showDecodedValues?: boolean;
+  decoderInstances?: import("../decoder-runtime/types").DecoderInstance[];
   busLabelMode?: BusLabelMode;
   rowHeight?: number;
   namesFraction?: number;
@@ -139,7 +140,13 @@ export interface BackendProtocol {
   decoderRestoreState: { args: { state: import("../decoder-runtime/types").Json }; result: null };
   open: { args: { path: string }; result: Metadata };
   query: {
-    args: { signals: string[]; start: string; end: string; limit?: number };
+    args: {
+      signals: string[];
+      start: string;
+      end: string;
+      limit?: number;
+      preserveSameTick?: boolean;
+    };
     result: QueryResult;
   };
   describe: {
@@ -203,4 +210,5 @@ export interface WaveClip {
   eventLimitPerSignal: number;
   truncated: boolean;
   markers: Marker[];
+  decoders?: { id: string; result: import("../decoder-runtime/types").DecodeResult }[];
 }

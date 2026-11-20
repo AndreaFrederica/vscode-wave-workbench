@@ -94,9 +94,6 @@ pub fn parse_vcd(text: &str) -> Result<Vcd, String> {
                 return Err(format!("Unsupported VCD token: {t}"));
             };
             if let Some(events) = v.data.get_mut(id) {
-                if events.last().map(|e| e.0 == time).unwrap_or(false) {
-                    events.pop();
-                }
                 events.push((time, value));
                 count += 1;
                 if count > 2_000_000 {
@@ -112,14 +109,21 @@ pub fn parse_vcd(text: &str) -> Result<Vcd, String> {
 }
 pub fn window(events: &[(u64, String)], start: u64, end: u64, limit: usize) -> (Events, bool) {
     let i = events.partition_point(|e| e.0 <= start).saturating_sub(1);
-    let tail: Events = events[i..]
+    let mut result = Events::new();
+    let mut pending = events[i..]
         .iter()
-        .take_while(|e| e.0 <= end)
-        .take(limit.saturating_add(1))
-        .cloned()
-        .collect();
-    let truncated = tail.len() > limit;
-    (tail.into_iter().take(limit).collect(), truncated)
+        .take_while(|event| event.0 <= end)
+        .peekable();
+    while let Some(event) = pending.next() {
+        if pending.peek().is_some_and(|next| next.0 == event.0) {
+            continue;
+        }
+        if result.len() == limit {
+            return (result, true);
+        }
+        result.push(event.clone());
+    }
+    (result, false)
 }
 
 impl Vcd {
@@ -145,14 +149,32 @@ impl Vcd {
         end: u64,
         limit: usize,
     ) -> Result<(Events, bool), String> {
+        self.query_with_order(id, start, end, limit, false)
+    }
+
+    pub fn query_with_order(
+        &self,
+        id: &str,
+        start: u64,
+        end: u64,
+        limit: usize,
+        preserve_same_tick: bool,
+    ) -> Result<(Events, bool), String> {
         if start > end || !(1..=100000).contains(&limit) {
             return Err("Invalid VCD query bounds".into());
         }
-        Ok(window(
-            self.data.get(id).ok_or("Unknown signal")?,
-            start,
-            end,
-            limit,
+        let events = self.data.get(id).ok_or("Unknown signal")?;
+        if !preserve_same_tick {
+            return Ok(window(events, start, end, limit));
+        }
+        let first = events
+            .partition_point(|event| event.0 < start)
+            .saturating_sub(1);
+        let last = events.partition_point(|event| event.0 <= end);
+        let samples = &events[first..last];
+        Ok((
+            samples.iter().take(limit).cloned().collect(),
+            samples.len() > limit,
         ))
     }
 }
@@ -165,7 +187,14 @@ mod tests {
         assert_eq!(v.scale, "10ps");
         assert_eq!(v.signals.len(), 3);
         assert_eq!(v.signals[2].name, "bus[7:0]");
-        assert_eq!(v.data["!"][1], (5, "0".into()));
+        assert_eq!(v.query("!", 5, 5, 10).unwrap().0, [(5, "0".into())]);
+        assert_eq!(
+            v.query_with_order("!", 5, 5, 10, true).unwrap(),
+            (
+                vec![(0, "0".into()), (5, "1".into()), (5, "0".into())],
+                false
+            )
+        );
         assert_eq!(window(&v.data["!"], 6, 9, 10).0, vec![(5, "0".into())]);
         assert!(window(&v.data["!"], 0, 10, 1).1);
     }
