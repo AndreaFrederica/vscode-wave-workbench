@@ -36,3 +36,15 @@ Chromium 159.0.8154.6 with 15 runs after one warm-up at each size. Measures the 
 | 32 | 0.9 | 1.0 | 1.0 |
 | 512 | 5.5 | 12.8 | 12.8 |
 | 2048 | 26.1 | 40.3 | 40.3 |
+
+## Binary event batches
+
+The before and after runs use the same one-million-event VCD. Each run compares all 3,892 transactions across the three engines. Each median comes from three measured runs after one warm-up. Builtin and V8 read the column buffers directly. Lua receives the columns through the subprocess pipe. The [JSON report](results.json) records the dataset checksum and timings.
+
+| Engine | Batch before, ms | Batch after, ms | E2E before, ms | E2E after, ms |
+|---|---:|---:|---:|---:|
+| builtin | 671.9 | 665.1 | 5751.9 | 5898.3 |
+| lua | 4787.3 | 4516.9 | 8426.6 | 8296.3 |
+| javascript | 1096.1 | 1100.6 | 5657.3 | 5762.7 |
+
+With binary input, reading the columns and building Lua event tables inside the native process took 4,426.3 ms. Calling the Lua script took 59.3 ms. The measured batch time fell by 5.6%.

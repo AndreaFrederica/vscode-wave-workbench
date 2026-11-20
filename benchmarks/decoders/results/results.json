@@ -502,5 +502,283 @@
         "p99": 40.30000019073486
       }
     ]
+  },
+  "binaryProtocolComparison": {
+    "before": {
+      "revision": "e0a019d",
+      "dirty": true,
+      "os": "Linux 4.18.0-553.el8_10.x86_64",
+      "arch": "x64",
+      "cpu": "AMD EPYC 7K62 48-Core Processor",
+      "seed": 961734731,
+      "rust": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+      "node": "v24.14.0",
+      "v8": "13.6.233.17-node.41",
+      "lua": "LuaJIT 2.1 via mlua 0.12.2 built with Cargo --release",
+      "repeats": 3,
+      "warmup": 1,
+      "scenario": "equivalent eight-bit rule with stateful interval accumulation",
+      "results": [
+        {
+          "engine": "builtin",
+          "events": 1000000,
+          "transactions": 3892,
+          "datasetSha256": "59e5b13df5f202bc4a9a841aa6c5d6b0f56e1a5bc7548723c8f2ce11b0cc08b3",
+          "setupMs": {
+            "p50": 0.029,
+            "p95": 0.031,
+            "p99": 0.031
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 671.884,
+            "p95": 679.234,
+            "p99": 679.234
+          },
+          "engineExecutionMs": {
+            "p50": 671.884,
+            "p95": 679.234,
+            "p99": 679.234
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 0,
+            "p95": 0,
+            "p99": 0
+          },
+          "transactionsPerSecond": 5793,
+          "endToEndMs": {
+            "p50": 5751.888,
+            "p95": 5841.298,
+            "p99": 5841.298
+          },
+          "cachedResultMs": {
+            "p50": 4.241,
+            "p95": 4.296,
+            "p99": 4.296
+          },
+          "hostPeakRssKiB": 280168,
+          "eventsPerSecond": 1488352
+        },
+        {
+          "engine": "lua",
+          "events": 1000000,
+          "transactions": 3892,
+          "datasetSha256": "59e5b13df5f202bc4a9a841aa6c5d6b0f56e1a5bc7548723c8f2ce11b0cc08b3",
+          "setupMs": {
+            "p50": 9.644,
+            "p95": 10.841,
+            "p99": 10.841
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 4787.303,
+            "p95": 4832.666,
+            "p99": 4832.666
+          },
+          "engineExecutionMs": {
+            "p50": 60.746,
+            "p95": 60.964,
+            "p99": 60.964
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 4726.339,
+            "p95": 4772.373,
+            "p99": 4772.373
+          },
+          "transactionsPerSecond": 813,
+          "endToEndMs": {
+            "p50": 8426.616,
+            "p95": 9494.545,
+            "p99": 9494.545
+          },
+          "cachedResultMs": {
+            "p50": 4.096,
+            "p95": 4.118,
+            "p99": 4.118
+          },
+          "hostPeakRssKiB": 318508,
+          "eventsPerSecond": 208886
+        },
+        {
+          "engine": "javascript",
+          "events": 1000000,
+          "transactions": 3892,
+          "datasetSha256": "59e5b13df5f202bc4a9a841aa6c5d6b0f56e1a5bc7548723c8f2ce11b0cc08b3",
+          "setupMs": {
+            "p50": 52.062,
+            "p95": 59.7,
+            "p99": 59.7
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 1096.067,
+            "p95": 1097.439,
+            "p99": 1097.439
+          },
+          "engineExecutionMs": {
+            "p50": 1064.266,
+            "p95": 1065.986,
+            "p99": 1065.986
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 32.472,
+            "p95": 33.173,
+            "p99": 33.173
+          },
+          "transactionsPerSecond": 3551,
+          "endToEndMs": {
+            "p50": 5657.271,
+            "p95": 5975.195,
+            "p99": 5975.195
+          },
+          "cachedResultMs": {
+            "p50": 4.2,
+            "p95": 4.412,
+            "p99": 4.412
+          },
+          "hostPeakRssKiB": 320412,
+          "eventsPerSecond": 912353
+        }
+      ]
+    },
+    "after": {
+      "revision": "a661b2c",
+      "dirty": true,
+      "os": "Linux 4.18.0-553.el8_10.x86_64",
+      "arch": "x64",
+      "cpu": "AMD EPYC 7K62 48-Core Processor",
+      "seed": 961734731,
+      "rust": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+      "node": "v24.14.0",
+      "v8": "13.6.233.17-node.41",
+      "lua": "LuaJIT 2.1 via mlua 0.12.2 built with Cargo --release",
+      "eventBatchVersion": 1,
+      "repeats": 3,
+      "warmup": 1,
+      "scenario": "equivalent eight-bit rule with stateful interval accumulation",
+      "results": [
+        {
+          "engine": "builtin",
+          "events": 1000000,
+          "transactions": 3892,
+          "datasetSha256": "59e5b13df5f202bc4a9a841aa6c5d6b0f56e1a5bc7548723c8f2ce11b0cc08b3",
+          "setupMs": {
+            "p50": 0.111,
+            "p95": 0.123,
+            "p99": 0.123
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 665.083,
+            "p95": 688.283,
+            "p99": 688.283
+          },
+          "engineExecutionMs": {
+            "p50": 665.083,
+            "p95": 688.283,
+            "p99": 688.283
+          },
+          "luaPreparationMs": null,
+          "boundaryAndPreparationMs": {
+            "p50": 0,
+            "p95": 0,
+            "p99": 0
+          },
+          "transactionsPerSecond": 5852,
+          "endToEndMs": {
+            "p50": 5898.307,
+            "p95": 6045.998,
+            "p99": 6045.998
+          },
+          "cachedResultMs": {
+            "p50": 4.406,
+            "p95": 4.59,
+            "p99": 4.59
+          },
+          "hostPeakRssKiB": 255660,
+          "eventsPerSecond": 1503572
+        },
+        {
+          "engine": "lua",
+          "events": 1000000,
+          "transactions": 3892,
+          "datasetSha256": "59e5b13df5f202bc4a9a841aa6c5d6b0f56e1a5bc7548723c8f2ce11b0cc08b3",
+          "setupMs": {
+            "p50": 12.734,
+            "p95": 12.792,
+            "p99": 12.792
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 4516.9,
+            "p95": 4560.718,
+            "p99": 4560.718
+          },
+          "engineExecutionMs": {
+            "p50": 59.258,
+            "p95": 62.327,
+            "p99": 62.327
+          },
+          "luaPreparationMs": {
+            "p50": 4426.282,
+            "p95": 4459.121,
+            "p99": 4459.121
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 4458.408,
+            "p95": 4498.391,
+            "p99": 4498.391
+          },
+          "transactionsPerSecond": 862,
+          "endToEndMs": {
+            "p50": 8296.286,
+            "p95": 8444.641,
+            "p99": 8444.641
+          },
+          "cachedResultMs": {
+            "p50": 4.392,
+            "p95": 4.469,
+            "p99": 4.469
+          },
+          "hostPeakRssKiB": 256264,
+          "eventsPerSecond": 221391
+        },
+        {
+          "engine": "javascript",
+          "events": 1000000,
+          "transactions": 3892,
+          "datasetSha256": "59e5b13df5f202bc4a9a841aa6c5d6b0f56e1a5bc7548723c8f2ce11b0cc08b3",
+          "setupMs": {
+            "p50": 44.367,
+            "p95": 45.332,
+            "p99": 45.332
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 1100.558,
+            "p95": 1103.418,
+            "p99": 1103.418
+          },
+          "engineExecutionMs": {
+            "p50": 1064.054,
+            "p95": 1070.009,
+            "p99": 1070.009
+          },
+          "luaPreparationMs": null,
+          "boundaryAndPreparationMs": {
+            "p50": 33.49,
+            "p95": 36.503,
+            "p99": 36.503
+          },
+          "transactionsPerSecond": 3536,
+          "endToEndMs": {
+            "p50": 5762.668,
+            "p95": 5839.685,
+            "p99": 5839.685
+          },
+          "cachedResultMs": {
+            "p50": 4.29,
+            "p95": 8.307,
+            "p99": 8.307
+          },
+          "hostPeakRssKiB": 322756,
+          "eventsPerSecond": 908630
+        }
+      ]
+    }
   }
 }
