@@ -4,6 +4,7 @@ import { parentPort, workerData } from "node:worker_threads";
 import { runInNewContext } from "node:vm";
 import { scriptEvents } from "./event-batch";
 import {
+  maxBatchEvents,
   maxTransactions,
   readCheckpoint,
   validateResult,
@@ -13,10 +14,11 @@ import {
   type Json,
 } from "./types";
 
-const { source, filename, context } = workerData as {
+const { source, filename, context, measure } = workerData as {
   source: string;
   filename: string;
   context: DecoderContext;
+  measure: boolean;
 };
 const channel = parentPort!;
 let result: DecodeResult;
@@ -29,6 +31,12 @@ const ctx = Object.freeze({
     if (result.transactions.length >= maxTransactions)
       throw Error("Decoder transaction limit exceeded.");
     result.transactions.push(JSON.parse(JSON.stringify(value)));
+  },
+  emitVirtualSample(id: string, width: number, tick: string, value: string) {
+    const samples = (result.virtualSamples ??= []);
+    if (samples.length >= maxBatchEvents)
+      throw Error("Decoder virtual sample limit exceeded.");
+    samples.push({ id, width, tick, value });
   },
   reportDiagnostic(message: string) {
     if (result.warnings.length >= 64)
@@ -85,12 +93,14 @@ channel.on(
       }
       const { batch } = command;
       result = { transactions: [], warnings: [], truncated: false };
+      const started = measure ? performance.now() : 0;
       const returned = batch
         ? decoder.decode(ctx, state, scriptEvents(batch))
         : decoder.flush?.(ctx, state);
       if ((returned as PromiseLike<unknown> | undefined)?.then)
         throw Error("Decoder functions must be synchronous.");
-      channel.postMessage({ result: validateResult(result) });
+      const engineMs = measure ? performance.now() - started : undefined;
+      channel.postMessage({ result: validateResult(result), engineMs });
     } catch (error) {
       channel.postMessage({ error: String(error).slice(0, 4096) });
     }

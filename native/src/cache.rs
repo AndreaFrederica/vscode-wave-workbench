@@ -12,6 +12,7 @@ pub struct Key {
     pub start: u64,
     pub end: u64,
     pub limit: usize,
+    pub ordered: bool,
 }
 pub struct Block {
     pub events: Events,
@@ -62,7 +63,9 @@ impl Cache {
             .entries
             .iter()
             .filter(|(k, v)| {
-                k.signal == key.signal
+                !key.ordered
+                    && !k.ordered
+                    && k.signal == key.signal
                     && k.start <= key.start
                     && k.end >= key.end
                     && !v.block.truncated
@@ -145,6 +148,7 @@ mod tests {
             start,
             end,
             limit,
+            ordered: false,
         }
     }
     fn block(truncated: bool) -> Arc<Block> {
@@ -165,6 +169,26 @@ mod tests {
         c.insert(key("b", 0, 30, 1), block(true));
         assert!(c.get(&key("b", 12, 25, 10)).is_none());
         assert_eq!(c.stats.containing_hits, 2);
+    }
+    #[test]
+    fn ordered_reads_use_exact_ordered_entries() {
+        let mut cache = Cache::new(8192);
+        let normal = key("a", 0, 30, 10);
+        let ordered = Key {
+            ordered: true,
+            ..normal.clone()
+        };
+        cache.insert(normal.clone(), block(false));
+        assert!(cache.get(&ordered).is_none());
+        cache.insert(ordered.clone(), block(false));
+        assert!(cache.get(&ordered).is_some());
+        assert!(cache
+            .get(&Key {
+                start: 10,
+                ..ordered
+            })
+            .is_none());
+        assert!(cache.get(&normal).is_some());
     }
     #[test]
     fn bounded_lru_disabled_and_oversized() {

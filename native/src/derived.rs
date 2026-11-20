@@ -18,9 +18,44 @@ pub struct Input {
 pub struct Definition {
     pub op: String,
     pub inputs: Vec<Input>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<Vec<(String, String)>>,
 }
 impl Definition {
     pub fn width(&self, widths: &[u32]) -> Result<u32, String> {
+        if self.op == "samples" {
+            let width = self
+                .width
+                .filter(|n| (1..=256).contains(n))
+                .ok_or("Invalid sampled virtual width")?;
+            let samples = self.samples.as_ref().ok_or("Missing virtual samples")?;
+            if !self
+                .source
+                .as_ref()
+                .is_some_and(|name| !name.is_empty() && name.len() <= 130)
+                || !self.inputs.is_empty()
+                || samples.is_empty()
+                || samples.len() > 4097
+                || samples.iter().any(|(tick, value)| {
+                    tick.parse::<u64>().is_err()
+                        || value.len() != width as usize
+                        || !value.bytes().all(|c| b"01xz".contains(&c))
+                })
+                || samples
+                    .windows(2)
+                    .any(|pair| pair[0].0.parse::<u64>().ok() >= pair[1].0.parse::<u64>().ok())
+            {
+                return Err("Invalid sampled virtual definition".into());
+            }
+            return Ok(width);
+        }
+        if self.width.is_some() || self.samples.is_some() || self.source.is_some() {
+            return Err("Virtual expression cannot have recorded samples".into());
+        }
         if self.inputs.is_empty() || self.inputs.len() > 64 {
             return Err("Select 1–64 operands".into());
         }
@@ -132,6 +167,14 @@ pub fn compute(
         .map(|(w, i)| if i.bit_offset.is_some() { 1 } else { *w })
         .collect();
     let width = def.width(&projected)?;
+    if let Some(samples) = &def.samples {
+        let events: Events = samples
+            .iter()
+            .map(|(tick, value)| (tick.parse().unwrap(), value.clone()))
+            .collect();
+        let (events, truncated) = wavebench_reader::vcd::window(&events, start, end, limit);
+        return Ok(Block { events, truncated });
+    }
     let mut safe_end = end;
     let mut truncated = false;
     for b in blocks {
@@ -199,6 +242,9 @@ mod tests {
     #[test]
     fn simultaneous_changes_and_truncation() {
         let d = Definition {
+            width: None,
+            source: None,
+            samples: None,
             op: "xor".into(),
             inputs: vec![
                 Input {

@@ -6,6 +6,7 @@ use serde_json::{json, Value as Json};
 use std::cell::RefCell;
 use std::io::{self, BufRead, Write};
 use std::rc::Rc;
+use std::time::Instant;
 
 #[derive(Deserialize)]
 struct Batch {
@@ -25,10 +26,12 @@ struct Runtime {
     state: Value,
     transactions: Rc<RefCell<Vec<Json>>>,
     diagnostics: Rc<RefCell<Vec<String>>>,
+    virtual_samples: Rc<RefCell<Vec<Json>>>,
+    measure: bool,
 }
 
 impl Runtime {
-    fn new(source: &str, context: Json) -> mlua::Result<Self> {
+    fn new(source: &str, context: Json, measure: bool) -> mlua::Result<Self> {
         let lua = Lua::new_with(
             StdLib::TABLE | StdLib::STRING | StdLib::MATH,
             LuaOptions::default(),
@@ -57,6 +60,27 @@ impl Runtime {
                 output.push(value);
                 Ok(())
             })?,
+        )?;
+        let virtual_samples = Rc::new(RefCell::new(Vec::new()));
+        let samples = virtual_samples.clone();
+        context.set(
+            "emitVirtualSample",
+            lua.create_function(
+                move |_, (id, width, tick, value): (String, u32, String, String)| {
+                    let mut samples = samples.borrow_mut();
+                    if samples.len() >= 4096
+                        || id.len() > 64
+                        || tick.len() > 80
+                        || value.len() > 256
+                    {
+                        return Err(mlua::Error::runtime(
+                            "Decoder virtual sample limit exceeded",
+                        ));
+                    }
+                    samples.push(json!({ "id": id, "width": width, "tick": tick, "value": value }));
+                    Ok(())
+                },
+            )?,
         )?;
         let diagnostics = Rc::new(RefCell::new(Vec::new()));
         let warnings = diagnostics.clone();
@@ -106,6 +130,8 @@ impl Runtime {
             state,
             transactions,
             diagnostics,
+            virtual_samples,
+            measure,
         })
     }
 
@@ -137,19 +163,21 @@ impl Runtime {
         batch.set("end", input.end)?;
         batch.set("initial", self.lua.to_value(&input.initial)?)?;
         batch.set("events", events)?;
+        let started = self.measure.then(Instant::now);
         self.module.get::<Function>("decode")?.call::<()>((
             self.context.clone(),
             self.state.clone(),
             batch,
         ))?;
-        Ok(self.take_result())
+        Ok(self.take_result(started))
     }
 
     fn flush(&self) -> mlua::Result<Json> {
+        let started = self.measure.then(Instant::now);
         if let Some(flush) = self.module.get::<Option<Function>>("flush")? {
             flush.call::<()>((self.context.clone(), self.state.clone()))?;
         }
-        Ok(self.take_result())
+        Ok(self.take_result(started))
     }
 
     fn save(&self) -> mlua::Result<Json> {
@@ -172,12 +200,21 @@ impl Runtime {
         Ok(Json::Null)
     }
 
-    fn take_result(&self) -> Json {
-        json!({
+    fn take_result(&self, started: Option<Instant>) -> Json {
+        let elapsed = started.map(|t| t.elapsed().as_secs_f64() * 1000.0);
+        let mut result = json!({
             "transactions": self.transactions.take(),
             "warnings": self.diagnostics.take(),
             "truncated": false,
-        })
+        });
+        if let Some(milliseconds) = elapsed {
+            result["engineMs"] = json!(milliseconds);
+        }
+        let samples = self.virtual_samples.take();
+        if !samples.is_empty() {
+            result["virtualSamples"] = json!(samples);
+        }
+        result
     }
 }
 
@@ -190,6 +227,7 @@ pub fn run() -> io::Result<()> {
             Some("decoderInit") => Runtime::new(
                 request["source"].as_str().unwrap_or(""),
                 request["context"].clone(),
+                request["measure"].as_bool().unwrap_or(false),
             )
             .map(|created| {
                 runtime = Some(created);

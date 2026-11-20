@@ -16,11 +16,13 @@ import {
 export function javascriptRuntime(
   definition: DecoderDefinition,
   context: DecoderContext,
+  reportTime?: (engineMs: number) => void,
 ): DecoderRuntime {
   const worker = new Worker(path.join(__dirname, "worker.js"), {
     workerData: {
       source: definition.source,
       filename: definition.filename,
+      measure: !!reportTime,
       context,
     },
     resourceLimits: { maxOldGenerationSizeMb: 64, stackSizeMb: 4 },
@@ -37,9 +39,11 @@ export function javascriptRuntime(
   worker.on("exit", (code) =>
     fail(Error("Decoder worker exited (" + code + ").")),
   );
-  worker.on("message", ({ result, error }) =>
-    error ? fail(Error(error)) : pending?.resolve(result),
-  );
+  worker.on("message", ({ result, error, engineMs }) => {
+    if (typeof engineMs === "number") reportTime?.(engineMs);
+    if (error) pending?.reject(Error(error));
+    else pending?.resolve(result);
+  });
   async function request(
     command: { batch?: EventBatch; save?: boolean; restore?: Json },
     signal: AbortSignal,
@@ -86,6 +90,7 @@ export async function luaRuntime(
   definition: DecoderDefinition,
   context: DecoderContext,
   signal: AbortSignal,
+  reportTime?: (engineMs: number) => void,
 ): Promise<DecoderRuntime> {
   signal.throwIfAborted();
   const backend = new Backend(binary, {
@@ -98,15 +103,21 @@ export async function luaRuntime(
     await backend.request("decoderInit", {
       source: definition.source!,
       context,
+      measure: !!reportTime,
     });
   } catch (error) {
     signal.removeEventListener("abort", close);
     close();
     throw error;
   }
+  function measured(result: unknown) {
+    const { engineMs, ...payload } = result as { engineMs?: number };
+    if (typeof engineMs === "number") reportTime?.(engineMs);
+    return validateResult(payload);
+  }
   return {
     async decode(batch) {
-      return validateResult(
+      return measured(
         await backend.request("decoderBatch", {
           start: batch.start,
           end: batch.end,
@@ -119,7 +130,7 @@ export async function luaRuntime(
       );
     },
     async flush() {
-      return validateResult(await backend.request("decoderFlush"));
+      return measured(await backend.request("decoderFlush"));
     },
     async saveState() {
       return readCheckpoint(await backend.request("decoderSaveState"));

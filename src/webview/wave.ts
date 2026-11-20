@@ -5,7 +5,11 @@
 
 import { getElement as $ } from "./dom";
 import { renderClipImage } from "./clip-image";
-import { validDecoderInstances, type DecoderInstance, type DecodeResult } from "../decoder-runtime/types";
+import {
+  validDecoderInstances,
+  type DecoderInstance,
+  type DecodeResult,
+} from "../decoder-runtime/types";
 import { drawBusLabel } from "./bus-label";
 import { scaleSeconds } from "../shared/time";
 import { renderTags } from "./tags";
@@ -91,7 +95,9 @@ let generation = 0,
   searchRequest = 0,
   searchTimer;
 const saved = vscode.getState() || {};
-let decoderInstances = validDecoderInstances(saved.decoderInstances) ? saved.decoderInstances : [];
+let decoderInstances = validDecoderInstances(saved.decoderInstances)
+  ? saved.decoderInstances
+  : [];
 let decoderRequest = 0;
 interface DecoderLane {
   lane: HTMLElement;
@@ -115,7 +121,9 @@ function detachDecoder(id: string) {
   cancelDecoder(id);
   decoderLanes.get(id)?.lane.remove();
   decoderLanes.delete(id);
-  decoderInstances = decoderInstances.filter((instance) => instance.instanceId !== id);
+  decoderInstances = decoderInstances.filter(
+    (instance) => instance.instanceId !== id,
+  );
   publishProjectState();
 }
 
@@ -130,10 +138,23 @@ function mountDecoder(id: string, name: string): DecoderLane {
   controls.append(label);
   for (const [title, action] of [
     ["重载", () => scheduleDecoder(id)],
-    ["取消", () => {
-      cancelDecoder(id);
-      decoderLanes.get(id)!.status.textContent = "已取消";
-    }],
+    [
+      "取消",
+      () => {
+        cancelDecoder(id);
+        decoderLanes.get(id)!.status.textContent = "已取消";
+      },
+    ],
+    [
+      "生成虚拟信号",
+      () => {
+        const instance = decoderInstances.find(
+          (item) => item.instanceId === id,
+        );
+        if (instance)
+          vscode.postMessage({ type: "materializeDecoderSignal", instance });
+      },
+    ],
     ["移除", () => detachDecoder(id)],
   ] as const) {
     const button = document.createElement("button");
@@ -157,7 +178,8 @@ function mountDecoder(id: string, name: string): DecoderLane {
 }
 
 function scheduleDecoder(refresh?: string) {
-  if (!meta || !Number.isSafeInteger(start) || !Number.isSafeInteger(end)) return;
+  if (!meta || !Number.isSafeInteger(start) || !Number.isSafeInteger(end))
+    return;
   const last = end === Number(meta.end) ? BigInt(end) + 1n : BigInt(end);
   for (const instance of decoderInstances) {
     const id = instance.instanceId!;
@@ -166,12 +188,20 @@ function scheduleDecoder(refresh?: string) {
     if (lane.key === key && refresh !== id) continue;
     cancelDecoder(id);
     lane.key = key;
-    const request = lane.request = ++decoderRequest;
+    const request = (lane.request = ++decoderRequest);
     lane.items.replaceChildren();
     lane.status.textContent = "解码中…";
-    lane.timer = setTimeout(() => vscode.postMessage({
-      type: "queryWaveDecoder", instance, request, start: String(start), end: String(last),
-    }), 180);
+    lane.timer = setTimeout(
+      () =>
+        vscode.postMessage({
+          type: "queryWaveDecoder",
+          instance,
+          request,
+          start: String(start),
+          end: String(last),
+        }),
+      180,
+    );
   }
 }
 
@@ -187,8 +217,13 @@ function showDecoderResult(
     const button = document.createElement("button");
     button.className = "decoderTransaction " + (item.severity ?? "");
     button.textContent = item.label;
-    button.title = [item.start + " → " + item.end, item.label,
-      ...Object.entries(item.fields ?? {}).map(([name, value]) => name + " = " + JSON.stringify(value))].join("\n");
+    button.title = [
+      item.start + " → " + item.end,
+      item.label,
+      ...Object.entries(item.fields ?? {}).map(
+        ([name, value]) => name + " = " + JSON.stringify(value),
+      ),
+    ].join("\n");
     button.style.left = ((first - start) / (end - start)) * 100 + "%";
     button.style.width = ((last - first) / (end - start)) * 100 + "%";
     button.onclick = () => {
@@ -197,11 +232,19 @@ function showDecoderResult(
     };
     lane.items.append(button);
   }
-  lane.status.textContent = result.warnings[0] ??
-    (result.truncated ? "结果已截断" : result.transactions.length ? "" : "窗口内无事务");
+  lane.status.textContent =
+    result.warnings[0] ??
+    (result.truncated
+      ? "结果已截断"
+      : result.transactions.length
+        ? ""
+        : "窗口内无事务");
 }
 
-$("configureWaveDecoder").onclick = () => vscode.postMessage({ type: "configureWaveDecoder" });
+$("configureWaveDecoder").onclick = () =>
+  vscode.postMessage({ type: "configureWaveDecoder" });
+$("manageWaveDecoders").onclick = () =>
+  vscode.postMessage({ type: "manageWaveDecoders" });
 const key = WaveSignal.key;
 let selectedKeys = new Set<string>(),
   selectionAnchor = 0,
@@ -258,10 +301,10 @@ function normalizeValueFraction(value: unknown) {
 function applyTrackLayout() {
   const tracks = $("tracks");
   tracks.style.setProperty("--wave-row-height", rowHeight + "px");
-  tracks.style.setProperty(
-    "--wave-names-width",
-    namesFraction === undefined ? "280px" : namesFraction * 100 + "%",
-  );
+  const namesWidth =
+    namesFraction === undefined ? "280px" : namesFraction * 100 + "%";
+  tracks.style.setProperty("--wave-names-width", namesWidth);
+  $("decoderTracks").style.setProperty("--wave-names-width", namesWidth);
   ($("waveRowHeight") as HTMLInputElement).value = String(rowHeight);
   $("waveSplit").setAttribute(
     "aria-valuenow",
@@ -2331,9 +2374,13 @@ async function uiAction(name, p) {
     return { reloaded: !!id };
   }
   if (name === "decoderStatus")
-    return { instances: decoderInstances.map(instance => ({
-      instance, status: decoderLanes.get(instance.instanceId!)?.status.textContent ?? "",
-    })) };
+    return {
+      instances: decoderInstances.map((instance) => ({
+        instance,
+        status:
+          decoderLanes.get(instance.instanceId!)?.status.textContent ?? "",
+      })),
+    };
   if (name === "decoderRefresh") {
     for (const { instanceId } of decoderInstances) scheduleDecoder(instanceId);
     return;
@@ -2383,7 +2430,9 @@ async function uiAction(name, p) {
       lane.lane.remove();
     }
     decoderLanes.clear();
-    decoderInstances = validDecoderInstances(p.decoderInstances) ? p.decoderInstances : [];
+    decoderInstances = validDecoderInstances(p.decoderInstances)
+      ? p.decoderInstances
+      : [];
     virtualDefinitions = p.virtualDefinitions || [];
     chosen = p.chosen;
     data = {};

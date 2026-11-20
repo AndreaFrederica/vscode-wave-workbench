@@ -8,6 +8,7 @@ import { readEventBatches } from "./event-batch";
 import type { DecoderDefinition } from "./registry";
 import { javascriptRuntime, luaRuntime } from "./script-runtimes";
 import {
+  maxBatchEvents,
   maxTransactions,
   readOptions,
   tickPattern,
@@ -137,6 +138,23 @@ export class DecoderScheduler {
             }
             result.transactions.push(item);
           }
+          if (
+            batch.virtualSamples?.length &&
+            !definition.manifest.capabilities?.virtualSignals
+          )
+            throw Error(
+              "Decoder must declare virtualSignals to emit virtual samples.",
+            );
+          for (const sample of batch.virtualSamples ?? []) {
+            const tick = BigInt(sample.tick);
+            if (tick < start || tick >= end) continue;
+            const samples = (result.virtualSamples ??= []);
+            if (samples.length === maxBatchEvents) {
+              result.truncated = true;
+              break;
+            }
+            samples.push(sample);
+          }
           result.warnings = [
             ...new Set([...result.warnings, ...batch.warnings]),
           ].slice(0, 64);
@@ -161,6 +179,14 @@ export class DecoderScheduler {
               )
             )
               throw Error("Decoder emitted a transaction before its end tick.");
+            if (
+              decoded.virtualSamples?.some(
+                (sample) =>
+                  BigInt(sample.tick) < BigInt(batch.start) ||
+                  BigInt(sample.tick) >= BigInt(batch.end),
+              )
+            )
+              throw Error("Decoder virtual sample is outside its input batch.");
             collect(decoded);
           }
         }
@@ -170,20 +196,31 @@ export class DecoderScheduler {
           replayStart < start
         ) {
           await consume(replayStart, start);
-          const state = await runtime.saveState(signal);
-          const list = checkpointCache.get(stateKey) ?? [];
-          if (!checkpointCache.has(stateKey) && checkpointCache.size >= 8)
-            checkpointCache.delete(checkpointCache.keys().next().value!);
-          checkpointCache.set(
-            stateKey,
-            [
-              ...list.filter((item) => item.tick !== start),
-              { tick: start, state },
-            ]
-              .sort((a, b) => (a.tick < b.tick ? -1 : 1))
-              .slice(-8),
-          );
-          replayStart = start;
+          try {
+            const state = await runtime.saveState(signal);
+            const list = checkpointCache.get(stateKey) ?? [];
+            if (!checkpointCache.has(stateKey) && checkpointCache.size >= 8)
+              checkpointCache.delete(checkpointCache.keys().next().value!);
+            checkpointCache.set(
+              stateKey,
+              [
+                ...list.filter((item) => item.tick !== start),
+                { tick: start, state },
+              ]
+                .sort((a, b) => (a.tick < b.tick ? -1 : 1))
+                .slice(-8),
+            );
+            replayStart = start;
+          } catch {
+            runtime.dispose();
+            signal.throwIfAborted();
+            checkpointCache.delete(stateKey);
+            runtime = await open();
+            replayStart = BigInt(meta.start);
+            result.warnings.push(
+              "Decoder checkpoint could not be saved. Replaying from the waveform start.",
+            );
+          }
         }
         // Replay through EOF to include transactions that close after the selected window.
         await consume(replayStart, BigInt(meta.end) + 1n);

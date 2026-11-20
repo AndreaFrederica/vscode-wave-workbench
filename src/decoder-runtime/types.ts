@@ -22,7 +22,7 @@ export interface DecoderManifest {
   entry?: string;
   inputs: DecoderInput[];
   options?: Record<string, Json>;
-  capabilities?: { checkpoints?: boolean };
+  capabilities?: { checkpoints?: boolean; virtualSignals?: boolean };
 }
 export interface DecoderInstance {
   instanceId?: string;
@@ -44,7 +44,14 @@ export interface DecoderTransaction {
   fields?: Record<string, Json>;
   severity?: "info" | "warning" | "error";
 }
+export interface DecodeVirtualSample {
+  id: string;
+  width: number;
+  tick: string;
+  value: string;
+}
 export interface DecodeResult {
+  virtualSamples?: DecodeVirtualSample[];
   transactions: DecoderTransaction[];
   warnings: string[];
   truncated: boolean;
@@ -104,6 +111,29 @@ export function validateResult(result: unknown): DecodeResult {
           JSON.stringify(transaction.fields).length > 8192))
     )
       throw Error("Invalid decoder transaction.");
+  }
+  if (entry.virtualSamples !== undefined) {
+    if (
+      !Array.isArray(entry.virtualSamples) ||
+      entry.virtualSamples.length > maxBatchEvents
+    )
+      throw Error("Too many virtual samples.");
+    for (const sample of entry.virtualSamples) {
+      if (
+        !sample ||
+        typeof sample.id !== "string" ||
+        !idPattern.test(sample.id) ||
+        typeof sample.tick !== "string" ||
+        !tickPattern.test(sample.tick) ||
+        !Number.isInteger(sample.width) ||
+        sample.width < 1 ||
+        sample.width > 256 ||
+        typeof sample.value !== "string" ||
+        sample.value.length !== sample.width ||
+        !/^[01xz]+$/.test(sample.value)
+      )
+        throw Error("Invalid virtual sample.");
+    }
   }
   return entry;
 }

@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import { createHash } from "node:crypto";
-import { readFile, realpath, readdir, stat } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  realpath,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import * as path from "node:path";
 import type { DecoderProfile } from "../shared/decoders";
 import { idPattern, readOptions, type DecoderManifest } from "./types";
@@ -11,6 +19,7 @@ export type DecoderDefinition = {
   hash: string;
   source?: string;
   filename?: string;
+  directory?: string;
   profile?: DecoderProfile;
 };
 
@@ -59,7 +68,10 @@ function validateManifest(raw: unknown): DecoderManifest {
     entry: item.entry,
     inputs,
     options: readOptions(item.options),
-    capabilities: { checkpoints: item.capabilities?.checkpoints === true },
+    capabilities: {
+      checkpoints: item.capabilities?.checkpoints === true,
+      virtualSignals: item.capabilities?.virtualSignals === true,
+    },
   };
 }
 
@@ -153,7 +165,13 @@ export async function decoderRegistry(
             .update("\0")
             .update(source)
             .digest("hex");
-          definitions.set(manifest.id, { manifest, hash, source, filename });
+          definitions.set(manifest.id, {
+            manifest,
+            hash,
+            source,
+            filename,
+            directory,
+          });
         } catch (error) {
           warnings.push(
             path.join(parent, folder.name) + " · " + (error as Error).message,
@@ -163,4 +181,56 @@ export async function decoderRegistry(
     }
   }
   return { definitions, warnings };
+}
+
+export async function createScriptDecoder(
+  workspace: string,
+  engine: "lua" | "javascript",
+  id: string,
+  source?: DecoderDefinition,
+) {
+  if (!idPattern.test(id)) throw Error("Invalid decoder ID.");
+  const root = await realpath(workspace);
+  // Resolve each component before creating the next one.
+  let parent = root;
+  for (const name of ["wave-decoders", engine]) {
+    const next = path.join(parent, name);
+    await mkdir(next).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "EEXIST") throw error;
+    });
+    parent = inside(root, await realpath(next));
+  }
+  const directory = path.join(parent, id);
+  await mkdir(directory);
+  const entry = engine === "lua" ? "main.lua" : "main.cjs";
+  const manifest = {
+    apiVersion: 1,
+    inputs: [{ id: "data" }],
+    ...source?.manifest,
+    id,
+    name: id,
+    engine,
+    entry,
+    version: "1.0.0",
+  };
+  const filename = path.join(directory, entry);
+  try {
+    await writeFile(
+      filename,
+      source?.source ??
+        (engine === "lua"
+          ? "return { decode = function(ctx, state, batch)\nend }\n"
+          : "module.exports = { decode(ctx, state, batch) {\n} };\n"),
+      { flag: "wx" },
+    );
+    await writeFile(
+      path.join(directory, "decoder.json"),
+      JSON.stringify(manifest, null, 2) + "\n",
+      { flag: "wx" },
+    );
+    return filename;
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
 }

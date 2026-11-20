@@ -12,6 +12,7 @@ import type { Backend } from "./backend";
 import type { Metadata, WaveState } from "./shared/protocol";
 import { loadDecoderCatalog, saveDecoderProfile } from "./decoder-config";
 import type { DecoderInstance, DecodeResult } from "./decoder-runtime/types";
+import type { BackendProtocol } from "./shared/protocol";
 import { backendPlan, isFsdb, type FsdbBackend } from "./backend-selection";
 import { mapPrefix, type DesignSession } from "./kdb";
 import {
@@ -44,7 +45,18 @@ interface EditorActions {
   editDecoderConfig(viewer: Viewer): Promise<void>;
   decoderConfigPath(viewer: Viewer): string | undefined;
   configureWaveDecoder(viewer: Viewer): Promise<void>;
-  decodeWindow(viewer: Viewer, instance: DecoderInstance, start: string, end: string, signal?: AbortSignal): Promise<DecodeResult>;
+  manageWaveDecoders(viewer: Viewer): Promise<void>;
+  materializeDecoderSignal(
+    viewer: Viewer,
+    instance: DecoderInstance,
+  ): Promise<BackendProtocol["defineVirtual"]["result"] | undefined>;
+  decodeWindow(
+    viewer: Viewer,
+    instance: DecoderInstance,
+    start: string,
+    end: string,
+    signal?: AbortSignal,
+  ): Promise<DecodeResult>;
   updateSidebarTags(viewer: Viewer, view: WaveState): void;
   saveActiveProject(viewer: Viewer): Promise<unknown>;
   openProject(filename?: string): Promise<unknown>;
@@ -80,6 +92,8 @@ export function createWaveEditor(
     editDecoderConfig,
     decoderConfigPath,
     configureWaveDecoder,
+    manageWaveDecoders,
+    materializeDecoderSignal,
     decodeWindow,
     updateSidebarTags,
     saveActiveProject,
@@ -602,23 +616,50 @@ export function createWaveEditor(
             await editDecoderConfig(viewer);
           } else if (msg.type === "configureWaveDecoder") {
             await configureWaveDecoder(viewer);
+          } else if (msg.type === "manageWaveDecoders") {
+            await manageWaveDecoders(viewer);
+          } else if (msg.type === "materializeDecoderSignal") {
+            const result = await materializeDecoderSignal(viewer, msg.instance);
+            if (result)
+              await panel.webview.postMessage({
+                type: "virtualCreated",
+                ...result,
+              });
           } else if (msg.type === "cancelWaveDecoder") {
             decoderQueries.get(msg.instanceId)?.abort();
           } else if (msg.type === "queryWaveDecoder") {
             const id = msg.instance?.instanceId;
-            if (typeof id !== "string" || id.length > 64) throw Error("Invalid decoder instance.");
+            if (typeof id !== "string" || id.length > 64)
+              throw Error("Invalid decoder instance.");
             decoderQueries.get(id)?.abort();
             const controller = new AbortController();
             decoderQueries.set(id, controller);
             try {
-              const decoded = await decodeWindow(viewer, msg.instance, msg.start, msg.end, controller.signal);
+              const decoded = await decodeWindow(
+                viewer,
+                msg.instance,
+                msg.start,
+                msg.end,
+                controller.signal,
+              );
               if (!controller.signal.aborted)
-                await panel.webview.postMessage({ type: "waveDecoderResult", instanceId: id, request: msg.request, decoded });
+                await panel.webview.postMessage({
+                  type: "waveDecoderResult",
+                  instanceId: id,
+                  request: msg.request,
+                  decoded,
+                });
             } catch (error) {
               if (!controller.signal.aborted)
-                await panel.webview.postMessage({ type: "waveDecoderResult", instanceId: id, request: msg.request, error: error.message });
+                await panel.webview.postMessage({
+                  type: "waveDecoderResult",
+                  instanceId: id,
+                  request: msg.request,
+                  error: error.message,
+                });
             } finally {
-              if (decoderQueries.get(id) === controller) decoderQueries.delete(id);
+              if (decoderQueries.get(id) === controller)
+                decoderQueries.delete(id);
             }
           } else if (msg.type === "decoderCatalog") {
             const legacy = decoderConfigPath(viewer);

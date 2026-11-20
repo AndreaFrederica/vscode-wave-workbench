@@ -301,11 +301,9 @@ impl Store {
                     start,
                     end,
                     limit,
+                    ordered: preserve_same_tick,
                 };
-                if let Some(block) = (!preserve_same_tick)
-                    .then(|| self.cache.get(&key))
-                    .flatten()
-                {
+                if let Some(block) = self.cache.get(&key) {
                     physical_blocks.insert(id.clone(), block);
                 } else {
                     missing.push(key);
@@ -324,9 +322,7 @@ impl Store {
                 for (key, (events, truncated)) in missing.into_iter().zip(decoded) {
                     let block = Arc::new(cache::Block { events, truncated });
                     physical_blocks.insert(key.signal.clone(), block.clone());
-                    if !preserve_same_tick {
-                        self.cache.insert(key, block);
-                    }
+                    self.cache.insert(key, block);
                 }
             }
         }
@@ -343,9 +339,22 @@ impl Store {
                     let Database::Vcd(vcd) = &self.database else {
                         unreachable!()
                     };
-                    let (events, truncated) = vcd.query_with_order(id, start, end, limit, true)?;
-                    self.cache.stats.reads += 1;
-                    Arc::new(cache::Block { events, truncated })
+                    let key = cache::Key {
+                        signal: id.clone(),
+                        start,
+                        end,
+                        limit,
+                        ordered: true,
+                    };
+                    if let Some(block) = self.cache.get(&key) {
+                        block
+                    } else {
+                        let (events, truncated) = vcd.query_with_order(id, start, end, limit, true)?;
+                        self.cache.stats.reads += 1;
+                        let block = Arc::new(cache::Block { events, truncated });
+                        self.cache.insert(key, block.clone());
+                        block
+                    }
                 }
                 None => self.read_block(id, start, end, limit)?,
             };
@@ -450,6 +459,7 @@ impl Store {
             start,
             end,
             limit,
+            ordered: false,
         };
         if let Some(block) = self.cache.get(&key) {
             return Ok(block);

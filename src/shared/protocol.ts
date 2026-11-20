@@ -14,10 +14,15 @@ export interface Operand {
   name?: string;
   bitOffset?: number | null;
 }
-export interface Definition {
-  op: "concat" | "and" | "or" | "xor" | "not";
-  inputs: Operand[];
-}
+export type Definition =
+  | { op: "concat" | "and" | "or" | "xor" | "not"; inputs: Operand[] }
+  | {
+      op: "samples";
+      inputs: [];
+      width: number;
+      source: string;
+      samples: [string, string][];
+    };
 export interface Signal {
   id: string;
   scope: string;
@@ -130,14 +135,38 @@ export interface CacheStats {
   containingHits: number;
 }
 export interface BackendProtocol {
-  decoderInit: { args: { source: string; context: import("../decoder-runtime/types").DecoderContext }; result: null };
+  decoderInit: {
+    args: {
+      source: string;
+      context: import("../decoder-runtime/types").DecoderContext;
+      measure?: boolean;
+    };
+    result: null;
+  };
   decoderBatch: {
-    args: { start: string; end: string; initial: (string | null)[]; times: string[]; inputs: number[]; offsets: number[]; values: string };
+    args: {
+      start: string;
+      end: string;
+      initial: (string | null)[];
+      times: string[];
+      inputs: number[];
+      offsets: number[];
+      values: string;
+    };
     result: import("../decoder-runtime/types").DecodeResult;
   };
-  decoderFlush: { args: Record<string, never>; result: import("../decoder-runtime/types").DecodeResult };
-  decoderSaveState: { args: Record<string, never>; result: import("../decoder-runtime/types").Json };
-  decoderRestoreState: { args: { state: import("../decoder-runtime/types").Json }; result: null };
+  decoderFlush: {
+    args: Record<string, never>;
+    result: import("../decoder-runtime/types").DecodeResult;
+  };
+  decoderSaveState: {
+    args: Record<string, never>;
+    result: import("../decoder-runtime/types").Json;
+  };
+  decoderRestoreState: {
+    args: { state: import("../decoder-runtime/types").Json };
+    result: null;
+  };
   open: { args: { path: string }; result: Metadata };
   query: {
     args: {
@@ -210,5 +239,8 @@ export interface WaveClip {
   eventLimitPerSignal: number;
   truncated: boolean;
   markers: Marker[];
-  decoders?: { id: string; result: import("../decoder-runtime/types").DecodeResult }[];
+  decoders?: {
+    id: string;
+    result: import("../decoder-runtime/types").DecodeResult;
+  }[];
 }
