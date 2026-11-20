@@ -45,7 +45,9 @@ export class DecoderScheduler {
     const context: DecoderContext = {
       scale: meta.scale,
       inputs: definition.manifest.inputs.map(({ id }, i) =>
-        bindings[i] ? { id, width: bindings[i]!.width } : null,
+        bindings[i]
+          ? { id, width: bindings[i]!.width, real: bindings[i]!.real }
+          : null,
       ),
       options: { ...definition.manifest.options, ...readOptions(job.options) },
     };

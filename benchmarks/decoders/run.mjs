@@ -236,7 +236,7 @@ try {
     node: process.version,
     v8: process.versions.v8,
     lua: "LuaJIT 2.1 via mlua 0.12.2 built with Cargo --release",
-    eventBatchVersion: 1,
+    eventBatchVersion: require("../../dist/decoder-runtime/types").eventBatchVersion,
     repeats,
     warmup: 1,
     scenario: "equivalent eight-bit rule with stateful interval accumulation",

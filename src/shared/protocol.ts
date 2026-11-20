@@ -29,6 +29,8 @@ export interface Signal {
   name: string;
   width: number;
   supported: boolean;
+  real?: boolean;
+  unit?: string;
   group?: string;
   displayName?: string;
   displayRadix?: Radix;
@@ -36,6 +38,7 @@ export interface Signal {
   notation?: string;
   bitOffset?: number;
   sourceWidth?: number;
+  packedRange?: [number, number];
   parentBus?: string;
   definition?: Definition;
   decoder?: DecoderProfile;
@@ -58,6 +61,7 @@ export interface Metadata {
   end: string;
   scale: string;
   backend: string;
+  supportsOrderedHistory?: boolean;
   title?: string;
   vide?: string;
 }
@@ -70,9 +74,108 @@ export interface Location {
   definitionFile: string;
   definitionLine: number;
   instance: string;
+  parameterValue?: { bits: string; signed: boolean };
+  interfaceRange?: [number, number];
+  interfaceWidth?: number;
+  interfaceTwoState?: boolean;
+  interfaceDeclaration?: { file: string; line: number };
   depth?: number;
   expanded?: boolean;
   selected?: boolean;
+}
+
+export interface DesignPortEndpoint {
+  instance: string;
+  signal: string;
+  field?: string;
+  bit?: number;
+  range?: [number, number];
+}
+export interface IndexedPartSelect {
+  width: number;
+  ascendingIndices: boolean;
+}
+export type AssignmentValue =
+  | { op: "signal"; args: number }
+  | { op: "scopedSignal"; args: [number, number] }
+  | { op: "scopedSelect"; args: [number, number, number, number] }
+  | { op: "scopedComponent"; args: [number, number, number, [number, number] | null] }
+  | { op: "generateIndex"; args: string }
+  | { op: "unsignedBit" | "fillBit"; args: boolean }
+  | { op: "fillUnknown"; args: "x" | "z" }
+  | { op: "literal"; args: [string, boolean] }
+  | { op: "select"; args: [number, number, number] }
+  | { op: "boundSelect"; args: [number, AssignmentValue, AssignmentValue] }
+  | { op: "slice"; args: [AssignmentValue, number, number] }
+  | { op: "bitSelect"; args: [number, AssignmentValue] }
+  | {
+      op: "indexedPartSelect";
+      args: [number, AssignmentValue, IndexedPartSelect];
+    }
+  | { op: "concat"; args: AssignmentValue[] }
+  | { op: "repeat"; args: [number, AssignmentValue] }
+  | { op: "cast"; args: [number | null, boolean, boolean, AssignmentValue] }
+  | { op: "unary"; args: [ValueUnary, AssignmentValue] }
+  | { op: "binary"; args: [ValueBinary, AssignmentValue, AssignmentValue] }
+  | {
+      op: "conditional";
+      args: [AssignmentValue, AssignmentValue, AssignmentValue];
+    };
+
+type ValueUnary = "bitNot" | "negate" | "not" | "reduceAnd" | "reduceOr" | "reduceXor";
+type ValueBinary =
+  | "bitAnd"
+  | "bitOr"
+  | "bitXor"
+  | "and"
+  | "or"
+  | "equal"
+  | "notEqual"
+  | "caseEqual"
+  | "caseNotEqual"
+  | "caseItemEqual"
+  | "caseItemZ"
+  | "caseItemX"
+  | "less"
+  | "lessEqual"
+  | "greater"
+  | "greaterEqual"
+  | "add"
+  | "subtract"
+  | "multiply"
+  | "divide"
+  | "modulo"
+  | "shiftLeft"
+  | "shiftRight"
+  | "arithmeticShiftRight";
+
+export type DesignPortLink = {
+  to: DesignPortEndpoint;
+  file: string;
+  line: number;
+  conversion?: { fromWidth: number; toWidth: number; twoState: boolean };
+} & (
+  | {
+      from: DesignPortEndpoint;
+      selectIndex?: Pick<DesignPortEndpoint, "instance" | "signal"> & {
+        part?: IndexedPartSelect;
+      };
+      expression?: never;
+    }
+  | {
+      from?: never;
+      selectIndex?: never;
+      expression: {
+        operands: DesignPortEndpoint[];
+        value: AssignmentValue;
+        indexOperands?: number[];
+      };
+    }
+);
+
+export function portSources(link: DesignPortLink) {
+  if (link.expression) return link.expression.operands;
+  return link.selectIndex ? [link.from, link.selectIndex] : [link.from];
 }
 export type SavedSignal = Pick<Signal, "id" | "scope" | "name"> &
   Partial<Signal>;
@@ -194,13 +297,60 @@ export interface BackendProtocol {
   cacheConfigure: { args: { bytes: number }; result: CacheStats };
   kdbOpen: {
     args: { path: string };
-    result: { attached: boolean; backend: string };
+    result: {
+      attached: boolean;
+      backend: string;
+      portLinks?: boolean;
+      interfaceMembers?: boolean;
+      genericInterfaceTypes?: boolean;
+    };
+  };
+  kdbPortLinks: {
+    args: { query: string };
+    result: {
+      links: DesignPortLink[];
+      ports?: {
+        instance: string;
+        signal: string;
+        direction: "input" | "output" | "inout";
+      }[];
+      portsIncomplete?: boolean;
+      truncated: boolean;
+      constants?: {
+        instance: string;
+        signal: string;
+        bits: string;
+        signed: boolean;
+        file: string;
+        line: number;
+      }[];
+      gaps?: {
+        instance: string;
+        signal: string | null;
+        direction: "drivers" | "loads";
+      }[];
+    };
   };
   kdbResolve: { args: { query: string }; result: Location[] };
+  kdbInterfaceMember: { args: { query: string }; result: Location[] };
+  kdbInterfaceUsers: { args: { query: string }; result: Location[] };
+  kdbGenericInterfaceTypes: {
+    args: { query: string };
+    result: {
+      formal: string;
+      formalFile: string;
+      formalLine: number;
+      interface: string;
+      interfaceFile: string;
+      interfaceLine: number;
+      modport?: string;
+    }[];
+  };
   kdbParent: { args: { query: string }; result: Location[] };
   kdbChildren: { args: { query: string }; result: Location[] };
   kdbScopes: { args: { query: string }; result: Location[] };
   kdbInstances: { args: { query: string }; result: Location[] };
+  kdbModuleSources: { args: Record<string, never>; result: string[] };
 }
 
 export interface ClipContext {
@@ -223,6 +373,8 @@ export interface WaveClip {
     label: string;
     group?: string;
     width: number;
+    real?: boolean;
+    unit?: string;
     decoder?: DecoderProfile;
     annotation?: Annotation;
     events: [string, string][];

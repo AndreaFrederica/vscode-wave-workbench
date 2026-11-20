@@ -5,6 +5,7 @@ const fs = require("node:fs/promises");
 const { existsSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { eventBatchVersion } = require("../dist/decoder-runtime/types");
 const { Backend } = require("../dist/backend");
 const {
   decoderRegistry,
@@ -437,7 +438,7 @@ test(
           scale: "1ns",
         },
       }),
-      1,
+      eventBatchVersion,
     );
     const batch = packEvents(
       0n,
@@ -455,15 +456,13 @@ test(
         backend.requestDecoderBatch(damaged.header, damaged.chunks),
         /Invalid decoder sample offsets/,
       ),
-      backend
-        .requestDecoderBatch(valid.header, valid.chunks)
-        .then((result) =>
-          assert.deepEqual(result, {
-            transactions: [],
-            warnings: [],
-            truncated: false,
-          }),
-        ),
+      backend.requestDecoderBatch(valid.header, valid.chunks).then((result) =>
+        assert.deepEqual(result, {
+          transactions: [],
+          warnings: [],
+          truncated: false,
+        }),
+      ),
     ]);
   },
 );

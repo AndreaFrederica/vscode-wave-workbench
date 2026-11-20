@@ -43,7 +43,7 @@ function project(raw: string | undefined, s: Signal) {
   return bits[bits.length - 1 - s.bitOffset] || "x";
 }
 function bits(s: Signal): Signal[] {
-  if (s.width <= 1 || Number.isInteger(s.bitOffset)) return [];
+  if (s.real || s.width <= 1 || Number.isInteger(s.bitOffset)) return [];
   return Array.from({ length: s.width }, (_, i) => ({
     ...s,
     width: 1,
@@ -62,13 +62,18 @@ function restore(s: Partial<Signal>, canonical: Signal): Signal {
     Number.isSafeInteger(s.bitOffset) &&
     s.bitOffset >= 0 &&
     s.bitOffset < canonical.width;
-  if (s.bitOffset !== undefined && !bit)
+  if (s.bitOffset !== undefined && (!bit || canonical.real))
     throw Error("Saved bit selection is outside the source Bus");
-  const decoder = s.decoder && validateProfile(s.decoder);
+  const decoder =
+    !canonical.real && s.decoder ? validateProfile(s.decoder) : undefined;
   if (decoder && !supportsProfile(decoder, bit ? 1 : canonical.width))
     throw Error("解码配置与信号位宽不符");
   return {
     ...canonical,
+    unit:
+      canonical.real && typeof s.unit === "string"
+        ? s.unit.slice(0, 24)
+        : canonical.unit,
     group: typeof s.group === "string" ? s.group : undefined,
     displayName: typeof s.displayName === "string" ? s.displayName : undefined,
     highlight: /^#[0-9a-f]{6}$/i.test(s.highlight || "")

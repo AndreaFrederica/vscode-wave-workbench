@@ -12,6 +12,7 @@ export interface DecoderInput {
   id: string;
   width?: number;
   required?: boolean;
+  real?: boolean;
 }
 export interface DecoderManifest {
   apiVersion: 1;
@@ -33,7 +34,7 @@ export interface DecoderInstance {
 }
 export interface DecoderContext {
   scale: string;
-  inputs: ({ id: string; width: number } | null)[];
+  inputs: ({ id: string; width: number; real?: boolean } | null)[];
   options: Record<string, Json>;
 }
 export interface DecoderTransaction {
@@ -56,13 +57,14 @@ export interface DecodeResult {
   warnings: string[];
   truncated: boolean;
 }
-export const eventBatchVersion = 1;
+export const eventBatchVersion = 2;
 
 export interface EventBatchHeader {
   version: typeof eventBatchVersion;
   start: string;
   end: string;
   initial: (string | null)[];
+  realInputs?: boolean[];
   count: number;
   timeEncoding: "u64" | "decimal";
   timeBytes: number;
@@ -74,6 +76,7 @@ export interface EventBatch {
   start: string;
   end: string;
   initial: (string | null)[];
+  realInputs?: boolean[];
   times: BigUint64Array | Uint8Array;
   inputs: Uint32Array;
   offsets: Uint32Array;

@@ -2,6 +2,7 @@
 
 import type { Backend } from "../backend";
 import type { Signal } from "../shared/protocol";
+import { realValue } from "../shared/analog";
 import { project } from "../shared/signals";
 import {
   eventBatchVersion,
@@ -14,6 +15,7 @@ export interface DecoderEvent {
   tick: string;
   input: number;
   value: string;
+  real?: number | null;
 }
 const text = new TextDecoder();
 const encode = new TextEncoder();
@@ -23,11 +25,16 @@ export function packEvents(
   end: bigint,
   initial: (string | null)[],
   events: readonly DecoderEvent[],
+  realInputs?: boolean[],
 ): EventBatch {
   const offsets = new Uint32Array(events.length + 1);
   const inputs = new Uint32Array(events.length);
   const values = new Uint8Array(
-    events.reduce((count, event) => count + event.value.length, 0),
+    events.reduce(
+      (count, event) =>
+        count + (realInputs?.[event.input] ? 8 : event.value.length),
+      0,
+    ),
   );
   const times =
     end <= 1n << 64n
@@ -35,6 +42,7 @@ export function packEvents(
       : new Uint8Array(
           events.reduce((size, event) => size + 1 + event.tick.length, 0),
         );
+  const reals = realInputs && new DataView(values.buffer);
   let tickOffset = 0;
   events.forEach((event, index) => {
     inputs[index] = event.input;
@@ -47,15 +55,21 @@ export function packEvents(
         times.subarray(tickOffset),
       ).written;
     }
-    offsets[index + 1] =
-      offsets[index] +
-      encode.encodeInto(event.value, values.subarray(offsets[index])).written;
+    if (reals && realInputs?.[event.input]) {
+      reals.setFloat64(offsets[index], realValue(event.value) ?? NaN, true);
+      offsets[index + 1] = offsets[index] + 8;
+    } else {
+      offsets[index + 1] =
+        offsets[index] +
+        encode.encodeInto(event.value, values.subarray(offsets[index])).written;
+    }
   });
   return {
     version: eventBatchVersion,
     start: String(start),
     end: String(end),
     initial,
+    realInputs,
     inputs,
     offsets,
     values,
@@ -87,6 +101,7 @@ export function binaryBatch(batch: EventBatch) {
     start: batch.start,
     end: batch.end,
     initial: batch.initial,
+    realInputs: batch.realInputs,
     count: batch.inputs.length,
     timeEncoding: batch.times instanceof BigUint64Array ? "u64" : "decimal",
     timeBytes: batch.times.byteLength,
@@ -103,9 +118,21 @@ export function scriptEvents(batch: EventBatch) {
     start: batch.start,
     end: batch.end,
     initial: batch.initial,
+    initialReal: batch.initial.map((value, index) =>
+      batch.realInputs?.[index]
+        ? (realValue(value ?? undefined) ?? null)
+        : null,
+    ),
     count: batch.inputs.length,
     *events() {
       const times = batch.times;
+      const values =
+        batch.realInputs &&
+        new DataView(
+          batch.values.buffer,
+          batch.values.byteOffset,
+          batch.values.byteLength,
+        );
       let tickOffset = 0;
       for (let i = 0; i < batch.inputs.length; ++i) {
         let tick: string;
@@ -116,13 +143,25 @@ export function scriptEvents(batch: EventBatch) {
           tick = text.decode(times.subarray(tickOffset, tickOffset + length));
           tickOffset += length;
         }
-        yield {
-          tick,
-          input: batch.inputs[i],
-          value: text.decode(
-            batch.values.subarray(batch.offsets[i], batch.offsets[i + 1]),
-          ),
-        };
+        const input = batch.inputs[i];
+        const offset = batch.offsets[i];
+        if (values && batch.realInputs?.[input]) {
+          const number = values.getFloat64(offset, true);
+          yield {
+            tick,
+            input,
+            value: String(number),
+            real: Number.isFinite(number) ? number : null,
+          };
+        } else {
+          yield {
+            tick,
+            input,
+            value: text.decode(
+              batch.values.subarray(offset, batch.offsets[i + 1]),
+            ),
+          };
+        }
       }
     },
   };
@@ -138,6 +177,9 @@ export async function* readEventBatches(
   const ids = [
     ...new Set(bindings.flatMap((binding) => (binding ? [binding.id] : []))),
   ];
+  const realInputs = bindings.some((binding) => binding?.real)
+    ? bindings.map((binding) => !!binding?.real)
+    : undefined;
   const limit = Math.max(2, Math.floor(maxBatchEvents / bindings.length));
   async function* read(
     first: bigint,
@@ -168,12 +210,17 @@ export async function* readEventBatches(
       if (!binding) return seed;
       for (const [tick, raw] of blocks[binding.id].events) {
         const value = project(raw, binding)?.toLowerCase();
-        if (!value || !/^[01xz]+$/.test(value) || value.length > binding.width)
+        if (
+          !binding.real &&
+          (!value || !/^[01xz]+$/.test(value) || value.length > binding.width)
+        )
           throw Error("Invalid digital decoder sample for " + binding.name);
-        const bits = value.padStart(
-          binding.width,
-          /^[xz]/.test(value) ? value[0] : "0",
-        );
+        const bits = binding.real
+          ? raw
+          : value!.padStart(
+              binding.width,
+              /^[xz]/.test(value!) ? value![0] : "0",
+            );
         if (BigInt(tick) < first) seed = bits;
         else if (BigInt(tick) < last) events.push({ tick, input, value: bits });
       }
@@ -186,7 +233,7 @@ export async function* readEventBatches(
           ? -1
           : 1,
     );
-    yield packEvents(first, last, initial, events);
+    yield packEvents(first, last, initial, events, realInputs);
   }
   if (ids.length && start < end) yield* read(start, end);
 }

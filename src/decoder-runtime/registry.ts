@@ -53,11 +53,18 @@ function validateManifest(raw: unknown): DecoderManifest {
         (!Number.isInteger(input.width) ||
           input.width < 1 ||
           input.width > 4096)) ||
-      (input.required !== undefined && typeof input.required !== "boolean")
+      (input.required !== undefined && typeof input.required !== "boolean") ||
+      (input.real !== undefined && typeof input.real !== "boolean") ||
+      (input.real === true && input.width !== undefined)
     )
       throw Error("Invalid or duplicate decoder input.");
     ids.add(input.id);
-    return { id: input.id, width: input.width, required: input.required };
+    return {
+      id: input.id,
+      width: input.width,
+      required: input.required,
+      real: input.real,
+    };
   });
   return {
     apiVersion: 1,
