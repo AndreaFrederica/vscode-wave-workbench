@@ -870,7 +870,6 @@ function add(signal) {
   request();
 }
 function request() {
-  scheduleDecoder();
   rebuildRows();
   persist();
   render();
@@ -1346,6 +1345,7 @@ function updateNameScroll(rows: HTMLElement) {
   applyNameScroll();
 }
 function render() {
+  scheduleDecoder();
   timelineHeight =
     markersVisible && markers.some((m) => m.name !== "B")
       ? 56

@@ -60,4 +60,15 @@ Tcl 的批量查询与 MCP、波形 UI 共用宿主调度器。当前设计会�
 
 仅在可信工作区发现和运行脚本扩展。JavaScript 在独立 Worker 内执行，LuaJIT 在独立原生子进程内执行。资源限制和终止机制用于故障恢复。两个运行边界都以可信代码为适用范围。初始实现按请求限制并发、15 秒运行时间和一百万条重放事件，结果超过事务预算时会明确标注截断。内置 UART 用旧算法，并继续使用可安全表示的整数 tick。
 
+## 性能复现
+
+本机安装了 Cargo 与 Node 依赖后，构建原生二进制，再通过同一条命令运行可重现的三个引擎。结果保存为 JSON 和 Markdown。
+
+```sh
+cargo build --locked --release --manifest-path native/Cargo.toml
+WAVE_TEST_DECODER_BINARY="$PWD/native/target/release/wave-backend" WAVE_DECODER_BENCH_OUTPUT=/tmp/wave-decoder-bench npm run bench:decoders
+WAVE_TEST_DECODER_BINARY="$PWD/native/target/release/wave-backend" WAVE_DECODER_BENCH_SIZES=10000000 WAVE_DECODER_BENCH_REPEATS=2 WAVE_DECODER_BENCH_OUTPUT=/tmp/wave-decoder-bench-10m npm run bench:decoders
+WAVE_DECODER_UI_REPORT=/tmp/wave-decoder-ui.json npm run test:ui -- -g 'transaction rows accept'
+```
+
 详见 [实施计划](DECODER_PLAN.md)、[检查 TODO](CHECK_TODO.md) 和 [基准报告](benchmarks/decoders/results/results.md)。

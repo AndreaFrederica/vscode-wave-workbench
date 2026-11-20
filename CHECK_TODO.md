@@ -4,16 +4,17 @@
 
 ## 多引擎解码器
 
-- [x] 记录开发前 Node 基线，75 通过、59 跳过。
-- [x] 记录开发前 Rust 基线，9 通过、1 忽略。
-- [ ] 记录前后 Playwright 基线及差异，复核真实 VS Code。
-- [ ] 逐项核对 JSON 规则、UART、旧工程、虚拟信号及 FSDB/VCD/FST/KDB、RTL、MCP、Tcl 的兼容性。
-- [ ] 在三引擎比对语义结果。覆盖 1 bit、宽总线、X/Z、超过 u64 的时间、同 tick、截断与多批次。
-- [ ] 覆盖 UART、SPI 的 CPOL/CPHA、I²C、AXI 并发及 TileLink 关联。核对随机跳转、窗口边界、未闭合事务、检查点恢复、源码修改和缓存失效。
-- [ ] 核对 UI、导出、工程恢复与 MCP/Tcl 使用同一结果。检查脚本热重载、多实例、取消和恢复。
-- [ ] 检查脚本超时、递归、内存与输出激增、路径边界和信任模式、销毁后回复、Worker/Native 退出及并发状态。
-- [ ] 发布 JSON/Markdown 基准，核对数据哈希、引擎版本、提交、冷/热、IPC、UI、资源用量与 N/A，复现全部规模及场景。
-- [ ] 复核六种支持平台的 Cargo/VSIX 产物与实际运行。验证工作区信任和不可信脚本限制。
+- [x] 记录开发前基线。Node 75 通过、59 跳过。Rust 9 通过、1 忽略。Playwright 25 通过、5 跳过。
+- [x] 运行合并工作区的 Node 测试。82 通过、59 跳过。隔离阶段快照通过 Node 24 项、Rust 10 项、Playwright 26 项，分别跳过或忽略 8、1、5 项。
+- [x] 核对旧 JSON 显示、UART、旧工程、虚拟信号恢复。对真实 VCD/FST 样本核对 Lua 和 JS 事务，并对 OpenTitan FSDB 的八路信号核对结果。原有独立 KDB 的层次、定义和 FSDB 关联测试通过。
+- [x] 真实 VCD 三引擎结果一致。覆盖跨窗口事务、检查点、宽四态值和大于 u64 的列式时间。Lua 与 JS 同一 SPI fixture 覆盖四种 CPOL/CPHA、同 tick 输入与检查点恢复。
+- [x] 在 Linux 桌面 VS Code 验证安装版 Lua/JS 查询、MCP 多实例、Tcl、JSON 和 PNG 及工程恢复。浏览器回归覆盖相同窗口恢复、缩放、取消和拒收旧结果。重命名并恢复清单会触发实际事务行失效和热重载。Native/Node 集成覆盖 Lua/JS 输出虚拟信号及工程快照恢复。
+- [x] 测试 JS Worker 和 Lua 子进程的无限循环取消及新实例恢复。脚本管理测试核对重复包和路径边界。
+- [x] 保存三引擎、四种事件规模和浏览器事务布局的 [基准报告](benchmarks/decoders/results/results.md)。一百万条以上的生产端到端为 N/A，仍实测引擎及其数据边界。
+- [ ] 补做截断及单 tick 极大批次、波形源重新加载、错误检查点和权限回归。
+- [ ] 扩展等价语义检验与性能矩阵，覆盖 UART 脚本、I²C、AXI 和 TileLink 的请求响应关联、宽总线与大量实例。补测纯 IPC、热循环、内存和取消分位数。
+- [ ] 检查递归、内存与输出激增、畸形缓冲、脚本文件/网络权限以及并发状态。脚本执行范围限可信工作区。
+- [ ] 复核 Linux arm64、macOS x64/arm64、Windows x64/arm64 的 Cargo、VSIX 产物及安装运行。补齐相应环境的 RTL、FSDB 和 KDB 回归。
 
 ## RTL Trace
 

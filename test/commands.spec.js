@@ -9,7 +9,7 @@ const {test,expect}=require('@playwright/test');
 const path=require('node:path'),fs=require('node:fs'),os=require('node:os');
 const {Backend}=require('../dist/backend');const {TclRunner}=require('../dist/tcl');const {WaveCommands,quote}=require('../dist/commands');const {KdbSession}=require('../dist/kdb');
 async function setup(page,filename,kdbPath,decoderConfig){
-  const backend=new Backend(path.resolve(__dirname,'../bin/wave-backend'));const pending=new Map();let sequence=0,queryDelay=0;const logs=[],queries=[],catalogRequests=[];
+  const backend=new Backend(path.resolve(__dirname,'../bin/wave-backend'));const pending=new Map();let sequence=0,queryDelay=0;const logs=[],queries=[],catalogRequests=[],decoderRequests=[];
   const viewer={backend,uri:{fsPath:filename},meta:await backend.request('open',{path:filename})};
   const send=m=>page.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),m);
   viewer.ui=(action,payload)=>new Promise((resolve,reject)=>{const id=++sequence;pending.set(id,{resolve,reject});send({type:'ui',id,action,payload}).catch(reject);});
@@ -18,6 +18,7 @@ async function setup(page,filename,kdbPath,decoderConfig){
   const runner=new TclRunner((name,args,dir)=>{viewer.scriptDirectory=dir;return engine.execute(name,args);},{log:text=>logs.push(text)});
   await page.exposeFunction('bridge',async m=>{
     if(m.type==='ready'){await send({type:'metadata',...viewer.meta,title:path.basename(filename),vide:'1.2.5'});}
+    else if(m.type==='queryWaveDecoder'){decoderRequests.push(m);}
     else if(m.type==='decoderCatalog'){
       const {loadDecoderCatalog}=require('../dist/decoder-config');
       await send({type:'decoderCatalog',...await loadDecoderCatalog(decoderConfig),workspaceAvailable:!!decoderConfig});
@@ -41,7 +42,7 @@ async function setup(page,filename,kdbPath,decoderConfig){
   await page.addInitScript(()=>{window.acquireVsCodeApi=()=>({getState:()=>null,setState(s){window.__savedWaveState=s;},postMessage:m=>window.bridge(m)});});
   await page.route('http://wave.test/**',async route=>{const name=new URL(route.request().url()).pathname.slice(1)||'index.html';if(!['index.html','wave.js','wave.css'].includes(name)){await route.abort();return;}let body=fs.readFileSync(path.resolve(__dirname,name.endsWith('.js')?'../dist/webview':'../media',name),'utf8');if(name==='index.html')body=body.replaceAll('{{csp}}','http://wave.test').replaceAll('{{nonce}}','testnonce').replace('{{css}}','/wave.css').replace('{{script}}','/wave.js');await route.fulfill({body,contentType:name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});});
   await page.goto('http://wave.test/');await expect(page.locator('#backend')).toContainText(viewer.meta.backend);
-  return {viewer,send,logs,queries,catalogRequests,running:()=>!!runner.pending,setQueryDelay(ms){queryDelay=ms;},run:(script,directory)=>runner.run(script,directory||path.dirname(filename)),dispose(){runner.dispose();backend.dispose();viewer.kdb?.dispose();}};
+  return {viewer,send,logs,queries,catalogRequests,decoderRequests,running:()=>!!runner.pending,setQueryDelay(ms){queryDelay=ms;},run:(script,directory)=>runner.run(script,directory||path.dirname(filename)),dispose(){runner.dispose();backend.dispose();viewer.kdb?.dispose();}};
 }
 test('real Tcl and wave UI: groups, units, values, markers, transition, export/replay, errors',async({page})=>{
   const env=await setup(page,path.resolve(__dirname,'../examples/demo.vcd'));
@@ -905,5 +906,72 @@ test('waveform clips preserve initial values, reopen as VCD and return PNG throu
     backend.dispose();
     env.dispose();
     fs.rmSync(directory, {recursive: true, force: true});
+  }
+});
+
+test('transaction rows accept only the current request and keep bindings across restore', async ({page}) => {
+  const env = await setup(page, path.resolve(__dirname, '../examples/demo.vcd'));
+  const first = {instanceId: 'first', decoderId: 'sample.lua', engine: 'lua', bindings: {data: 'tb.dut.data[7:0]'}};
+  const second = {instanceId: 'second', decoderId: 'sample.javascript', engine: 'javascript', bindings: {data: 'tb.dut.data[7:0]'}};
+  const row = index => page.locator('#decoderTracks .decoderTrack').nth(index);
+  try {
+    await env.viewer.ui('decoderAttach', first);
+    await env.viewer.ui('decoderAttach', second);
+    await expect.poll(() => env.decoderRequests.length).toBe(2);
+    const [a, b] = env.decoderRequests;
+    const send = (request, instanceId, label) => env.send({
+      type: 'waveDecoderResult', request, instanceId,
+      decoded: {transactions: [{start: '12', end: '23', label, fields: {value: '42'}}], warnings: [], truncated: false},
+    });
+    await send(a.request, 'first', 'Lua transaction');
+    await send(b.request, 'second', 'JS transaction');
+    await expect(row(0).locator('.decoderTransaction')).toHaveText('Lua transaction');
+    await expect(row(1).locator('.decoderTransaction')).toHaveText('JS transaction');
+    await row(0).locator('.decoderTransaction').click();
+    await expect(page.locator('#cursorAInput')).toHaveValue('12');
+    await row(0).getByRole('button', {name: '取消', exact: true}).click();
+    await send(a.request, 'first', 'late result');
+    await expect(row(0).locator('.decoderTrackStatus')).toHaveText('已取消');
+    const snapshot = await env.viewer.ui('snapshot');
+    expect(snapshot.decoderInstances).toEqual([first, second]);
+    await env.viewer.ui('decoderDetach', {instanceId: 'second'});
+    await expect(page.locator('#decoderTracks .decoderTrack')).toHaveCount(1);
+    await env.viewer.ui('restoreView', snapshot);
+    await expect(page.locator('#decoderTracks .decoderTrack')).toHaveCount(2);
+    await expect.poll(() => env.decoderRequests.length).toBe(4);
+    expect(env.decoderRequests[2].start).toBe(a.start);
+    expect(env.decoderRequests[2].end).toBe(a.end);
+    await env.run('wvZoom 10 20');
+    await expect.poll(() => env.decoderRequests.at(-1).start).toBe('10');
+    expect(env.decoderRequests.at(-1).end).toBe('20');
+
+    const report = process.env.WAVE_DECODER_UI_REPORT;
+    if (report) {
+      const query = env.decoderRequests.at(-1);
+      const results = await page.evaluate(({request, instance}) => {
+        const lane = [...document.querySelectorAll('#decoderTracks .decoderTrack')].at(-1);
+        return [32, 512, 2048].map(count => {
+          const decoded = {transactions: Array.from({length: count}, (_, index) => ({
+            start: '12', end: '13', label: String(index),
+          })), warnings: [], truncated: false};
+          const runs = [];
+          for (let index = 0; index < 16; ++index) {
+            const started = performance.now();
+            window.dispatchEvent(new MessageEvent('message', {data: {
+              type: 'waveDecoderResult', request, instanceId: instance.instanceId, decoded,
+            }}));
+            // Reading the final row forces layout after replacing the rendered transaction nodes.
+            lane.querySelector('.decoderTransaction:last-child').getBoundingClientRect();
+            if (index) runs.push(performance.now() - started);
+          }
+          runs.sort((a, b) => a - b);
+          const at = q => runs[Math.ceil(q * runs.length) - 1];
+          return {count, p50: at(0.5), p95: at(0.95), p99: at(0.99)};
+        });
+      }, query);
+      fs.writeFileSync(report, JSON.stringify({chromium: page.context().browser().version(), repeats: 15, results}, null, 2) + '\n');
+    }
+  } finally {
+    env.dispose();
   }
 });

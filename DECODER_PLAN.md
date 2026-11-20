@@ -21,13 +21,19 @@ JavaScript 使用宿主 Node V8 的 Worker。TypeScript 由 esbuild 生成可分
 
 ## 实施 TODO
 
-- [x] Phase 0，审计真实代码、版本、查询和发布流程，取得 Node、Rust 基线。
-- [ ] Phase 1，完成版本化 manifest、Registry、绑定、事件批次、统一输出和 BuiltinAdapter。保留旧 JSON 快速路径。
-- [ ] Phase 2，接入 mlua 和 LuaJIT、状态生命周期、示例和子进程故障恢复。
-- [ ] Phase 3，接入 V8 Worker、可转移列缓冲、JS/TS 构建、装载、示例和诊断。
-- [ ] Phase 4，完成跨批次与跨界事务、随机重放、检查点、缓存、取消及源更新失效。
-- [ ] Phase 5，完成脚本管理和多路绑定、事务行和导出、虚拟信号、项目恢复、MCP 与 Tcl。
-- [ ] Phase 6，检验等价结果后运行三引擎基准。区分 Micro、Engine、E2E 与 UI，覆盖定种子 UART、SPI、I²C、AXI/TL-UL、宽总线和并发实例，测量 1 万到 1000 万事件及内存、延迟和取消。
-- [ ] Phase 7，跨平台构建和真实 VSIX 运行、可靠性与权限验证、扩展 API、使用示例、性能报告和发布说明。
+- [x] Phase 0，审计真实代码、版本、查询和发布流程，取得 Node、Rust、Playwright 基线。
+- [x] Phase 1，完成版本化 manifest、Registry、绑定、事件批次、统一输出和 BuiltinAdapter。旧 JSON 规则保留原调用路径。
+- [x] Phase 2，接入 mlua 和 LuaJIT 独立子进程、状态生命周期、示例、取消及故障恢复。
+- [x] Phase 3，接入 Node V8 Worker、可转移缓冲、JavaScript、TypeScript 构建示例、批量执行与诊断。
+- [x] Phase 4，完成跨批次及跨窗口事务、随机重放、检查点回退、原始事件缓存、结果缓存和按源码哈希失效。超过一百万事件的单次重放会报出明确诊断。
+- [x] Phase 5，完成脚本管理、多路绑定、独立事务行、PNG/JSON 导出、四态虚拟信号快照、工程恢复、MCP 与 Tcl。
+- [ ] Phase 6，完成全协议及并发性能矩阵。
+  - [x] 三引擎八位规则输出逐条比较，测量 1 万、10 万、100 万和 1000 万条事件。
+  - [x] 记录 VM 启动加首次调用、脚本执行与宿主边界、端到端、缓存和浏览器事务 DOM 布局的时延。保存 JSON/Markdown 实测结果。
+  - [ ] 补齐 UART、SPI、I²C、AXI/TL-UL、宽总线及并发实例负载的可复现性能数据。引擎缺少等价功能的项目标记 N/A。
+  - [ ] 单独测量编译、Lua 事件表构建与紧凑缓冲、传输、子进程资源用量、取消响应及峰值 RSS。
+- [ ] Phase 7，完成发布矩阵、可靠性与权限验收。
+  - [x] Linux x64 独立 VSIX 构建及桌面 VS Code 测试。提供扩展 API 和 Lua/JS/TS 示例。
+  - [ ] 完成 Linux arm64、macOS 和 Windows 原生构建与已安装扩展运行。完成剩余安全和兼容验证。
 
-最终验收关注完整 Lua/JS/TS 生命周期及随机访问等价、旧 JSON 与现有 FSDB/VCD/FST/KDB/RTL/MCP/Tcl/工程恢复兼容性。需用仓库实测证据记录运行限制和优化项。
+阶段提交见本地 Git 历史。类型定义与实现位于 [decoder-runtime](src/decoder-runtime)，LuaJIT 子进程入口位于 [native/src/decoder.rs](native/src/decoder.rs)，安装和接口由 [扩展 API](DECODER_API.md) 说明。独立检查项与实测证据见 [检查 TODO](CHECK_TODO.md)。

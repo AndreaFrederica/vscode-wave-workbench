@@ -1,0 +1,506 @@
+{
+  "runs": [
+    {
+      "revision": "9a64dfbe7f4008a41bed4766acb553d2d3bb1186",
+      "dirty": true,
+      "os": "Linux 4.18.0-553.el8_10.x86_64",
+      "arch": "x64",
+      "cpu": "AMD EPYC 7K62 48-Core Processor",
+      "seed": 961734731,
+      "rust": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+      "node": "v24.14.0",
+      "v8": "13.6.233.17-node.41",
+      "lua": "LuaJIT 2.1 via mlua 0.12.2 built with Cargo --release",
+      "repeats": 3,
+      "warmup": 1,
+      "scenario": "equivalent eight-bit rule with stateful interval accumulation",
+      "results": [
+        {
+          "engine": "builtin",
+          "events": 10000,
+          "transactions": 39,
+          "datasetSha256": "5b09d1f59ad94283c9e3e0801ec251777b18a31a885727cd012588d502c92863",
+          "setupMs": {
+            "p50": 0.034,
+            "p95": 0.055,
+            "p99": 0.055
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 11.101,
+            "p95": 11.402,
+            "p99": 11.402
+          },
+          "engineExecutionMs": {
+            "p50": 11.101,
+            "p95": 11.402,
+            "p99": 11.402
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 0,
+            "p95": 0,
+            "p99": 0
+          },
+          "transactionsPerSecond": 3513,
+          "endToEndMs": {
+            "p50": 57.947,
+            "p95": 66.494,
+            "p99": 66.494
+          },
+          "cachedResultMs": {
+            "p50": 0.179,
+            "p95": 0.222,
+            "p99": 0.222
+          },
+          "hostPeakRssKiB": 90648,
+          "eventsPerSecond": 900820
+        },
+        {
+          "engine": "lua",
+          "events": 10000,
+          "transactions": 39,
+          "datasetSha256": "5b09d1f59ad94283c9e3e0801ec251777b18a31a885727cd012588d502c92863",
+          "setupMs": {
+            "p50": 4.891,
+            "p95": 5.498,
+            "p99": 5.498
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 51.38,
+            "p95": 56.879,
+            "p99": 56.879
+          },
+          "engineExecutionMs": {
+            "p50": 0.648,
+            "p95": 0.697,
+            "p99": 0.697
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 50.742,
+            "p95": 56.231,
+            "p99": 56.231
+          },
+          "transactionsPerSecond": 759,
+          "endToEndMs": {
+            "p50": 100.262,
+            "p95": 100.982,
+            "p99": 100.982
+          },
+          "cachedResultMs": {
+            "p50": 0.208,
+            "p95": 0.228,
+            "p99": 0.228
+          },
+          "hostPeakRssKiB": 107512,
+          "eventsPerSecond": 194628
+        },
+        {
+          "engine": "javascript",
+          "events": 10000,
+          "transactions": 39,
+          "datasetSha256": "5b09d1f59ad94283c9e3e0801ec251777b18a31a885727cd012588d502c92863",
+          "setupMs": {
+            "p50": 50.88,
+            "p95": 51.563,
+            "p99": 51.563
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 16.979,
+            "p95": 17.5,
+            "p99": 17.5
+          },
+          "engineExecutionMs": {
+            "p50": 16.261,
+            "p95": 16.658,
+            "p99": 16.658
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 0.717,
+            "p95": 0.842,
+            "p99": 0.842
+          },
+          "transactionsPerSecond": 2297,
+          "endToEndMs": {
+            "p50": 91.761,
+            "p95": 95.768,
+            "p99": 95.768
+          },
+          "cachedResultMs": {
+            "p50": 0.187,
+            "p95": 0.216,
+            "p99": 0.216
+          },
+          "hostPeakRssKiB": 127032,
+          "eventsPerSecond": 588963
+        },
+        {
+          "engine": "builtin",
+          "events": 100000,
+          "transactions": 390,
+          "datasetSha256": "63e3e3f82a837f867c16bc57267a5045ab9ef10ac7b43934dd3b55eadcff146e",
+          "setupMs": {
+            "p50": 0.023,
+            "p95": 0.033,
+            "p99": 0.033
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 70.337,
+            "p95": 79.575,
+            "p99": 79.575
+          },
+          "engineExecutionMs": {
+            "p50": 70.337,
+            "p95": 79.575,
+            "p99": 79.575
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 0,
+            "p95": 0,
+            "p99": 0
+          },
+          "transactionsPerSecond": 5545,
+          "endToEndMs": {
+            "p50": 587.892,
+            "p95": 598.984,
+            "p99": 598.984
+          },
+          "cachedResultMs": {
+            "p50": 0.48,
+            "p95": 0.496,
+            "p99": 0.496
+          },
+          "hostPeakRssKiB": 164752,
+          "eventsPerSecond": 1421727
+        },
+        {
+          "engine": "lua",
+          "events": 100000,
+          "transactions": 390,
+          "datasetSha256": "63e3e3f82a837f867c16bc57267a5045ab9ef10ac7b43934dd3b55eadcff146e",
+          "setupMs": {
+            "p50": 6.269,
+            "p95": 7.402,
+            "p99": 7.402
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 483.279,
+            "p95": 488.765,
+            "p99": 488.765
+          },
+          "engineExecutionMs": {
+            "p50": 6.201,
+            "p95": 6.362,
+            "p99": 6.362
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 477.183,
+            "p95": 482.564,
+            "p99": 482.564
+          },
+          "transactionsPerSecond": 807,
+          "endToEndMs": {
+            "p50": 811.073,
+            "p95": 862.332,
+            "p99": 862.332
+          },
+          "cachedResultMs": {
+            "p50": 0.835,
+            "p95": 1.036,
+            "p99": 1.036
+          },
+          "hostPeakRssKiB": 211268,
+          "eventsPerSecond": 206920
+        },
+        {
+          "engine": "javascript",
+          "events": 100000,
+          "transactions": 390,
+          "datasetSha256": "63e3e3f82a837f867c16bc57267a5045ab9ef10ac7b43934dd3b55eadcff146e",
+          "setupMs": {
+            "p50": 51.617,
+            "p95": 51.689,
+            "p99": 51.689
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 120.02,
+            "p95": 124.534,
+            "p99": 124.534
+          },
+          "engineExecutionMs": {
+            "p50": 115.68,
+            "p95": 119.907,
+            "p99": 119.907
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 4.339,
+            "p95": 4.626,
+            "p99": 4.626
+          },
+          "transactionsPerSecond": 3249,
+          "endToEndMs": {
+            "p50": 505.931,
+            "p95": 507.022,
+            "p99": 507.022
+          },
+          "cachedResultMs": {
+            "p50": 1.186,
+            "p95": 1.19,
+            "p99": 1.19
+          },
+          "hostPeakRssKiB": 223644,
+          "eventsPerSecond": 833194
+        },
+        {
+          "engine": "builtin",
+          "events": 1000000,
+          "transactions": 3892,
+          "datasetSha256": "59e5b13df5f202bc4a9a841aa6c5d6b0f56e1a5bc7548723c8f2ce11b0cc08b3",
+          "setupMs": {
+            "p50": 0.018,
+            "p95": 0.033,
+            "p99": 0.033
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 698.363,
+            "p95": 703.925,
+            "p99": 703.925
+          },
+          "engineExecutionMs": {
+            "p50": 698.363,
+            "p95": 703.925,
+            "p99": 703.925
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 0,
+            "p95": 0,
+            "p99": 0
+          },
+          "transactionsPerSecond": 5573,
+          "endToEndMs": {
+            "p50": 5833.839,
+            "p95": 6074.88,
+            "p99": 6074.88
+          },
+          "cachedResultMs": {
+            "p50": 4.103,
+            "p95": 4.157,
+            "p99": 4.157
+          },
+          "hostPeakRssKiB": 287096,
+          "eventsPerSecond": 1431920
+        },
+        {
+          "engine": "lua",
+          "events": 1000000,
+          "transactions": 3892,
+          "datasetSha256": "59e5b13df5f202bc4a9a841aa6c5d6b0f56e1a5bc7548723c8f2ce11b0cc08b3",
+          "setupMs": {
+            "p50": 7.865,
+            "p95": 8.467,
+            "p99": 8.467
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 4778.514,
+            "p95": 4851.42,
+            "p99": 4851.42
+          },
+          "engineExecutionMs": {
+            "p50": 66.859,
+            "p95": 69.319,
+            "p99": 69.319
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 4712.023,
+            "p95": 4784.56,
+            "p99": 4784.56
+          },
+          "transactionsPerSecond": 814,
+          "endToEndMs": {
+            "p50": 8913.843,
+            "p95": 9457.458,
+            "p99": 9457.458
+          },
+          "cachedResultMs": {
+            "p50": 4.122,
+            "p95": 4.293,
+            "p99": 4.293
+          },
+          "hostPeakRssKiB": 300708,
+          "eventsPerSecond": 209270
+        },
+        {
+          "engine": "javascript",
+          "events": 1000000,
+          "transactions": 3892,
+          "datasetSha256": "59e5b13df5f202bc4a9a841aa6c5d6b0f56e1a5bc7548723c8f2ce11b0cc08b3",
+          "setupMs": {
+            "p50": 48.779,
+            "p95": 54.069,
+            "p99": 54.069
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 1106.123,
+            "p95": 1107.857,
+            "p99": 1107.857
+          },
+          "engineExecutionMs": {
+            "p50": 1070.078,
+            "p95": 1071.553,
+            "p99": 1071.553
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 34.791,
+            "p95": 37.779,
+            "p99": 37.779
+          },
+          "transactionsPerSecond": 3519,
+          "endToEndMs": {
+            "p50": 5704.771,
+            "p95": 5718.529,
+            "p99": 5718.529
+          },
+          "cachedResultMs": {
+            "p50": 4.401,
+            "p95": 9.318,
+            "p99": 9.318
+          },
+          "hostPeakRssKiB": 329524,
+          "eventsPerSecond": 904059
+        }
+      ]
+    },
+    {
+      "revision": "9a64dfbe7f4008a41bed4766acb553d2d3bb1186",
+      "dirty": true,
+      "os": "Linux 4.18.0-553.el8_10.x86_64",
+      "arch": "x64",
+      "cpu": "AMD EPYC 7K62 48-Core Processor",
+      "seed": 961734731,
+      "rust": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+      "node": "v24.14.0",
+      "v8": "13.6.233.17-node.41",
+      "lua": "LuaJIT 2.1 via mlua 0.12.2 built with Cargo --release",
+      "repeats": 2,
+      "warmup": 1,
+      "scenario": "equivalent eight-bit rule with stateful interval accumulation",
+      "results": [
+        {
+          "engine": "builtin",
+          "events": 10000000,
+          "transactions": 38911,
+          "datasetSha256": "4df538d14fef6589a2590d369bbe5d0e7f076f12c449812ab1c202607caffe38",
+          "setupMs": {
+            "p50": 0.071,
+            "p95": 0.166,
+            "p99": 0.166
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 6733.1,
+            "p95": 6778.023,
+            "p99": 6778.023
+          },
+          "engineExecutionMs": {
+            "p50": 6733.1,
+            "p95": 6778.023,
+            "p99": 6778.023
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 0,
+            "p95": 0,
+            "p99": 0
+          },
+          "transactionsPerSecond": 5779,
+          "endToEndMs": null,
+          "cachedResultMs": null,
+          "hostPeakRssKiB": 273048,
+          "eventsPerSecond": 1485200
+        },
+        {
+          "engine": "lua",
+          "events": 10000000,
+          "transactions": 38911,
+          "datasetSha256": "4df538d14fef6589a2590d369bbe5d0e7f076f12c449812ab1c202607caffe38",
+          "setupMs": {
+            "p50": 12.219,
+            "p95": 12.896,
+            "p99": 12.896
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 48061.64,
+            "p95": 48356.507,
+            "p99": 48356.507
+          },
+          "engineExecutionMs": {
+            "p50": 613.003,
+            "p95": 614.346,
+            "p99": 614.346
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 47448.637,
+            "p95": 47742.162,
+            "p99": 47742.162
+          },
+          "transactionsPerSecond": 810,
+          "endToEndMs": null,
+          "cachedResultMs": null,
+          "hostPeakRssKiB": 273768,
+          "eventsPerSecond": 208066
+        },
+        {
+          "engine": "javascript",
+          "events": 10000000,
+          "transactions": 38911,
+          "datasetSha256": "4df538d14fef6589a2590d369bbe5d0e7f076f12c449812ab1c202607caffe38",
+          "setupMs": {
+            "p50": 43.04,
+            "p95": 51.5,
+            "p99": 51.5
+          },
+          "batchExecutionAndTransportMs": {
+            "p50": 10689.654,
+            "p95": 10854.513,
+            "p99": 10854.513
+          },
+          "engineExecutionMs": {
+            "p50": 10334.598,
+            "p95": 10493.049,
+            "p99": 10493.049
+          },
+          "boundaryAndPreparationMs": {
+            "p50": 355.056,
+            "p95": 361.464,
+            "p99": 361.464
+          },
+          "transactionsPerSecond": 3640,
+          "endToEndMs": null,
+          "cachedResultMs": null,
+          "hostPeakRssKiB": 299316,
+          "eventsPerSecond": 935484
+        }
+      ]
+    }
+  ],
+  "ui": {
+    "chromium": "159.0.8154.6",
+    "repeats": 15,
+    "results": [
+      {
+        "count": 32,
+        "p50": 0.8999998569488525,
+        "p95": 1,
+        "p99": 1
+      },
+      {
+        "count": 512,
+        "p50": 5.5,
+        "p95": 12.799999952316284,
+        "p99": 12.799999952316284
+      },
+      {
+        "count": 2048,
+        "p50": 26.09999990463257,
+        "p95": 40.30000019073486,
+        "p99": 40.30000019073486
+      }
+    ]
+  }
+}
