@@ -26,3 +26,7 @@ num-traits = "0.2"
 ruzstd = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.dependencies]
+ondas = { git = "https://github.com/AndreaFrederica/ondas.git", rev = "5461334f0ce1102e8dd559650565f9058ace6ffc", features = ["shm-lib", "wdb-lib"] }

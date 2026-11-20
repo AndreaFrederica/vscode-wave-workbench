@@ -5,6 +5,9 @@
 
 mod cache;
 mod derived;
+mod spice_raw;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod vendor_wave;
 #[cfg(fsdb)]
 mod kdb;
 use serde::Deserialize;
@@ -58,6 +61,7 @@ mod native {
                 width,
                 supported: supported != 0,
                 real: supported == 2,
+                unit: None,
             });
         }
     }
@@ -160,6 +164,7 @@ impl IndependentFsdb {
                 width: row.width,
                 supported: row.supported,
                 real: row.real,
+                unit: None,
             })
             .collect();
         Ok(Self {
@@ -173,6 +178,9 @@ impl IndependentFsdb {
 }
 
 enum Database {
+    Raw(spice_raw::SpiceRaw),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    Vendor(vendor_wave::VendorWave),
     Vcd(Vcd),
     Fst(RefCell<Fst>, Vec<Signal>),
     IndependentFsdb(IndependentFsdb),
@@ -182,6 +190,9 @@ enum Database {
 impl Database {
     fn signals(&self) -> &Vec<Signal> {
         match self {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::Vendor(v) => &v.signals,
+            Self::Raw(v) => &v.signals,
             Self::Vcd(v) => &v.signals,
             Self::Fst(_, signals) => signals,
             Self::IndependentFsdb(v) => &v.signals,
@@ -190,6 +201,38 @@ impl Database {
         }
     }
     fn open(path: &str, independent: bool) -> Result<Self, String> {
+        let kind = std::path::Path::new(path).extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase();
+        if kind == "wlf" {
+            let converter = std::env::var_os("WAVE_WORKBENCH_WLF2VCD")
+                .ok_or("Set waveWorkbench.wlf2vcdPath to the installed Questa converter")?;
+            if !std::path::Path::new(&converter).is_absolute() {
+                return Err("wlf2vcd must be configured with an absolute path".into());
+            }
+            let input = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let vcd = temp.path().join("trace.vcd");
+            let status = std::process::Command::new(converter)
+                .arg("-o").arg(&vcd).arg(&input)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .status().map_err(|error| format!("Cannot run wlf2vcd: {error}"))?;
+            if !status.success() {
+                return Err(format!("wlf2vcd failed: {status}"));
+            }
+            return Vcd::open(vcd).map(Self::Vcd);
+        }
+        if matches!(kind.as_str(), "psfascii" | "tran") {
+            return spice_raw::SpiceRaw::open_psf(path).map(Self::Raw);
+        }
+        if kind == "raw" {
+            return spice_raw::SpiceRaw::open(path).map(Self::Raw);
+        }
+        if matches!(kind.as_str(), "shm" | "dsn" | "wdb") {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            return vendor_wave::VendorWave::open(path, &kind).map(Self::Vendor);
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+            return Err("SHM and WDB require the Linux x64 SDK reader".into());
+        }
         if path.to_lowercase().ends_with(".fst") {
             let mut reader = Fst::open(path)?;
             let signals = std::mem::take(&mut reader.signals);
@@ -212,6 +255,9 @@ impl Database {
     }
     fn meta(&self) -> Value {
         let (start, end, scale, backend) = match self {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::Vendor(v) => (v.start, v.end, v.scale.clone(), v.backend),
+            Self::Raw(v) => (v.start, v.end, v.scale.into(), v.backend),
             Self::Vcd(v) => (0, v.end, v.scale.clone(), "rust-vcd"),
             Self::Fst(reader, _) => {
                 let reader = reader.borrow();
@@ -227,12 +273,16 @@ impl Database {
             "start": start.to_string(),
             "end": end.to_string(),
             "scale": scale,
+            "axis": if scale.ends_with("Hz") { "frequency" } else { "time" },
             "backend": backend,
             "supportsOrderedHistory": matches!(self, Self::Vcd(_) | Self::Fst(_, _)),
         })
     }
     fn read(&self, id: &str, start: u64, end: u64, limit: usize) -> Result<(Events, bool), String> {
         match self {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            Self::Vendor(v) => v.query(id, start, end, limit),
+            Self::Raw(v) => v.query(id, start, end, limit),
             Self::Vcd(v) => v.query(id, start, end, limit),
             Self::Fst(reader, _) => Ok(reader
                 .borrow_mut()
@@ -440,6 +490,7 @@ impl Store {
             width,
             supported: true,
             real: false,
+            unit: None,
         };
         let v = Virtual {
             signal,

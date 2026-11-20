@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import type * as vscode from "vscode";
+import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { Backend } from "./backend";
 import { KdbSession } from "./kdb";
@@ -27,7 +28,8 @@ export const backendChoices = [
 
 export const isFsdb = (filename: string) => /\.fsdb$/i.test(filename);
 export const isWaveform = (filename: string) =>
-  /\.(?:fsdb|fst|vcd)$/i.test(filename);
+  /\.(?:fsdb|fst|vcd|wdb|wlf|shm|raw|psfascii|tran)$/i.test(filename) ||
+  /\.shm[\\/][^\\/]+\.dsn$/i.test(filename);
 
 export function backendPlan(
   context: Pick<vscode.ExtensionContext, "asAbsolutePath">,
@@ -68,6 +70,35 @@ export function backendPlan(
   };
   const createIndependentKdb = () =>
     new KdbSession(independentBinary, undefined, log, independentOptions);
+  const proprietary = /\.(shm|dsn|wdb|wlf|raw|psfascii|tran)$/i
+    .exec(filename)?.[1]
+    .toLowerCase();
+  if (proprietary) {
+    const xcelium = cfg.get<string>("xceliumHome");
+    const vivado = cfg.get<string>("vivadoHome") || env.XILINX_VIVADO;
+    const converter = cfg.get<string>("wlf2vcdPath");
+    if (xcelium && /^(shm|dsn)$/.test(proprietary))
+      independentEnv.XCELIUM_HOME = xcelium;
+    if (proprietary === "wdb" && vivado) {
+      independentEnv.XILINX_VIVADO = vivado;
+      independentEnv.RDI_DATADIR = join(vivado, "data");
+      independentEnv.LD_LIBRARY_PATH = [
+        join(vivado, "lib", "lnx64.o"),
+        env.LD_LIBRARY_PATH,
+      ]
+        .filter(Boolean)
+        .join(":");
+    }
+    if (converter && proprietary === "wlf")
+      independentEnv.WAVE_WORKBENCH_WLF2VCD = converter;
+    return {
+      kind: "analog" as const,
+      kdbKind: "independent" as const,
+      label: (proprietary === "dsn" ? "shm" : proprietary).toUpperCase(),
+      createWave: () => new Backend(independentBinary, independentOptions),
+      createKdb: createIndependentKdb,
+    };
+  }
   const fsdb = isFsdb(filename);
   if (fsdb && preferIndependent) {
     return {

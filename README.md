@@ -32,6 +32,8 @@ npm run package:native
 
 **RTL 追踪和 VCS KDB 模块内部逻辑图需要 Wave Workbench 修改版 VIDE。** 从本项目的 VIDE fork 的 `wave-workbench-trace` 分支构建 VSIX，安装到运行 Wave Workbench 的同一个扩展宿主。Remote SSH 场景请安装到远端。该版本提供 RTL Trace schema 1、隔离仿真工程和模块内部赋值查询。 [修改版 VIDE](https://github.com/AndreaFrederica/vide/tree/wave-workbench-trace) · [构建安装与 RTL 追踪快速入门](RTL_TRACE_QUICKSTART.md#安装两份扩展)
 
+SHM、WDB 和 SPICE 波形可和现有实数波形共用查看与查询。SHM 和 WDB 的 Linux x64 后端在打开波形时加载本机厂商库。 [工具路径和模拟波形回归](ANALOG_WAVE_PLAN.md#厂商-sdk-与-spice-实测)
+
 ## 跑通第一个 Verilator 示例
 
 用 Verilator 5.054 和仓库自带的计数器示例生成一份真实 FST 与实例树。FST 仿真构建可能需要系统的 LZ4 和 zlib 开发包。 [Verilator 追踪与 JSON 参数](https://verilator.org/guide/latest/exe_verilator.html)

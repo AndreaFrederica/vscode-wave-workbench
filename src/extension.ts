@@ -1035,11 +1035,31 @@ function activate(context: vscode.ExtensionContext) {
       filename = (
         await vscode.window.showOpenDialog({
           title: "打开波形",
-          filters: { Waveforms: ["fsdb", "fst", "vcd"] },
+          filters: {
+            Waveforms: [
+              "fsdb",
+              "fst",
+              "vcd",
+              "dsn",
+              "wdb",
+              "wlf",
+              "raw",
+              "psfascii",
+              "tran",
+            ],
+          },
           canSelectMany: false,
         })
       )?.[0]?.fsPath;
     if (!filename) return;
+    if (/\.shm$/i.test(filename)) {
+      const components = (await fs.promises.readdir(filename)).filter((file) =>
+        /\.dsn$/i.test(file),
+      );
+      if (components.length !== 1)
+        throw Error("SHM requires one DSN component");
+      filename = path.join(filename, components[0]);
+    }
     const uri = vscode.Uri.file(filename);
     await context.workspaceState.update("lastWaveform", filename);
     const findViewer = () =>

@@ -57,3 +57,44 @@ endmodule
 - [ ] **A5 连续时间波形**　用真实 AMS 或 SPICE 数据核对电压、电流、时间精度、非均匀采样和缺样。根据用户实际产物扩展导入，按格式分别验证。
 
 首期可交付范围为 A1 的 VCD/FST，实现实数和数字同屏查看与游标取值。首条解码验收从不等间隔的电压采样开始，经施密特滞回生成虚拟数字信号，再用数字时钟关联 ADC 输出。三个引擎需要对同一份采样给出一致的阈值事件、时间证据和码值对照。
+
+## 厂商 SDK 与 SPICE 实测
+
+Linux x64 扩展使用固定版本的 Ondas fork。安装 SDK 后通过 VS Code 的用户设置配置工具路径。Remote SSH 下配置远端路径。构建 Wave Workbench 时可以直接编译 SDK 适配层。 [Ondas fork](https://github.com/AndreaFrederica/ondas/tree/wave-workbench-sdk)
+
+| 格式 | 使用方式 | 验证范围 |
+|---|---|---|
+| SHM | 打开 `.shm` 目录内的 `.dsn`，也可向后台 MCP 传入整个 `.shm` 路径。配置 `waveWorkbench.xceliumHome` 或 `XCELIUM_HOME` | Xcelium 23.09，同一时间轴的数字和实数，区间初值和截断 |
+| WDB | 打开 `.wdb`，配置 `waveWorkbench.vivadoHome` 或 `XILINX_VIVADO` | XSim 2021.2 的 SDK 路径，同一时间轴的数字和实数，区间初值和截断。原生文件解析仍属研究任务 |
+| WLF | 配置 `waveWorkbench.wlf2vcdPath` 指向 Questa 安装的 `wlf2vcd`。后台 MCP 使用 `WAVE_WORKBENCH_WLF2VCD` | 转换后沿用 VCD 读取器和 128 MiB 限制。当前环境缺少 Questa Reader SDK 和转换器，实际 WLF 待验收 |
+| PSF ASCII | 从 Spectre 输出实值瞬态数据，打开 `.tran` 或 `.psfascii` | Spectre 25.1 RC 瞬态，电压单位、区间测量和 CSV 导出。二进制 PSF 和 PSFXL 待验收 |
+| RAW | 打开 ngspice 的单 plot ASCII 或 little-endian binary 文件 | RC 瞬态电压、电流、AC 复数分量，ASCII 与 binary 逐点对照 |
+
+RAW 和 PSF ASCII 使用现有的窗口查询。瞬态使用 1 fs tick。RAW 的 AC 使用 1 mHz tick，复数保存在成对的 `.re` 和 `.im` 实数通道。当前内存读取上限为每文件 400 万个标量。 [ngspice RAW 文件说明](https://ngspice.sourceforge.io/docs/ngspice-45-manual.pdf)
+
+从工作区外的临时目录复现，以下命令中的 `fixture` 指向本仓库的 `test/fixtures/analog`。WDB 和 SHM 使用同一个 testbench。
+
+```sh
+xrun -64bit -access +rwc +define+DUMP_SHM "$fixture/vendor_real.sv"
+xvlog -sv "$fixture/vendor_real.sv"
+xelab mixed_tb -debug all -s ww_mixed
+printf '%s\n' 'log_wave -r /mixed_tb/*' 'run all' 'quit' > run.tcl
+xsim ww_mixed -wdb mixed.wdb -tclbatch run.tcl
+spectre -64 -format psfascii -raw results "$fixture/rc.scs"
+ngspice -n -b "$fixture/rc.cir"
+```
+
+回到 Wave Workbench 工作树，构建本机后端后运行回归。环境变量接收实际生成的绝对路径。WDB 直接运行后端测试时需同时设置 Vivado 的 `RDI_DATADIR` 和 `LD_LIBRARY_PATH`。扩展会根据所选工具路径给 WDB 子进程设置这两个变量。
+
+```sh
+export WAVE_TEST_ANALOG_SHM=/path/to/mixed.shm
+export WAVE_TEST_ANALOG_WDB=/path/to/mixed.wdb
+export WAVE_TEST_ANALOG_PSF=/path/to/results/tr.tran.tran
+export WAVE_TEST_NGSPICE_DIR=/path/to/ngspice-outputs
+export XCELIUM_HOME=/path/to/xcelium
+export XILINX_VIVADO=/path/to/vivado
+export RDI_DATADIR="$XILINX_VIVADO/data"
+export LD_LIBRARY_PATH="$XILINX_VIVADO/lib/lnx64.o${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+npm run build
+node --test test/analog-wave.test.js
+```

@@ -248,7 +248,7 @@
       "explorer/context": [
         {
           "command": "waveWorkbench.open",
-          "when": "resourceExtname == .fsdb || resourceExtname == .fst || resourceExtname == .vcd",
+          "when": "resourceExtname == .fsdb || resourceExtname == .fst || resourceExtname == .vcd || resourceExtname == .wdb || resourceExtname == .wlf || resourceExtname == .raw || resourceExtname == .psfascii || resourceExtname == .tran || resourceExtname == .dsn",
           "group": "navigation"
         },
         {
@@ -358,6 +358,24 @@
           },
           {
             "filenamePattern": "*.fst"
+          },
+          {
+            "filenamePattern": "**/*.shm/*.dsn"
+          },
+          {
+            "filenamePattern": "*.wdb"
+          },
+          {
+            "filenamePattern": "*.wlf"
+          },
+          {
+            "filenamePattern": "*.raw"
+          },
+          {
+            "filenamePattern": "*.psfascii"
+          },
+          {
+            "filenamePattern": "*.tran"
           }
         ],
         "priority": "default"
@@ -366,6 +384,24 @@
     "configuration": {
       "title": "Wave Workbench",
       "properties": {
+        "waveWorkbench.xceliumHome": {
+          "type": "string",
+          "scope": "machine",
+          "default": "",
+          "description": "Xcelium installation on the extension host for SHM (Linux x64). Falls back to XCELIUM_HOME."
+        },
+        "waveWorkbench.vivadoHome": {
+          "type": "string",
+          "scope": "machine",
+          "default": "",
+          "description": "Vivado installation on the extension host for WDB (Linux x64). Falls back to XILINX_VIVADO."
+        },
+        "waveWorkbench.wlf2vcdPath": {
+          "type": "string",
+          "scope": "machine",
+          "default": "",
+          "description": "Installed Questa wlf2vcd executable for WLF import."
+        },
         "waveWorkbench.backendPath": {
           "type": "string",
           "default": "",

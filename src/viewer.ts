@@ -37,7 +37,7 @@ export interface Viewer {
   document: WaveDocument;
   panel: vscode.WebviewPanel;
   backend: Backend;
-  backendKind: "independent" | "verdi" | "vcd" | "fst";
+  backendKind: "independent" | "verdi" | "vcd" | "fst" | "analog";
   switchBackend: (choice: FsdbBackend) => Promise<string>;
   meta: Metadata;
   uri: vscode.Uri;

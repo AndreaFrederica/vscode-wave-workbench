@@ -1159,7 +1159,7 @@ timeUnitSelect.onchange = () => {
 };
 function updateTimeUnit() {
   if (!meta) return;
-  timeUnitSelect.disabled = false;
+  timeUnitSelect.disabled = meta.axis === "frequency";
   nativeTimeUnit.textContent = "原始 (" + meta.scale + ")";
   if (timeUnitSelect.value === (displayScale || "")) return;
   customTimeUnit.remove();

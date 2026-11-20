@@ -274,3 +274,96 @@ test(
     }
   },
 );
+
+async function openAnalog(t, filename, env) {
+  const backend = new Backend(binary, { args: ["--independent"], useVerdiLibraries: false, env });
+  t.after(() => backend.dispose());
+  const meta = await backend.request("open", { path: filename });
+  return {
+    meta,
+    async window(signal, start = meta.start, end = meta.end, limit = 5000) {
+      return (await backend.request("query", {
+        signals: [signal.id], start, end, limit,
+      }))[signal.id];
+    },
+  };
+}
+
+for (const [variable, reader] of [["WAVE_TEST_ANALOG_SHM", "shm-lib"], ["WAVE_TEST_ANALOG_WDB", "wdb-lib"]]) {
+  test(`${reader} reads real and digital samples with the same clock`, {
+    skip: !process.env[variable] || !existsSync(binary),
+  }, async (t) => {
+    const wave = await openAnalog(t, process.env[variable]);
+    const { meta } = wave;
+    assert.equal(meta.backend, reader);
+    assert.equal(meta.scale, "1ns");
+    const voltage = meta.signals.find(({ name }) => name === "voltage");
+    const ready = meta.signals.find(({ name }) => name === "ready");
+    assert.equal(voltage.real, true);
+    assert.equal(ready.real, undefined);
+    assert.deepEqual((await wave.window(voltage)).events, [
+      ["0", "-0.125"], ["4", "0.125"], ["9", "0.9"], ["16", "0.75"],
+    ]);
+    assert.deepEqual((await wave.window(ready)).events, [["0", "0"], ["9", "1"]]);
+    assert.deepEqual(await wave.window(voltage, "5", "16", 2), {
+      events: [["4", "0.125"], ["9", "0.9"]], truncated: true,
+    });
+  });
+}
+
+test("Spectre transient PSF ASCII preserves voltage values and units", {
+  skip: !process.env.WAVE_TEST_ANALOG_PSF || !existsSync(binary),
+}, async (t) => {
+  const wave = await openAnalog(t, process.env.WAVE_TEST_ANALOG_PSF);
+  const out = wave.meta.signals.find(({ name }) => name === "out");
+  assert.equal(wave.meta.backend, "rust-psfascii");
+  assert.equal(wave.meta.scale, "1fs");
+  assert.equal(out.unit, "V");
+  const history = await wave.window(out);
+  assert.equal(history.truncated, false);
+  assert.equal(history.events[0][1], "0");
+  assert.equal(history.events.at(-1)[0], "20000000");
+  const result = measureAnalog(history.events, 0n, 20000000n);
+  assert(result.max > .9 && result.max < 1.01);
+  const { serializeClip } = require("../dist/wave-clip");
+  const csv = serializeClip({
+    waveform: process.env.WAVE_TEST_ANALOG_PSF,
+    timescale: wave.meta.scale, start: "0", end: "20000000",
+    traces: [{ ...out, label: out.name, path: "tran.out", ...history }],
+  }, "csv");
+  assert.match(csv, /20000000,"1fs","[^"]+",false,real,"V"/);
+});
+
+test("ngspice ASCII and binary agree for transient and complex AC", {
+  skip: !process.env.WAVE_TEST_NGSPICE_DIR || !existsSync(binary),
+}, async (t) => {
+  for (const [kind, scale] of [["tran", "1fs"], ["ac", "1mHz"]]) {
+    const [ascii, binary] = await Promise.all(
+      ["ascii", "binary"].map(format => openAnalog(t, path.join(
+        process.env.WAVE_TEST_NGSPICE_DIR, `${kind}-${format}.raw`,
+      ))),
+    );
+    assert.equal(ascii.meta.scale, scale);
+    assert.deepEqual(ascii.meta.signals, binary.meta.signals);
+    for (const signal of ascii.meta.signals) {
+      const [left, right] = await Promise.all([
+        ascii.window(signal), binary.window(signal),
+      ]);
+      assert.deepEqual(left.events.map(([tick]) => tick), right.events.map(([tick]) => tick));
+      left.events.forEach(([, value], index) => {
+        assert(Math.abs(Number(value) - Number(right.events[index][1])) <= 1e-13);
+      });
+    }
+    if (kind === "ac") {
+      const omegaRC = 2 * Math.PI * 1e9 * 1e-9;
+      for (const [name, expected] of [
+        ["v(out).re", 1 / (1 + omegaRC ** 2)],
+        ["v(out).im", -omegaRC / (1 + omegaRC ** 2)],
+      ]) {
+        const signal = ascii.meta.signals.find(s => s.name === name);
+        const sample = (await ascii.window(signal, ascii.meta.end)).events.at(-1);
+        assert(Math.abs(Number(sample[1]) - expected) <= 1e-12);
+      }
+    }
+  }
+});

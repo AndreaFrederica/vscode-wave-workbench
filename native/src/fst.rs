@@ -77,6 +77,7 @@ impl Fst {
                         width: length.max(1),
                         supported,
                         real,
+                        unit: None,
                     });
                 }
                 _ => {}

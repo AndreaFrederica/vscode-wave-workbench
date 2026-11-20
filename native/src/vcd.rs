@@ -12,6 +12,8 @@ pub struct Signal {
     pub supported: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub real: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }
 pub type Events = Vec<(u64, String)>;
 #[derive(Default)]
@@ -69,6 +71,7 @@ pub fn parse_vcd(text: &str) -> Result<Vcd, String> {
                         width,
                         supported: args[0] != "string",
                         real: matches!(args[0], "real" | "realtime" | "shortreal" | "wreal"),
+                        unit: None,
                     });
                     v.data.entry(id).or_default();
                     if v.signals.len() > 200_000 {

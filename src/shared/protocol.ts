@@ -62,6 +62,7 @@ export interface Metadata {
   scale: string;
   backend: string;
   supportsOrderedHistory?: boolean;
+  axis?: "time" | "frequency";
   title?: string;
   vide?: string;
 }

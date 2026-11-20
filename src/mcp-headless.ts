@@ -43,7 +43,7 @@ const clipInputs = {
 const definitions = [
   tool(
     "wave_open",
-    "Open FSDB, FST, VCD or a .waveproj in the background.",
+    "Open a waveform or .waveproj in the background.",
     {
       path: { type: "string" },
       backend: { type: "string", enum: ["auto", "independent", "verdi"] },
@@ -114,6 +114,7 @@ async function main(workspace: string) {
     independentBackendPath: process.env.WAVE_WORKBENCH_INDEPENDENT_BACKEND,
     backendPath: process.env.WAVE_WORKBENCH_VERDI_BACKEND,
     verdiHome: process.env.VERDI_HOME,
+    wlf2vcdPath: process.env.WAVE_WORKBENCH_WLF2VCD,
   };
   const log = (message: string) => process.stderr.write(message);
   const extension = {
@@ -131,8 +132,15 @@ async function main(workspace: string) {
       ? await readWaveProject(filename)
       : undefined;
     filename = project?.waveform ?? filename;
-    if (!isWaveform(filename) || !(await fs.stat(filename)).isFile())
-      throw Error("Expected an FSDB, FST or VCD waveform.");
+    if (
+      !isWaveform(filename) ||
+      !(/\.shm$/i.test(filename)
+        ? (await fs.stat(filename)).isDirectory()
+        : (await fs.stat(filename)).isFile())
+    )
+      throw Error(
+        "Expected an accessible waveform file or SHM database directory.",
+      );
     const previous = sessions.get(filename);
     if (
       previous &&

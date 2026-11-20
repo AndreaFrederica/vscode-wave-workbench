@@ -1,0 +1,17 @@
+RC transient and AC
+Vin in 0 pulse(0 1 1n 100p 100p 5n 12n) ac 1
+R1 in out 1k
+C1 out 0 1p
+.control
+tran 20p 20n
+set filetype=ascii
+write tran-ascii.raw v(in) v(out) i(vin)
+set filetype=binary
+write tran-binary.raw v(in) v(out) i(vin)
+ac dec 10 1k 1g
+write ac-binary.raw v(out)
+set filetype=ascii
+write ac-ascii.raw v(out)
+quit
+.endc
+.end
