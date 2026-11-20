@@ -12,7 +12,14 @@ import { LiveDebugAdapter, liveDebugType } from "./live-debug";
 import { LiveWaveView, liveWaveViewId } from "./live-wave-view";
 import type { SchematicGraph } from "./shared/schematic";
 import type { Viewer, WaveDocument } from "./viewer";
-import type { ClipContext, Signal, Location, WaveClip, TagState, WaveState } from "./shared/protocol";
+import type {
+  ClipContext,
+  Signal,
+  Location,
+  WaveClip,
+  TagState,
+  WaveState,
+} from "./shared/protocol";
 import { normalizeTagColors, tagStyle } from "./shared/tags";
 import * as vscode from "vscode";
 import * as path from "node:path";
@@ -23,40 +30,114 @@ import { kdbSchematicRoots } from "./kdb-schematic";
 
 import { createWaveDocuments } from "./wave-documents";
 import { createWaveEditor } from "./wave-editor";
-import { backendChoices, backendPlan, isFsdb, isWaveform, type FsdbBackend } from "./backend-selection";
-import { identifiers, resolveSelection, codeOnly, portConnection } from "./rtl-selection";
+import {
+  backendChoices,
+  backendPlan,
+  isFsdb,
+  isWaveform,
+  type FsdbBackend,
+} from "./backend-selection";
+import {
+  identifiers,
+  resolveSelection,
+  codeOnly,
+  portConnection,
+} from "./rtl-selection";
 import { restoreView } from "./view-state";
-import { designSnapshot, readWaveProject, saveWaveProject, type TraceProjectSelection } from "./project";
+import {
+  designSnapshot,
+  readWaveProject,
+  saveWaveProject,
+  type TraceProjectSelection,
+} from "./project";
 import { createDecoderGroup, loadDecoderProfiles } from "./decoder-config";
-import { createScriptDecoder, decoderRegistry, type DecoderDefinition } from "./decoder-runtime/registry";
+import {
+  createScriptDecoder,
+  decoderRegistry,
+  type DecoderDefinition,
+} from "./decoder-runtime/registry";
 import { DecoderScheduler } from "./decoder-runtime/scheduler";
 import { idPattern, type DecoderInstance } from "./decoder-runtime/types";
-import { builtinProfiles, decodeWord, supportsProfile } from "./shared/decoders";
+import {
+  builtinProfiles,
+  decodeWord,
+  supportsProfile,
+} from "./shared/decoders";
 import { findRtlSignals, findSignal, readSignalsAt } from "./signal-lookup";
 import { serveWaveMcp } from "./mcp";
 import { createWaveAnalysis, isAnalysisTool } from "./wave-analysis";
 import { decodeWaveWindow } from "./wave-decoder-service";
 import { editWaveView } from "./wave-view-tools";
-import { runWaveMath, type Operation, type MathOptions } from "./wave-math-runtime";
-import { controlSimulation, launchSimulation, simulationHistory, simulationIsActive } from "./wave-live-tools";
+import {
+  runWaveMath,
+  type Operation,
+  type MathOptions,
+} from "./wave-math-runtime";
+import {
+  controlSimulation,
+  launchSimulation,
+  simulationHistory,
+  simulationIsActive,
+} from "./wave-live-tools";
 import { tclWaveTool, type WaveToolHandler } from "./wave-tools";
 import { createWaveTaskStatus } from "./wave-task-status";
 import { VerilatorDesign, verilatorTreeFile } from "./verilator";
-import { clipFormats, collectClip, serializeClip, type ClipFormat, type ClipOptions } from "./wave-clip";
+import {
+  clipFormats,
+  collectClip,
+  serializeClip,
+  type ClipFormat,
+  type ClipOptions,
+} from "./wave-clip";
 import * as WaveSignal from "./shared/signals";
 import { KdbSession, mapPrefix } from "./kdb";
 import { Sidebar } from "./sidebar";
 import { WaveCommands, HELP, formatValue, quote } from "./commands";
 import { moduleAt, commonScope, SourceFiles } from "./source-sync";
 import { TclRunner } from "./tcl";
-import { appendContinuationReport, declaredSignalName, continuationMermaidPages, continuationReport, mergeTemporalContinuationGraph, followTemporalFrontier, TraceContextChanged, observationReport, selectionText, traceSignalScope, temporalTraceReferences, temporalWaveformSignals, traceReport, type TraceDirection, type VideTrace, type VideAnalysisApi, type ContinuationTrace, type ContinuationWalk, type TemporalContinuation } from "./rtl-trace";
-import { mergeStaticContinuationGraph, mergedStaticMermaid, staticContinuationMermaid, staticContinuationReport, type StaticWalk } from "./rtl-static-continuations";
+import {
+  appendContinuationReport,
+  declaredSignalName,
+  continuationMermaidPages,
+  continuationReport,
+  mergeTemporalContinuationGraph,
+  followTemporalFrontier,
+  TraceContextChanged,
+  observationReport,
+  selectionText,
+  traceSignalScope,
+  temporalTraceReferences,
+  temporalWaveformSignals,
+  traceReport,
+  type TraceDirection,
+  type VideTrace,
+  type VideAnalysisApi,
+  type ContinuationTrace,
+  type ContinuationWalk,
+  type TemporalContinuation,
+} from "./rtl-trace";
+import {
+  mergeStaticContinuationGraph,
+  mergedStaticMermaid,
+  staticContinuationMermaid,
+  staticContinuationReport,
+  type StaticWalk,
+} from "./rtl-static-continuations";
 
 import { previewVideManifest } from "./vide-project-config";
 
-import { executionMermaidPages, executionReport, readExecutionEvidence } from "./rtl-execution";
+import {
+  executionMermaidPages,
+  executionReport,
+  readExecutionEvidence,
+} from "./rtl-execution";
 import { mermaidMarkdown } from "./trace-mermaid";
-import { isVcsLiveSignal, LiveTraceSession, parseLiveLaunch, type LiveLaunchOptions } from "./rtl-live-trace";
+import {
+  isVcsLiveSignal,
+  LiveTraceSession,
+  parseLiveLaunch,
+  type LiveLaunchOptions,
+} from "./rtl-live-trace";
 import { createTraceExplorer } from "./trace-explorer";
 
 function rtlValue(raw: string, width: number) {
@@ -117,13 +198,21 @@ function activate(context: vscode.ExtensionContext) {
         )
       : selection;
   }
-  const analyses = createWaveAnalysis<Viewer>({
-    file: vscode.Uri.file,
-    position: (line, character) => new vscode.Position(line, character),
-    cancellation: () => new vscode.CancellationTokenSource(),
-    getVide: async () => vscode.extensions.getExtension<VideAnalysisApi>("pascal-lab.vide-code-extension")?.activate(),
-    workspace: vscode.workspace,
-  }, traceProjectSelection, () => liveTrace ?? latestSimulation, trackTask);
+  const analyses = createWaveAnalysis<Viewer>(
+    {
+      file: vscode.Uri.file,
+      position: (line, character) => new vscode.Position(line, character),
+      cancellation: () => new vscode.CancellationTokenSource(),
+      getVide: async () =>
+        vscode.extensions
+          .getExtension<VideAnalysisApi>("pascal-lab.vide-code-extension")
+          ?.activate(),
+      workspace: vscode.workspace,
+    },
+    traceProjectSelection,
+    () => liveTrace ?? latestSimulation,
+    trackTask,
+  );
   context.subscriptions.push(analyses);
   const {
     traceRtlPosition,
@@ -991,8 +1080,11 @@ function activate(context: vscode.ExtensionContext) {
         (name, args, dir) => {
           target.scriptDirectory = dir;
           if (name === "waveTool") {
-            if (!automation) throw Error("Wave Workbench requires an open workspace.");
-            return Promise.resolve(tclWaveTool(automation, args, undefined, target.uri.fsPath)).then((result) => {
+            if (!automation)
+              throw Error("Wave Workbench requires an open workspace.");
+            return Promise.resolve(
+              tclWaveTool(automation, args, undefined, target.uri.fsPath),
+            ).then((result) => {
               if (args[0]?.value === "wave_open" && current) target = current;
               return result;
             });
@@ -1108,8 +1200,15 @@ function activate(context: vscode.ExtensionContext) {
   ) {
     await viewer.ready;
     const { backend, meta } = viewer;
-    const decoded = await decodeWaveWindow({ backend, meta }, decoderScheduler,
-      await listWaveDecoders(viewer), instance, start, end, signal);
+    const decoded = await decodeWaveWindow(
+      { backend, meta },
+      decoderScheduler,
+      await listWaveDecoders(viewer),
+      instance,
+      start,
+      end,
+      signal,
+    );
     if (viewer.disposed || viewer.backend !== backend || viewer.meta !== meta)
       throw Error("The waveform changed during decoder replay.");
     return decoded;
@@ -1577,7 +1676,11 @@ function activate(context: vscode.ExtensionContext) {
     target = "declaration",
   ) {
     if (!viewer.kdb && !(await viewer.attachKdb())) return;
-    const { file, line, record } = await sourceLocation(viewer, fullname, target);
+    const { file, line, record } = await sourceLocation(
+      viewer,
+      fullname,
+      target,
+    );
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
     let editor;
     suppressEditorSync++;
@@ -2799,7 +2902,10 @@ function activate(context: vscode.ExtensionContext) {
     }
     const waveformPath = viewer?.uri.fsPath ?? restored?.state.waveform;
     const { readModule, closeLogicProject } = moduleSchematicReader(
-      design, viewer, waveformPath, restored?.state.traceProject,
+      design,
+      viewer,
+      waveformPath,
+      restored?.state.traceProject,
     );
     let graph;
     try {
@@ -3896,7 +4002,9 @@ function activate(context: vscode.ExtensionContext) {
     vscode.window.registerWebviewViewProvider(liveWaveViewId, liveWave, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
-    vscode.commands.registerCommand("waveWorkbench.showLiveWave", () => liveWave.show()),
+    vscode.commands.registerCommand("waveWorkbench.showLiveWave", () =>
+      liveWave.show(),
+    ),
   );
 
   let latestSimulation: LiveTraceSession | undefined;
@@ -3905,19 +4013,27 @@ function activate(context: vscode.ExtensionContext) {
     root: workspace ?? process.cwd(),
     active: () => liveTrace,
     start: async (...args) => {
-      if (!vscode.workspace.isTrusted) throw Error("Launching a simulation requires a trusted workspace.");
+      if (!vscode.workspace.isTrusted)
+        throw Error("Launching a simulation requires a trusted workspace.");
       if (launchingSimulation || simulationIsActive(liveTrace))
         throw Error("Stop the active simulation before starting another.");
       launchingSimulation = true;
       try {
-        return useLiveTrace(await trackTask("启动 RTL 调试", args[0], () => LiveTraceSession.start(...args)));
+        return useLiveTrace(
+          await trackTask("启动 RTL 调试", args[0], () =>
+            LiveTraceSession.start(...args),
+          ),
+        );
       } finally {
         launchingSimulation = false;
       }
     },
-    stop: stopLiveTrace, showWave: showLiveWave,
+    stop: stopLiveTrace,
+    showWave: showLiveWave,
   });
-  context.subscriptions.push(debugAutomation, { dispose: () => liveTrace?.dispose() });
+  context.subscriptions.push(debugAutomation, {
+    dispose: () => liveTrace?.dispose(),
+  });
 
   function useLiveTrace(session: LiveTraceSession) {
     liveTrace?.dispose();
@@ -3945,25 +4061,45 @@ function activate(context: vscode.ExtensionContext) {
       resolveDebugConfiguration(_folder, configuration) {
         return {
           ...configuration,
-          internalConsoleOptions: configuration.internalConsoleOptions ?? "neverOpen",
+          internalConsoleOptions:
+            configuration.internalConsoleOptions ?? "neverOpen",
         };
       },
     }),
     vscode.debug.registerDebugAdapterDescriptorFactory(liveDebugType, {
       createDebugAdapterDescriptor(debugSession) {
-        if (liveDebugger || debugAutomation.attached) throw Error("A Wave Workbench RTL debugger is already active.");
+        if (liveDebugger || debugAutomation.attached)
+          throw Error("A Wave Workbench RTL debugger is already active.");
         const adapter = new LiveDebugAdapter(vscode, {
-          root: debugSession.workspaceFolder?.uri.fsPath ?? workspace ?? process.cwd(),
+          root:
+            debugSession.workspaceFolder?.uri.fsPath ??
+            workspace ??
+            process.cwd(),
           active: () => liveTrace,
           start: async (...args) => {
-            if (liveTrace && ["running", "stepping", "paused"].includes(liveTrace.status().state))
-              throw Error("Attach to the active simulation or stop it before launching another.");
+            if (
+              liveTrace &&
+              ["running", "stepping", "paused"].includes(
+                liveTrace.status().state,
+              )
+            )
+              throw Error(
+                "Attach to the active simulation or stop it before launching another.",
+              );
             const session = await trackTask("启动 RTL 调试", args[0], () =>
               LiveTraceSession.start(...args),
             );
-            if (liveDebugger !== adapter || (liveTrace && ["running", "stepping", "paused"].includes(liveTrace.status().state))) {
+            if (
+              liveDebugger !== adapter ||
+              (liveTrace &&
+                ["running", "stepping", "paused"].includes(
+                  liveTrace.status().state,
+                ))
+            ) {
               session.dispose();
-              throw Error("The live simulation or debugger changed during launch.");
+              throw Error(
+                "The live simulation or debugger changed during launch.",
+              );
             }
             return useLiveTrace(session);
           },
@@ -3977,12 +4113,23 @@ function activate(context: vscode.ExtensionContext) {
         return new vscode.DebugAdapterInlineImplementation(adapter);
       },
     }),
-    vscode.commands.registerCommand("waveWorkbench.debugLiveTrace", async () => {
-      if (!liveTrace) return report(Error("Start a Wave Workbench live simulation before attaching."));
-      await vscode.debug.startDebugging(vscode.workspace.workspaceFolders?.[0], {
-        type: liveDebugType, request: "attach", name: "Wave Workbench RTL",
-      });
-    }),
+    vscode.commands.registerCommand(
+      "waveWorkbench.debugLiveTrace",
+      async () => {
+        if (!liveTrace)
+          return report(
+            Error("Start a Wave Workbench live simulation before attaching."),
+          );
+        await vscode.debug.startDebugging(
+          vscode.workspace.workspaceFolders?.[0],
+          {
+            type: liveDebugType,
+            request: "attach",
+            name: "Wave Workbench RTL",
+          },
+        );
+      },
+    ),
   );
 
   async function startLiveTrace(
@@ -4429,7 +4576,9 @@ function activate(context: vscode.ExtensionContext) {
   if (workspace) {
     try {
       const analysisTools = analyses.tools(workspace, (filename) =>
-        filename ? [...viewers].find((viewer) => viewer.uri.fsPath === filename) : current,
+        filename
+          ? [...viewers].find((viewer) => viewer.uri.fsPath === filename)
+          : current,
       );
       const withTask =
         (
@@ -4467,279 +4616,381 @@ function activate(context: vscode.ExtensionContext) {
         };
       const createAutomation = () =>
         withTask(
-            async function request(name, args, operation): Promise<unknown> {
-              if (isAnalysisTool(name)) {
-                const result = await analysisTools(name, args, operation);
-                if (args.show === true) {
-                  const viewer = args.waveform ? [...viewers].find((v) => v.uri.fsPath === args.waveform) : current;
-                  if (name === "wave_source" && viewer) await openKdbSource(viewer, String(args.signal), String(args.target ?? "declaration"));
-                  if (name === "wave_module_schematic" && viewer &&
-                    (viewer.kdb instanceof KdbSession || viewer.kdb instanceof VerilatorDesign))
-                    await showModuleSchematic(viewer.kdb, viewer, (result as SchematicGraph).module?.instance);
-                  if (name === "wave_schematic" && viewer)
-                    await showWaveSchematic(viewer, String(args.signal), args.direction === "loads" ? "loads" : "drivers");
-                }
-                return result;
-              }
-              if (name === "wave_live_start") {
-                if (!vscode.workspace.isTrusted)
-                  throw Error("Launching a simulation requires a trusted workspace.");
-                if (launchingSimulation || simulationIsActive(liveTrace))
-                  throw Error("Stop the active simulation before starting another.");
-                launchingSimulation = true;
-                try {
-                  const session = await launchSimulation(workspace, args, (message) => output.appendLine(message), operation);
-                  if (simulationIsActive(liveTrace)) {
-                    session.dispose();
-                    session.disposeWaveHistory();
-                    throw Error("The active simulation changed during launch.");
-                  }
-                  return useLiveTrace(session).status();
-                } finally {
-                  launchingSimulation = false;
-                }
-              }
-              if (name === "wave_debug_request") {
-                if (liveDebugger) throw Error("Detach the VS Code debugger before opening an automation debug session.");
-                return debugAutomation.request(args, operation);
-              }
-              if (name === "wave_live_debug") {
-                if (args.show !== true) {
-                  if (liveDebugger) throw Error("Detach the VS Code debugger before opening an automation debug session.");
-                  return debugAutomation.attachOrDetach(args, operation);
-                }
-                if (args.action === "attach") {
-                  if (!simulationIsActive(liveTrace)) throw Error("Start a live simulation harness first.");
-                  return { attached: await vscode.debug.startDebugging(vscode.workspace.workspaceFolders?.[0], {
-                    ...args.configuration as Record<string, unknown>,
-                    type: liveDebugType, request: "attach", name: "Wave Workbench RTL",
-                    program: undefined,
-                  }) };
-                }
-                if (vscode.debug.activeDebugSession?.type === liveDebugType) {
-                  await vscode.debug.stopDebugging(vscode.debug.activeDebugSession);
-                  return { attached: false };
-                }
-                throw Error("No active VS Code Wave Workbench debugger to detach.");
-              }
-              if (name === "wave_live_status" || name === "wave_live_control" ||
-                  name === "wave_live_history" || name === "wave_live_stop") {
-                operation.throwIfAborted();
-                const session = latestSimulation;
-                if (!session) throw Error("Start a live simulation harness first.");
-                if (name === "wave_live_status") return session.status();
-                if (name === "wave_live_history") return simulationHistory(session, args, operation);
-                if (name === "wave_live_stop") {
-                  stopLiveTrace(session);
-                  return session.status();
-                }
-                return controlSimulation(session, args, operation);
-              }
-              if (name === "wave_list")
-                return {
-                  selected: current?.uri.fsPath ?? null,
-                  views: [...viewers].map((v) => v.uri.fsPath),
-                };
-              if (name === "wave_open") {
-                const filename = path.resolve(workspace, String(args.path));
+          async function request(name, args, operation): Promise<unknown> {
+            if (isAnalysisTool(name)) {
+              const result = await analysisTools(name, args, operation);
+              if (args.show === true) {
+                const viewer = args.waveform
+                  ? [...viewers].find((v) => v.uri.fsPath === args.waveform)
+                  : current;
+                if (name === "wave_source" && viewer)
+                  await openKdbSource(
+                    viewer,
+                    String(args.signal),
+                    String(args.target ?? "declaration"),
+                  );
                 if (
-                  (!isWaveform(filename) && !/\.waveproj$/i.test(filename)) ||
-                  !fs.existsSync(filename)
+                  name === "wave_module_schematic" &&
+                  viewer &&
+                  (viewer.kdb instanceof KdbSession ||
+                    viewer.kdb instanceof VerilatorDesign)
                 )
-                  throw Error("Waveform or project not found: " + filename);
-                const viewer = /\.waveproj$/i.test(filename)
-                  ? await openProject(filename)
-                  : await openWaveform(filename);
-                if (!viewer?.meta)
-                  throw Error(viewer?.openError ?? "Unable to open waveform");
-                if (args.backend !== undefined) await viewer.switchBackend(args.backend as FsdbBackend);
-                const { start, end, scale, total, backend } = viewer.meta;
-                return { waveform: viewer.uri.fsPath, start, end, scale, total, backend };
+                  await showModuleSchematic(
+                    viewer.kdb,
+                    viewer,
+                    (result as SchematicGraph).module?.instance,
+                  );
+                if (name === "wave_schematic" && viewer)
+                  await showWaveSchematic(
+                    viewer,
+                    String(args.signal),
+                    args.direction === "loads" ? "loads" : "drivers",
+                  );
               }
-              const viewer = args.waveform
-                ? [...viewers].find((v) => v.uri.fsPath === args.waveform)
-                : current;
-              if (name === "wave_tcl" && !viewer && !args.waveform) {
-                let target: Viewer | undefined;
-                const logs: string[] = [];
-                const engine = new WaveCommands({
-                  getViewer: () => target,
-                  open: async (file) => { target = await openWaveform(path.resolve(workspace, file)); },
-                  decodeTransactions: decodeWindow,
-                  decoderProfiles: (waveform) => loadDecoderProfiles(decoderConfigPath(waveform)),
-                });
-                const runner = new TclRunner((command, nodes, directory) => {
+              return result;
+            }
+            if (name === "wave_live_start") {
+              if (!vscode.workspace.isTrusted)
+                throw Error(
+                  "Launching a simulation requires a trusted workspace.",
+                );
+              if (launchingSimulation || simulationIsActive(liveTrace))
+                throw Error(
+                  "Stop the active simulation before starting another.",
+                );
+              launchingSimulation = true;
+              try {
+                const session = await launchSimulation(
+                  workspace,
+                  args,
+                  (message) => output.appendLine(message),
+                  operation,
+                );
+                if (simulationIsActive(liveTrace)) {
+                  session.dispose();
+                  session.disposeWaveHistory();
+                  throw Error("The active simulation changed during launch.");
+                }
+                return useLiveTrace(session).status();
+              } finally {
+                launchingSimulation = false;
+              }
+            }
+            if (name === "wave_debug_request") {
+              if (liveDebugger)
+                throw Error(
+                  "Detach the VS Code debugger before opening an automation debug session.",
+                );
+              return debugAutomation.request(args, operation);
+            }
+            if (name === "wave_live_debug") {
+              if (args.show !== true) {
+                if (liveDebugger)
+                  throw Error(
+                    "Detach the VS Code debugger before opening an automation debug session.",
+                  );
+                return debugAutomation.attachOrDetach(args, operation);
+              }
+              if (args.action === "attach") {
+                if (!simulationIsActive(liveTrace))
+                  throw Error("Start a live simulation harness first.");
+                return {
+                  attached: await vscode.debug.startDebugging(
+                    vscode.workspace.workspaceFolders?.[0],
+                    {
+                      ...(args.configuration as Record<string, unknown>),
+                      type: liveDebugType,
+                      request: "attach",
+                      name: "Wave Workbench RTL",
+                      program: undefined,
+                    },
+                  ),
+                };
+              }
+              if (vscode.debug.activeDebugSession?.type === liveDebugType) {
+                await vscode.debug.stopDebugging(
+                  vscode.debug.activeDebugSession,
+                );
+                return { attached: false };
+              }
+              throw Error(
+                "No active VS Code Wave Workbench debugger to detach.",
+              );
+            }
+            if (
+              name === "wave_live_status" ||
+              name === "wave_live_control" ||
+              name === "wave_live_history" ||
+              name === "wave_live_stop"
+            ) {
+              operation.throwIfAborted();
+              const session = latestSimulation;
+              if (!session)
+                throw Error("Start a live simulation harness first.");
+              if (name === "wave_live_status") return session.status();
+              if (name === "wave_live_history")
+                return simulationHistory(session, args, operation);
+              if (name === "wave_live_stop") {
+                stopLiveTrace(session);
+                return session.status();
+              }
+              return controlSimulation(session, args, operation);
+            }
+            if (name === "wave_list")
+              return {
+                selected: current?.uri.fsPath ?? null,
+                views: [...viewers].map((v) => v.uri.fsPath),
+              };
+            if (name === "wave_open") {
+              const filename = path.resolve(workspace, String(args.path));
+              if (
+                (!isWaveform(filename) && !/\.waveproj$/i.test(filename)) ||
+                !fs.existsSync(filename)
+              )
+                throw Error("Waveform or project not found: " + filename);
+              const viewer = /\.waveproj$/i.test(filename)
+                ? await openProject(filename)
+                : await openWaveform(filename);
+              if (!viewer?.meta)
+                throw Error(viewer?.openError ?? "Unable to open waveform");
+              if (args.backend !== undefined)
+                await viewer.switchBackend(args.backend as FsdbBackend);
+              const { start, end, scale, total, backend } = viewer.meta;
+              return {
+                waveform: viewer.uri.fsPath,
+                start,
+                end,
+                scale,
+                total,
+                backend,
+              };
+            }
+            const viewer = args.waveform
+              ? [...viewers].find((v) => v.uri.fsPath === args.waveform)
+              : current;
+            if (name === "wave_tcl" && !viewer && !args.waveform) {
+              let target: Viewer | undefined;
+              const logs: string[] = [];
+              const engine = new WaveCommands({
+                getViewer: () => target,
+                open: async (file) => {
+                  target = await openWaveform(path.resolve(workspace, file));
+                },
+                decodeTransactions: decodeWindow,
+                decoderProfiles: (waveform) =>
+                  loadDecoderProfiles(decoderConfigPath(waveform)),
+              });
+              const runner = new TclRunner(
+                (command, nodes, directory) => {
                   if (target) target.scriptDirectory = directory;
                   if (command === "waveTool")
-                    return Promise.resolve(tclWaveTool(automation!, nodes, undefined, target?.uri.fsPath, operation)).then((result) => {
+                    return Promise.resolve(
+                      tclWaveTool(
+                        automation!,
+                        nodes,
+                        undefined,
+                        target?.uri.fsPath,
+                        operation,
+                      ),
+                    ).then((result) => {
                       if (nodes[0]?.value === "wave_open") target = current;
                       return result;
                     });
                   return engine.execute(command, nodes);
-                }, { executable: vscode.workspace.getConfiguration("waveWorkbench").get<string>("tclshPath") || undefined,
-                  log: (text) => { if (logs.length < 500) logs.push(text.slice(0, 4096)); } });
-                const abort = () => runner.dispose();
-                operation.addEventListener("abort", abort, { once: true });
-                try {
-                  operation.throwIfAborted();
-                  return { result: await runner.run(String(args.script), workspace), logs };
-                } finally {
-                  operation.removeEventListener("abort", abort);
-                  runner.dispose();
-                }
-              }
-              if (!viewer) throw Error("Open a waveform first");
-              if (name === "wave_close") {
-                if (viewer.running) throw Error("A Tcl script is running in this view.");
-                viewer.panel.dispose();
-                return { waveform: viewer.uri.fsPath, closed: true };
-              }
-              if (name === "wave_design_attach") {
-                operation.throwIfAborted();
-                await viewer.ready;
-                const design = path.resolve(workspace, String(args.path));
-                if (!(await viewer.attachKdb(design, true))) throw Error("Could not attach design: " + design);
-                return { path: viewer.kdb.path, kind: viewer.kdb.kind };
-              }
-              if (name === "wave_view") {
-                await viewer.ready;
-                if (!viewer.panel.visible) viewer.panel.reveal(undefined, true);
-                return editWaveView(viewer, args, operation);
-              }
-              if (name === "wave_search") {
-                await viewer.ready;
-                return viewer.backend.request("search", {
-                  query: String(args.query ?? ""),
-                  offset: Number(args.offset ?? 0),
-                  limit: Number(args.limit ?? 100),
-                });
-              }
-              if (name === "wave_math") {
-                await viewer.ready;
-                const result = await runWaveMath(
-                  { backend: viewer.backend, meta: viewer.meta, filename: viewer.uri.fsPath },
-                  args.operation as Operation, args.signals as string[],
-                  String(args.start ?? viewer.meta.start), String(args.end ?? viewer.meta.end),
-                  (args.options ?? {}) as MathOptions, workspace, vscode.workspace.isTrusted, operation,
-                );
-                if ("signal" in result && !viewer.disposed)
-                  await viewer.panel.webview.postMessage({ type: "virtualCreated", ...result });
-                if ("path" in result && result.path && args.open === true)
-                  await openWaveform(result.path);
-                return result;
-              }
-              if (name === "wave_decoder_list") {
-                const { definitions, warnings } =
-                  await listWaveDecoders(viewer);
-                return {
-                  decoders: [...definitions.values()].map(
-                    ({ manifest }) => manifest,
-                  ),
-                  warnings,
-                };
-              }
-              if (name === "wave_decoder_query") {
-                return decodeWindow(
-                  viewer,
-                  {
-                    decoderId: String(args.decoderId),
-                    bindings: args.bindings as DecoderInstance["bindings"],
-                    options: args.options as DecoderInstance["options"],
+                },
+                {
+                  executable:
+                    vscode.workspace
+                      .getConfiguration("waveWorkbench")
+                      .get<string>("tclshPath") || undefined,
+                  log: (text) => {
+                    if (logs.length < 500) logs.push(text.slice(0, 4096));
                   },
-                  String(args.start),
-                  String(args.end),
-                  operation,
-                );
+                },
+              );
+              const abort = () => runner.dispose();
+              operation.addEventListener("abort", abort, { once: true });
+              try {
+                operation.throwIfAborted();
+                return {
+                  result: await runner.run(String(args.script), workspace),
+                  logs,
+                };
+              } finally {
+                operation.removeEventListener("abort", abort);
+                runner.dispose();
               }
-              if (name === "wave_decoder_attach") {
-                const { definitions } = await listWaveDecoders(viewer);
-                const definition = definitions.get(String(args.decoderId));
-                if (!definition)
-                  throw Error(
-                    "Decoder not found or disabled: " + args.decoderId,
-                  );
-                const instance = {
-                  instanceId: randomUUID(),
-                  decoderId: definition.manifest.id,
-                  engine: definition.manifest.engine,
+            }
+            if (!viewer) throw Error("Open a waveform first");
+            if (name === "wave_close") {
+              if (viewer.running)
+                throw Error("A Tcl script is running in this view.");
+              viewer.panel.dispose();
+              return { waveform: viewer.uri.fsPath, closed: true };
+            }
+            if (name === "wave_design_attach") {
+              operation.throwIfAborted();
+              await viewer.ready;
+              const design = path.resolve(workspace, String(args.path));
+              if (!(await viewer.attachKdb(design, true)))
+                throw Error("Could not attach design: " + design);
+              return { path: viewer.kdb.path, kind: viewer.kdb.kind };
+            }
+            if (name === "wave_view") {
+              await viewer.ready;
+              if (!viewer.panel.visible) viewer.panel.reveal(undefined, true);
+              return editWaveView(viewer, args, operation);
+            }
+            if (name === "wave_search") {
+              await viewer.ready;
+              return viewer.backend.request("search", {
+                query: String(args.query ?? ""),
+                offset: Number(args.offset ?? 0),
+                limit: Number(args.limit ?? 100),
+              });
+            }
+            if (name === "wave_math") {
+              await viewer.ready;
+              const result = await runWaveMath(
+                {
+                  backend: viewer.backend,
+                  meta: viewer.meta,
+                  filename: viewer.uri.fsPath,
+                },
+                args.operation as Operation,
+                args.signals as string[],
+                String(args.start ?? viewer.meta.start),
+                String(args.end ?? viewer.meta.end),
+                (args.options ?? {}) as MathOptions,
+                workspace,
+                vscode.workspace.isTrusted,
+                operation,
+              );
+              if ("signal" in result && !viewer.disposed)
+                await viewer.panel.webview.postMessage({
+                  type: "virtualCreated",
+                  ...result,
+                });
+              if ("path" in result && result.path && args.open === true)
+                await openWaveform(result.path);
+              return result;
+            }
+            if (name === "wave_decoder_list") {
+              const { definitions, warnings } = await listWaveDecoders(viewer);
+              return {
+                decoders: [...definitions.values()].map(
+                  ({ manifest }) => manifest,
+                ),
+                warnings,
+              };
+            }
+            if (name === "wave_decoder_query") {
+              return decodeWindow(
+                viewer,
+                {
+                  decoderId: String(args.decoderId),
                   bindings: args.bindings as DecoderInstance["bindings"],
                   options: args.options as DecoderInstance["options"],
-                };
-                await viewer.ui("decoderAttach", instance);
-                return instance;
+                },
+                String(args.start),
+                String(args.end),
+                operation,
+              );
+            }
+            if (name === "wave_decoder_attach") {
+              const { definitions } = await listWaveDecoders(viewer);
+              const definition = definitions.get(String(args.decoderId));
+              if (!definition)
+                throw Error("Decoder not found or disabled: " + args.decoderId);
+              const instance = {
+                instanceId: randomUUID(),
+                decoderId: definition.manifest.id,
+                engine: definition.manifest.engine,
+                bindings: args.bindings as DecoderInstance["bindings"],
+                options: args.options as DecoderInstance["options"],
+              };
+              await viewer.ui("decoderAttach", instance);
+              return instance;
+            }
+            if (
+              name === "wave_decoder_detach" ||
+              name === "wave_decoder_reload" ||
+              name === "wave_decoder_status"
+            ) {
+              await viewer.ready;
+              return await viewer.ui(
+                name === "wave_decoder_detach"
+                  ? "decoderDetach"
+                  : name === "wave_decoder_reload"
+                    ? "decoderReload"
+                    : "decoderStatus",
+                { instanceId: args.instanceId },
+              );
+            }
+            if (name === "wave_clip" || name === "wave_export") {
+              await viewer.ready;
+              if (!viewer.meta) throw Error("Waveform did not load");
+              if (!viewer.panel.visible) viewer.panel.reveal(undefined, true);
+              const clip = await collectClip(
+                viewer,
+                args as ClipOptions,
+                name === "wave_clip",
+              );
+              if (name === "wave_clip") {
+                await includeClipDecoder(viewer, clip, "json", operation);
+                return clip;
               }
-              if (
-                name === "wave_decoder_detach" ||
-                name === "wave_decoder_reload" ||
-                name === "wave_decoder_status"
-              ) {
-                await viewer.ready;
-                return await viewer.ui(
-                  name === "wave_decoder_detach"
-                    ? "decoderDetach"
-                    : name === "wave_decoder_reload"
-                      ? "decoderReload"
-                      : "decoderStatus",
-                  { instanceId: args.instanceId },
+              const format = args.format as ClipFormat;
+              if (!clipFormats.includes(format))
+                throw Error("Unsupported clip format");
+              await includeClipDecoder(viewer, clip, format, operation);
+              return exportClipArtifact(
+                viewer,
+                clip,
+                format,
+                typeof args.path === "string"
+                  ? path.resolve(workspace, args.path)
+                  : undefined,
+              );
+            }
+            if (name === "wave_save_project") {
+              const destination =
+                typeof args.path === "string"
+                  ? path.resolve(workspace, args.path)
+                  : viewer.document.projectPath ||
+                    viewer.uri.fsPath.replace(/\.[^.]+$/, "") + ".waveproj";
+              const filename = await saveProject(viewer, destination);
+              if (viewer.panel.active && viewer.document.dirty)
+                await vscode.commands.executeCommand(
+                  "workbench.action.files.save",
                 );
-              }
-              if (name === "wave_clip" || name === "wave_export") {
-                await viewer.ready;
-                if (!viewer.meta) throw Error("Waveform did not load");
-                if (!viewer.panel.visible) viewer.panel.reveal(undefined, true);
-                const clip = await collectClip(
-                  viewer,
-                  args as ClipOptions,
-                  name === "wave_clip",
-                );
-                if (name === "wave_clip") {
-                  await includeClipDecoder(viewer, clip, "json", operation);
-                  return clip;
-                }
-                const format = args.format as ClipFormat;
-                if (!clipFormats.includes(format))
-                  throw Error("Unsupported clip format");
-                await includeClipDecoder(viewer, clip, format, operation);
-                return exportClipArtifact(
-                  viewer,
-                  clip,
-                  format,
-                  typeof args.path === "string"
-                    ? path.resolve(workspace, args.path)
-                    : undefined,
-                );
-              }
-              if (name === "wave_save_project") {
-                const destination =
-                  typeof args.path === "string"
-                    ? path.resolve(workspace, args.path)
-                    : viewer.document.projectPath ||
-                      viewer.uri.fsPath.replace(/\.[^.]+$/, "") + ".waveproj";
-                const filename = await saveProject(viewer, destination);
-                if (viewer.panel.active && viewer.document.dirty)
-                  await vscode.commands.executeCommand(
-                    "workbench.action.files.save",
-                  );
-                return { path: filename };
-              }
-              if (name !== "wave_tcl") throw Error("Unknown Wave Workbench tool: " + name);
-              if (viewer.running || tclOutput.has(viewer))
-                throw Error("A Tcl script is running in this view");
-              const logs: string[] = [];
-              tclOutput.set(viewer, logs);
-              try {
-                const result = await executeTcl(viewer, String(args.script));
-                return { result, logs };
-              } finally {
-                tclOutput.delete(viewer);
-              }
-            },
+              return { path: filename };
+            }
+            if (name !== "wave_tcl")
+              throw Error("Unknown Wave Workbench tool: " + name);
+            if (viewer.running || tclOutput.has(viewer))
+              throw Error("A Tcl script is running in this view");
+            const logs: string[] = [];
+            tclOutput.set(viewer, logs);
+            try {
+              const result = await executeTcl(viewer, String(args.script));
+              return { result, logs };
+            } finally {
+              tclOutput.delete(viewer);
+            }
+          },
         );
       automation = createAutomation();
-      if (vscode.workspace.getConfiguration("waveWorkbench").get<boolean>("mcpEnabled"))
-        context.subscriptions.push(serveWaveMcp(
-          workspace, automation, (message) => output.appendLine(String(message)),
-        ));
+      if (
+        vscode.workspace
+          .getConfiguration("waveWorkbench")
+          .get<boolean>("mcpEnabled")
+      )
+        context.subscriptions.push(
+          serveWaveMcp(workspace, automation, (message) =>
+            output.appendLine(String(message)),
+          ),
+        );
     } catch (error) {
       output.appendLine(String(error));
     }

@@ -980,10 +980,22 @@ export function createWaveEditor(
           } else if (msg.type === "rtlModuleSchematic") {
             if (msg.signal === undefined || typeof msg.signal === "string")
               await showWaveModuleSchematic(viewer, msg.signal);
-          } else if (msg.type === "waveMath" && mathActions.includes(msg.operation)) {
+          } else if (
+            msg.type === "waveMath" &&
+            mathActions.includes(msg.operation)
+          ) {
             await showWaveMath(
-              vscode, viewer, msg.operation, msg.signals, msg.range,
-              (work) => trackTask(msg.operation === "fft" ? "计算 FFT" : "计算派生波形", viewer.uri.fsPath, work),
+              vscode,
+              viewer,
+              msg.operation,
+              msg.signals,
+              msg.range,
+              (work) =>
+                trackTask(
+                  msg.operation === "fft" ? "计算 FFT" : "计算派生波形",
+                  viewer.uri.fsPath,
+                  work,
+                ),
               (uri) => openWaveform(uri),
             );
           } else if (msg.type === "analogOperation") {

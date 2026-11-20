@@ -162,7 +162,8 @@ export function serializeClip(
   if (format === "json") return JSON.stringify(clip, null, 2) + "\n";
   if (format === "csv") {
     const hertz = scaleHertz(clip.timescale);
-    const mixed = hertz !== undefined || clip.traces.some((trace) => trace.real);
+    const mixed =
+      hertz !== undefined || clip.traces.some((trace) => trace.real);
     const rows = [
       mixed
         ? "signal,tick,timescale,value,truncated,value_type,unit" +

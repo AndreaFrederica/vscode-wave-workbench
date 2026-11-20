@@ -221,10 +221,13 @@ export function runWaveOperator(
       else resolve(result);
     }
     if (engine === "javascript") {
-      const worker = new Worker(path.join(__dirname, "wave-operator-worker.js"), {
-        workerData: { entry, request },
-        resourceLimits: { maxOldGenerationSizeMb: 128 },
-      });
+      const worker = new Worker(
+        path.join(__dirname, "wave-operator-worker.js"),
+        {
+          workerData: { entry, request },
+          resourceLimits: { maxOldGenerationSizeMb: 128 },
+        },
+      );
       dispose = () => {
         void worker.terminate();
       };

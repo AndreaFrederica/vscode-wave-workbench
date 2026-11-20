@@ -113,7 +113,10 @@ function formatValue(
   if (f === "2com" && bits[0] === "1") number -= 1n << BigInt(width);
   return String(number);
 }
-type CommandViewer = Pick<Viewer, "uri" | "meta" | "backend" | "ui" | "kdb" | "attachKdb" | "scriptDirectory">;
+type CommandViewer = Pick<
+  Viewer,
+  "uri" | "meta" | "backend" | "ui" | "kdb" | "attachKdb" | "scriptDirectory"
+>;
 
 interface CommandHooks<V extends CommandViewer> {
   getViewer: () => V;

@@ -199,7 +199,8 @@ function valueAtStableTick(observation: Observation | undefined, tick: string) {
 }
 
 function stableOperand(observation: Observation | undefined, tick: string) {
-  if (!observation || observation.projected || observation.real) return undefined;
+  if (!observation || observation.projected || observation.real)
+    return undefined;
   return {
     width: observation.width,
     signed: observation.signed,
@@ -1832,7 +1833,9 @@ export function buildTemporalTrace(
             );
           // A direct port transfers the same bits. Other samples of the source
           // cannot explain this transition when the matching sample is present.
-          const portTarget = directPort ? view(event.signal, event.bit) : undefined;
+          const portTarget = directPort
+            ? view(event.signal, event.bit)
+            : undefined;
           const portValue =
             portTarget &&
             upstream &&
@@ -1845,8 +1848,7 @@ export function buildTemporalTrace(
             portValue !== undefined &&
             upstream &&
             possibilities.some(
-              (sample) =>
-                observedBits(sample.value, upstream) === portValue,
+              (sample) => observedBits(sample.value, upstream) === portValue,
             );
           const targetView = selectedData
             ? view(event.signal, event.bit)
@@ -1972,8 +1974,7 @@ export function buildTemporalTrace(
             });
           }
           for (const sample of candidateSamples) {
-            const normalized =
-              upstream && observedBits(sample.value, upstream);
+            const normalized = upstream && observedBits(sample.value, upstream);
             if (
               selectedIndex === undefined &&
               useRecordedRhs &&

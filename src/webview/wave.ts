@@ -461,7 +461,8 @@ function formatSignal(raw, s) {
   );
 }
 function timeLabel(t) {
-  const frequency = meta?.axis === "frequency" ? scaleHertz(meta.scale) : undefined;
+  const frequency =
+    meta?.axis === "frequency" ? scaleHertz(meta.scale) : undefined;
   if (frequency) return frequencyLabel(t * frequency);
   return `${String(t / displayFactor)} × ${displayScale || meta?.scale || "tick"}`;
 }
@@ -1620,9 +1621,10 @@ function render() {
   if (document.activeElement !== $("cursorBInput"))
     $("cursorBInput").value =
       cursorB == null ? "" : String(cursorB / displayFactor);
-  $("range").textContent = meta?.axis === "frequency"
-    ? timeLabel(start) + " → " + timeLabel(end)
-    : `${start / displayFactor} → ${end / displayFactor} × ${displayScale || meta?.scale || "tick"}`;
+  $("range").textContent =
+    meta?.axis === "frequency"
+      ? timeLabel(start) + " → " + timeLabel(end)
+      : `${start / displayFactor} → ${end / displayFactor} × ${displayScale || meta?.scale || "tick"}`;
   $("range").title = `${timeLabel(start)} → ${timeLabel(end)}`;
   draw();
   refreshNeeded();
@@ -1663,7 +1665,9 @@ function draw() {
     ctx.lineTo(px, height);
     ctx.stroke();
     ctx.fillText(
-      meta?.axis === "frequency" ? timeLabel(t) : Number((t / displayFactor).toPrecision(6)).toString(),
+      meta?.axis === "frequency"
+        ? timeLabel(t)
+        : Number((t / displayFactor).toPrecision(6)).toString(),
       px + 4,
       20,
     );
@@ -1966,10 +1970,20 @@ function action(name) {
     vscode.postMessage({
       type: "waveMath",
       operation: name.slice("math-".length),
-      signals: selected.map(({ id, name, scope, bitOffset, unit }) => ({ id, name, scope, bitOffset, unit })),
-      range: cursorB !== null && cursorA !== cursorB
-        ? [String(Math.min(cursorA, cursorB)), String(Math.max(cursorA, cursorB))]
-        : undefined,
+      signals: selected.map(({ id, name, scope, bitOffset, unit }) => ({
+        id,
+        name,
+        scope,
+        bitOffset,
+        unit,
+      })),
+      range:
+        cursorB !== null && cursorA !== cursorB
+          ? [
+              String(Math.min(cursorA, cursorB)),
+              String(Math.max(cursorA, cursorB)),
+            ]
+          : undefined,
     });
   } else if (
     name === "analogMeasure" ||
@@ -4335,7 +4349,9 @@ vscode.postMessage({ type: "ready" });
     const time = document.createElement("div");
     time.textContent =
       (meta?.axis === "frequency" ? "频率：" : "时间：") +
-      timeLabel(hit.time) + " · ΔA " + timeLabel(hit.time - cursorA);
+      timeLabel(hit.time) +
+      " · ΔA " +
+      timeLabel(hit.time - cursorA);
     tooltip.append(title, full, time);
     if (signal.annotation) {
       const annotation = document.createElement("div");
