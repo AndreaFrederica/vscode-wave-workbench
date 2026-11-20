@@ -4,7 +4,13 @@ import { clipProperties, tool, validateCall } from "./mcp-stdio";
 import { mathActions } from "./wave-math-runtime";
 import type { TclNode } from "./tcl";
 
+const followAllContinuations = {
+  type: "boolean",
+  description:
+    "Follow the reachable frontier automatically until it is exhausted or a continuation budget is reached. Defaults to paged graph output.",
+};
 const traceProperties = {
+  followAllContinuations,
   waveform: {
     type: "string",
     description:
@@ -548,6 +554,7 @@ export const toolDefinitions = [
           "Continuation cursor returned by a static, waveform, or live trace.",
       },
       followContinuations: temporalLimits.followContinuations,
+      followAllContinuations,
       format: traceProperties.format,
       detail: traceProperties.detail,
       output: {
@@ -577,6 +584,8 @@ export const toolDefinitions = [
           "edges",
           "gaps",
           "assignmentSources",
+          "frontier",
+          "queryFailures",
           "mermaid",
           "report",
         ],

@@ -142,6 +142,37 @@ test("overlapping modport callbacks narrow components only with complete compati
     { assignment: 1, ordinal: 20, range: [2, 0], evaluationOrdinal: 19 },
     { assignment: 0, ordinal: 22, range: [3, 1], evaluationOrdinal: 18 },
   ]);
+  const callback = (ordinal, value) => ({
+    ordinal, value, tick: "3", kind: "signal-value-changed",
+  });
+  const repeated = {
+    ...measured,
+    events: [
+      target.events[0],
+      evaluated(37, [3, 1], "100"), evaluated(38, [2, 0], "101"),
+      callback(43, "0101"), callback(45, "1001"),
+      evaluated(48, [3, 1], "010"), evaluated(49, [2, 0], "011"),
+      callback(54, "1011"), callback(55, "0101"),
+      evaluated(58, [3, 1], "100"), evaluated(59, [2, 0], "101"),
+      callback(64, "1001"),
+    ],
+  };
+  // A projected query can show just the last change. The other callbacks in
+  // the recording still disambiguate repeated identical RHS values.
+  const lastChange = { nodes: [{ ...temporal.nodes[1], orderAtTick: 4 }] };
+  const atLastCallback = [{ status: "valueChangesMatch", callbackLinks: [{ node: 0, ordinal: 64 }] }];
+  const matchRepeated = () => matchRecordedModportComponents(
+    trace, evidence, lastChange, atLastCallback, new Map([[0, repeated]]), new Set(),
+  );
+  assert.deepEqual([...matchRepeated().values()], [
+    { assignment: 0, ordinal: 64, range: [3, 1], evaluationOrdinal: 58 },
+  ]);
+  // A missing observation leaves both repeated evaluations compatible.
+  repeated.events = repeated.events.filter(({ ordinal }) => ordinal !== 45 && ordinal !== 54);
+  assert.deepEqual([...matchRepeated().values()], [
+    { assignment: 0, ordinal: 64, range: [3, 1] },
+  ]);
+
   measured.events.splice(1, 0, evaluated(17, [2, 0], "101"));
   assert.equal(matchCaptured().get("0:2@3:1").evaluationOrdinal, undefined);
   measured.coverage.gaps.push("undeclaredWriter");

@@ -80,6 +80,8 @@ jq -er '.report' context.json > trace-report.md
 
 MCP 结果含 `continuationCursor` 时，将它交给 `wave_trace_resume` 可查询下一批上游，并把新证据接到同一张图上。后续使用最新响应的游标。 [跨请求续查](COMMANDS.md#rtl-追踪与波形证据)
 
+MCP 可从单个信号设置 `followAllContinuations: true` 自动追踪可解析路径。静态查询用 `wave_trace_drivers` 或 `wave_trace_loads`，离线时间因果用 `wave_trace_context`，在线仿真用 `wave_live_trace`。达到单次预算时可用 `wave_trace_resume` 继续。分页图的 `frontier`、`queryFailures` 和 `gaps` 分别列出剩余入口、失败查询与证据缺口。
+
 大型图和报告可用 `output: "paged"` 生成快照，再用 `wave_trace_graph_page` 分页取回。加上 `format: "mermaid"` 和 `detail: "full"` 可读取对应的图源和完整报告。 [图快照分页](COMMANDS.md#rtl-追踪与波形证据)
 
 ## 回放与在线追踪

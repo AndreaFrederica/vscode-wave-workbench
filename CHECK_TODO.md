@@ -18,9 +18,13 @@
 
 ## RTL Trace
 
+- [x] 在 Linux VS Code 和静默后台以单个 Verilator 信号验证自动遍历、预算续查、`frontier` / `queryFailures` 分页及详细报告。用真实 VCD 核对 161 条静态赋值与 323 个时间节点，用 FST 和执行日志核对在线、离线写入归因一致。
 - [ ] 复核 Linux VS Code 的 Trace Explorer 与 MCP 结果、报告和分页续查在同一根信号上保持一致。原验证见计划表。
-- [ ] 验证 VCS 同一时间槽内多次 modport 求值与物理写入逐次对应，复核复杂左值和合并更新的调度证据。
-- [ ] 核对新版 VSIX 的 macOS/Windows 原生运行、MCP 传输及包装验证。
+- [x] 验证 VCS 同槽三次重叠 modport 求值。VCD、恢复槽内变化后的 FSDB、在线 MCP 及 VS Code 报告对五次物理值变化返回相同的求值序号。回归覆盖缺失回调时保留兼容组件。
+- [ ] 复核不同调度器、复杂左值与合并更新中的实际物理提交。重叠 modport 探针仍记录物理提交为 `assignment-unobserved`。
+- [x] 复跑 Linux 的 Tcl、VCD 读取与 MCP 传输冒烟，并用 Wine 6 的 Windows x64 Node 核对新版 MCP 命名管道。
+- [x] 使用 Linux x64 的实际 VSIX 安装 Wave Workbench 0.9.23 和修改版 VIDE 1.3.0，验证 VCD 与 FST 的静态追踪、时间图、报告分页及源码跳转。解包目录中的静默 MCP 通过打开 VCD、截取精确事件及 Tcl 查询的冒烟测试。
+- [ ] 核对新版 VSIX 在 macOS 和 Windows 的桌面运行。GitHub 的 Linux、macOS x64 和 arm64 基线已通过原生打包，Windows 包装需复验 Tcl 源码档案版本清单修复。
 - [ ] 逐项核对 RTL Trace 尚未验收的测试、性能预算、通用调度器和缺口。保留原计划及其未勾选事项。
 
 ## 模拟波形与混合信号解码

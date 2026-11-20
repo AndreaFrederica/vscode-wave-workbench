@@ -57,6 +57,10 @@ async function run(workspace) {
       "waveWorkbench.open",
       vscode.Uri.file(waveform),
     );
+    await call("wave_design_attach", {
+      waveform,
+      path: join(workspace, "obj_dir", "Vtrace_tb.tree.json"),
+    });
     await vscode.commands.executeCommand(
       "waveWorkbench.useVideProject",
       vscode.Uri.file(filelist),
@@ -126,6 +130,26 @@ async function run(workspace) {
       }
     }
     assert.equal(compact.temporalMermaid, offline.temporalMermaid);
+    const automatic = await call("wave_trace_context", {
+      ...args,
+      tick: "5",
+      historyStart: "0",
+      maxDepth: 1,
+      followAllContinuations: true,
+    });
+    assert.equal(automatic.output, "paged");
+    const continuation = automatic.continuation;
+    const sections = automatic.graphSnapshot.sections;
+    assert.equal(sections.frontier, continuation.remaining);
+    assert.equal(sections.queryFailures, 0);
+    assert(sections.nodes > 0 && sections.edges > 0);
+    assert(sections.mermaid > 0 && sections.report > 0);
+    const page = await call("wave_trace_graph_page", {
+      graphCursor: automatic.graphSnapshot.graphCursor,
+      section: "report",
+      limit: 1,
+    });
+    assert.match(page.items[0].replaceAll("\\_", "_"), /RTL trace of `?TOP\.trace_tb\.dut\.owner_q/);
     const saves = {
       "static.mmd": drivers.mermaid,
       "temporal.mmd": offline.temporalMermaid,

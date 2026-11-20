@@ -640,14 +640,24 @@ export function isObservationCoverage(
 
 export async function readExecutionSourceMap(filename: string) {
   const source = await realpath(filename);
-  if (!(await stat(source)).isFile()) throw Error("Execution source map must be a regular file.");
+  if (!(await stat(source)).isFile())
+    throw Error("Execution source map must be a regular file.");
   for await (const { line } of executionLines(source, 0)) {
     if (!line.trim()) continue;
     const header: unknown = JSON.parse(line);
     if (!isHeader(header)) throw Error("Unsupported execution trace header.");
-    return new Map(Object.entries(header.statements).map(([id, statement]) =>
-      [id, { ...statement, file: path.resolve(path.dirname(source), statement.file) }] as const,
-    ));
+    return new Map(
+      Object.entries(header.statements).map(
+        ([id, statement]) =>
+          [
+            id,
+            {
+              ...statement,
+              file: path.resolve(path.dirname(source), statement.file),
+            },
+          ] as const,
+      ),
+    );
   }
   throw Error("The execution recording has no header.");
 }
@@ -2564,6 +2574,62 @@ export function preserveDumpedTransitionEvidence(
   });
 }
 
+// Every observed storage change needs its own evaluation. Evaluations for
+// same-value writes can be left unused. An attribution is unique when removing
+// its edge makes it impossible to explain the complete callback sequence.
+function uniqueCallbackEvaluations(candidates: Map<number, number[]>) {
+  function match(excluded?: readonly [number, number]) {
+    const owners = new Map<number, number>();
+    function assign(callback: number, visited: Set<number>): boolean {
+      for (const evaluation of candidates.get(callback)!) {
+        if (
+          visited.has(evaluation) ||
+          (excluded?.[0] === callback && excluded[1] === evaluation)
+        )
+          continue;
+        visited.add(evaluation);
+        const owner = owners.get(evaluation);
+        if (owner === undefined || assign(owner, visited)) {
+          owners.set(evaluation, callback);
+          return true;
+        }
+      }
+      return false;
+    }
+    for (const callback of candidates.keys())
+      if (!assign(callback, new Set())) return;
+    return owners;
+  }
+  const unique = new Map<number, number>();
+  for (const [evaluation, callback] of match() ?? [])
+    if (!match([callback, evaluation])) unique.set(callback, evaluation);
+  return unique;
+}
+
+function modportWriteValue(
+  previous: string,
+  current: string,
+  bus: readonly [number, number],
+  range: [number, number],
+) {
+  if (
+    previous === current ||
+    !rangeWithin(range, bus) ||
+    !sliceTraceBits(previous, bus, ...range)
+  )
+    return;
+  const value = sliceTraceBits(current, bus, ...range);
+  if (!value) return;
+  const offset = Math.abs(range[0] - bus[0]);
+  if (
+    previous.slice(0, offset) +
+      value +
+      previous.slice(offset + value.length) ===
+    current
+  )
+    return value;
+}
+
 export function matchRecordedModportComponents(
   trace: VideTrace,
   evidence: Awaited<ReturnType<typeof readTraceObservations>>,
@@ -2637,6 +2703,71 @@ export function matchRecordedModportComponents(
     return events;
   }
 
+  const slots = new Map<string, Map<number, number>>();
+  function pairedEvaluations(
+    id: number,
+    tick: string,
+    assignments: number[],
+    target: { width: number; range: readonly [number, number] },
+    targetChanges: ExecutionEvent[],
+    measured: Map<number, ResolvedEvent[]>,
+  ) {
+    const key = id + ":" + tick;
+    const cached = slots.get(key);
+    if (cached) return cached;
+    const pairs = new Map<number, number>();
+    slots.set(key, pairs);
+    const recording = recordings.get(id)!;
+    const evaluations = recording.events.filter(
+      (event) => event.tick === tick && event.kind === "assignment-evaluated",
+    );
+    const callbacks = targetChanges
+      .map((event, index) => ({ event, index }))
+      .filter(({ event }) => event.tick === tick);
+    if (evaluations.length > 128 || callbacks.length > 32) return pairs;
+
+    const linked = new Set(
+      [...measured.values()].flatMap((events) =>
+        events.map(({ ordinal }) => ordinal),
+      ),
+    );
+    if (evaluations.some(({ ordinal }) => !linked.has(ordinal))) return pairs;
+    const candidates = new Map<number, number[]>();
+    for (const { event, index } of callbacks) {
+      const previous = (
+        targetChanges[index - 1]?.value ?? windowSeed(id)
+      )?.toLowerCase();
+      const current = event.value?.toLowerCase();
+      if (previous?.length !== target.width || current?.length !== target.width)
+        return pairs;
+      candidates.set(
+        event.ordinal,
+        assignments.flatMap((assignment) => {
+          const range = trace.assignments[assignment].targetRange!;
+          const value = modportWriteValue(
+            previous,
+            current,
+            target.range,
+            range,
+          );
+          return value === undefined
+            ? []
+            : measured
+                .get(assignment)!
+                .flatMap((evaluation) =>
+                  evaluation.ordinal < event.ordinal &&
+                  evaluation.value?.toLowerCase() === value
+                    ? [evaluation.ordinal]
+                    : [],
+                );
+        }),
+      );
+    }
+    const unique = uniqueCallbackEvaluations(candidates);
+    slots.set(key, unique);
+    return unique;
+  }
+
   for (const { status, callbackLinks } of comparisons) {
     if (status !== "valueChangesMatch" || !callbackLinks) continue;
     for (const { node, ordinal } of callbackLinks) {
@@ -2663,10 +2794,7 @@ export function matchRecordedModportComponents(
 
       // A callback observes storage. Compare the whole changed word against
       // each component without inferring the simulator's evaluation order.
-      const group = candidates.filter((id) => {
-        const range = trace.assignments[id].targetRange;
-        return range && (bit === undefined || rangeWithin([bit, bit], range));
-      });
+      const group = candidates;
       if (group.length < 2) continue;
       const first = trace.assignments[group[0]];
       const source = first.location.uri;
@@ -2676,6 +2804,29 @@ export function matchRecordedModportComponents(
       )
         continue;
       const site = first.location.range.start;
+      if (
+        group.some((assignment) => {
+          const candidate = trace.assignments[assignment];
+          const [operand] = candidate.inputs;
+          const { location } = candidate;
+          return (
+            candidate.kind !== "blocking" ||
+            candidate.hasUnresolvedOperands ||
+            candidate.instance !== first.instance ||
+            location.uri !== source ||
+            location.range.start.line !== site.line ||
+            location.range.start.character !== site.character ||
+            candidate.hierarchicalTargets?.length !== 1 ||
+            !candidate.hierarchicalTargets[0].interfaceComponent ||
+            candidate.inputs.length !== 1 ||
+            operand?.kind !== "data" ||
+            operand.hierarchical ||
+            candidate.value?.op !== "slice" ||
+            !candidate.targetRange
+          );
+        })
+      )
+        continue;
       const sourceEvaluations = componentEvaluations(point.signal);
       const measured = new Map(
         group.map((assignment) => [
@@ -2683,10 +2834,7 @@ export function matchRecordedModportComponents(
           sourceEvaluations
             .get(assignment)
             ?.filter(
-              ({ tick, ordinal: evaluation, value }) =>
-                tick === point.tick &&
-                evaluation < ordinal &&
-                value !== undefined,
+              ({ tick, value }) => tick === point.tick && value !== undefined,
             ) ?? [],
         ]),
       );
@@ -2698,57 +2846,41 @@ export function matchRecordedModportComponents(
         BigInt(coverage.checkedThrough) >= BigInt(point.tick) &&
         coverage.gaps.every((gap) => gap === "unobservedCommit") &&
         [...measured.values()].every((events) => events.length > 0);
+      const paired = measuredGroup
+        ? pairedEvaluations(
+            point.signal,
+            point.tick,
+            group,
+            { width: target.width, range: target.range },
+            targetChanges,
+            measured,
+          ).get(ordinal)
+        : undefined;
       let supported = true;
       const compatible: RecordedModportComponent[] = [];
       for (const assignment of group) {
         const candidate = trace.assignments[assignment];
         const range = candidate.targetRange!;
+        if (bit !== undefined && !rangeWithin([bit, bit], range)) continue;
         const [operand] = candidate.inputs;
-        const { value, location } = candidate;
-        const prior = sliceTraceBits(previous, target.range, ...range);
-        const next = sliceTraceBits(current, target.range, ...range);
-        if (
-          candidate.kind !== "blocking" ||
-          candidate.hasUnresolvedOperands ||
-          candidate.instance !== first.instance ||
-          location.uri !== source ||
-          location.range.start.line !== site.line ||
-          location.range.start.character !== site.character ||
-          candidate.hierarchicalTargets?.length !== 1 ||
-          !candidate.hierarchicalTargets[0].interfaceComponent ||
-          candidate.inputs.length !== 1 ||
-          operand?.kind !== "data" ||
-          operand.hierarchical ||
-          value?.op !== "slice" ||
-          !prior ||
-          !next
-        ) {
-          supported = false;
-          break;
-        }
-        const offset = Math.abs(range[0] - target.range[0]);
-        if (
-          previous.slice(0, offset) +
-            next +
-            previous.slice(offset + next.length) !==
-          current
-        )
-          continue;
-        const matching = measured
-          .get(assignment)!
-          .filter(({ value }) => value?.toLowerCase() === next);
-        const match = {
-          assignment,
-          ordinal,
-          range,
-          ...(matching.length === 1
-            ? { evaluationOrdinal: matching[0].ordinal }
-            : {}),
-        };
+        const next = modportWriteValue(previous, current, target.range, range);
+        if (next === undefined) continue;
+        const match = { assignment, ordinal, range };
         if (measuredGroup) {
-          if (matching.length) compatible.push(match);
+          const matching = measured
+            .get(assignment)!
+            .filter(
+              (event) =>
+                event.ordinal < ordinal && event.value?.toLowerCase() === next,
+            );
+          if (matching.some((event) => event.ordinal === paired)) {
+            compatible.push({ ...match, evaluationOrdinal: paired });
+            break;
+          }
+          if (paired === undefined && matching.length) compatible.push(match);
           continue;
         }
+        const value = candidate.value!;
         const layout = observations.get(operand.signal);
         const inputChanges = changes(operand.signal);
         const sameTick = inputChanges?.filter(

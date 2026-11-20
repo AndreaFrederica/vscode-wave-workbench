@@ -429,9 +429,11 @@ VCS 离线录制追踪支持直接查询已采集的数组字，也可从读取�
 
 `continuationWalk.segments` 含每段的请求和结果或错误。根图编号为 0，续查段从 1 开始编号。`links` 的 `segment` 和 `gap` 指向来源图及其中的缺口，`nextSegment` 指向续查段或按相同编号顺延的 `remaining` 请求。查询数或用时到达预算时，链接和未处理请求仍可用于下一次调用。自动续查最多使用本次调用开始后 100 秒内剩余的时间。各图的覆盖状态继续报告静态和波形证据缺口。
 
-响应含 `continuationCursor` 时，可用 `wave_trace_resume` 将下一批结果接入同一张图。传入最新游标和可选的 `followContinuations`，每批默认续查 4 段，范围为 1 至 8。合并图保留已查询的段、节点编号和原始赋值索引。可加 `format: "mermaid"` 导出图，或用 `output: "report"` 获取包含根查询及各续查段的 Markdown。每个 VS Code 扩展宿主最多保留 4 个游标。有效游标只能成功使用一次，仍有待查项时返回新游标。重新加载宿主、改变编译或波形输入、结束原在线会话都会使旧游标失效。
+响应含 `continuationCursor` 时，可用 `wave_trace_resume` 将下一批结果接入同一张图。传入最新游标和可选的 `followContinuations`，每批默认续查 4 段，范围为 1 至 8。合并图保留已查询的段、节点编号和原始赋值索引。可加 `format: "mermaid"` 导出图，或用 `output: "report"` 获取根查询正文和各续查段的 Markdown。时间图续查保留初次查询的波形观测、构建校验或在线执行证据。每个 VS Code 扩展宿主最多保留 4 个游标。有效游标只能成功使用一次，仍有待查项时返回新游标。重新加载宿主、改变编译或波形输入、结束原在线会话都会使旧游标失效。
 
-Driver、Load、离线与在线时间追踪及 `wave_trace_resume` 都支持 `output: "paged"`。响应中的 `graphSnapshot` 给出 `graphCursor`、图的元数据和各部分的条目数。调用 `wave_trace_graph_page` 时传入图游标和 `section`，从 `offset: 0` 读取，再沿 `nextOffset` 翻页。每页默认 64 条，最多 128 条。节点、边和缺口沿用原图的全局编号。时间图的 `assignmentSources` 按 `segment` 和 `assignment` 取回源码，静态赋值直接包含源码位置与原始查询索引。
+静态 Driver / Load、离线时间图和在线 Trace 也可设置 `followAllContinuations: true`。工具会持续查询可解析的前沿，直到队列为空、达到每次调用的 64 个续查入口上限，或用完 100 秒续查时限。该选项默认返回分页图。仍有待查入口时，使用返回的 `continuationCursor` 调用 `wave_trace_resume`，可用同一选项继续。自动遍历与 1–8 次的手动预算 `followContinuations` 分别使用。队列耗尽后仍以图的覆盖状态和 `gaps` 判断有无未解析的关系或缺失观测。
+
+Driver、Load、离线与在线时间追踪及 `wave_trace_resume` 都支持 `output: "paged"`。响应中的 `graphSnapshot` 给出 `graphCursor`、图的元数据和各部分的条目数。调用 `wave_trace_graph_page` 时传入图游标和 `section`，从 `offset: 0` 读取，再沿 `nextOffset` 翻页。每页默认 64 条，最多 128 条。节点、边和缺口沿用原图的全局编号。时间图的 `assignmentSources` 按 `segment` 和 `assignment` 取回源码，静态赋值直接包含源码位置与原始查询索引。启用续查时，`frontier` 包含未查询的信号或时间请求，`queryFailures` 包含各个失败的查询及诊断。
 
 在分页查询中加 `format: "mermaid"` 或 `detail: "full"` 可通过 `mermaid` 和 `report` 部分取回图源及报告。每条 Mermaid 是一张图，将报告条目按顺序原样拼接可恢复完整 Markdown。每个扩展宿主最多保存 4 张图快照。续查游标推进分析并可生成新图游标，已有图游标读取创建时的快照，直到被替换或宿主重启。
 

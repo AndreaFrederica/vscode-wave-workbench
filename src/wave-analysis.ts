@@ -2767,6 +2767,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
   type TraceContinuationState = {
     root: TemporalContinuation;
     initial: ContinuationTrace;
+    rootReport: () => string;
     walk: ContinuationWalk;
     assertCurrent: () => Promise<void>;
     query: (
@@ -2904,6 +2905,31 @@ export function createWaveAnalysis<V extends AnalysisView>(
     return { file, line, record };
   }
 
+  // A single request can visit many shallow frontiers while preserving the existing resume protocol.
+  function continuationLimit(args: Record<string, unknown>, fallback?: number) {
+    const requested = args.followContinuations as number | undefined;
+    if (
+      requested !== undefined &&
+      (!Number.isInteger(requested) || requested < 1 || requested > 8)
+    )
+      throw Error("followContinuations must be an integer from 1 to 8.");
+    if (args.followAllContinuations === true) {
+      if (requested !== undefined)
+        throw Error(
+          "Choose either followAllContinuations or followContinuations.",
+        );
+      return 64;
+    }
+    return requested ?? fallback;
+  }
+
+  function continuationSections(walk: StaticWalk | ContinuationWalk) {
+    return {
+      frontier: walk.remaining,
+      queryFailures: walk.segments.filter((entry) => "error" in entry),
+    };
+  }
+
   function tools(
     workspace: string,
     findView: (waveform?: unknown) => V | undefined,
@@ -2924,9 +2950,11 @@ export function createWaveAnalysis<V extends AnalysisView>(
         | ReturnType<typeof temporalGraphSnapshot>,
       mermaid?: string[],
       report?: string,
+      walk?: StaticWalk | ContinuationWalk,
     ) {
       const sections = {
         ...snapshot.sections,
+        ...(walk ? continuationSections(walk) : {}),
         ...(mermaid ? { mermaid } : {}),
         ...(report !== undefined
           ? { report: report.match(/[\s\S]{1,32768}/gu) ?? [] }
@@ -2948,22 +2976,26 @@ export function createWaveAnalysis<V extends AnalysisView>(
       graph: ReturnType<typeof mergeStaticContinuationGraph>,
       format: unknown,
       report?: string,
+      walk?: StaticWalk | ContinuationWalk,
     ) {
       return saveGraph(
         staticGraphSnapshot(graph),
         format === "mermaid" ? mergedStaticMermaid(graph) : undefined,
         report,
+        walk,
       );
     }
     function pagedTemporal(
       graph: ReturnType<typeof mergeTemporalContinuationGraph>,
       format: unknown,
       report?: string,
+      walk?: StaticWalk | ContinuationWalk,
     ) {
       return saveGraph(
         temporalGraphSnapshot(graph),
         format === "mermaid" ? combinedTemporalMermaid(graph) : undefined,
         report,
+        walk,
       );
     }
     const retain = (state: RetainedContinuation) => {
@@ -2987,7 +3019,6 @@ export function createWaveAnalysis<V extends AnalysisView>(
       walk: ContinuationWalk,
       mermaid: boolean,
       report: boolean,
-      includeRoot = false,
     ) => {
       const diagrams =
         report || mermaid ? continuationMermaidPages(root, walk) : [];
@@ -3005,12 +3036,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
             }
           : {}),
         walkReport: report
-          ? continuationReport(
-              walk,
-              diagrams,
-              combined,
-              includeRoot ? initial : undefined,
-            )
+          ? continuationReport(walk, diagrams, combined)
           : undefined,
       };
     };
@@ -3020,7 +3046,9 @@ export function createWaveAnalysis<V extends AnalysisView>(
       operation: AbortSignal,
     ): Promise<unknown> {
       const viewer = findView(args.waveform);
-      const pagedGraph = args.output === "paged";
+      const pagedGraph =
+        args.output === "paged" ||
+        (args.output === undefined && args.followAllContinuations === true);
       if (
         pagedGraph &&
         (args.pageSize !== undefined || args.pageCursor !== undefined)
@@ -3055,9 +3083,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
           );
         if (state.busy)
           throw Error("This trace continuation is already running.");
-        const limit = Number(args.followContinuations ?? 4);
-        if (!Number.isInteger(limit) || limit < 1 || limit > 8)
-          throw Error("followContinuations must be an integer from 1 to 8.");
+        const limit = continuationLimit(args, 4)!;
         if (
           (state.kind === "static" && args.output === "temporal") ||
           (state.kind === "temporal" && args.output === "graph")
@@ -3102,6 +3128,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
                 staticGraphSnapshot(graph),
                 args.format === "mermaid" ? graphMermaid : undefined,
                 report,
+                walk,
               );
               retained.delete(cursor);
               return {
@@ -3171,17 +3198,21 @@ export function createWaveAnalysis<V extends AnalysisView>(
             const graph = mergeTemporalContinuationGraph(state.initial, walk);
             const report =
               args.detail === "full"
-                ? "# Time trace of `" +
-                  state.root.signal.replace(/[`\r\n]/g, " ") +
-                  "`\n" +
-                  continuationReport(
-                    walk,
-                    continuationMermaidPages(state.root, walk),
-                    graph,
-                    state.initial,
+                ? appendContinuationReport(
+                    state.rootReport(),
+                    continuationReport(
+                      walk,
+                      continuationMermaidPages(state.root, walk),
+                      graph,
+                    ),
                   )
                 : undefined;
-            const graphSnapshot = pagedTemporal(graph, args.format, report);
+            const graphSnapshot = pagedTemporal(
+              graph,
+              args.format,
+              report,
+              walk,
+            );
             retained.delete(cursor);
             return {
               output: "paged",
@@ -3207,7 +3238,6 @@ export function createWaveAnalysis<V extends AnalysisView>(
             walk,
             args.format === "mermaid",
             reportOnly || args.detail === "full",
-            true,
           );
           retained.delete(cursor);
           const continuationCursor = retain({
@@ -3229,11 +3259,10 @@ export function createWaveAnalysis<V extends AnalysisView>(
               : output),
             ...(walkReport
               ? {
-                  report:
-                    "# Time trace of `" +
-                    state.root.signal.replace(/[`\r\n]/g, " ") +
-                    "`\n" +
+                  report: appendContinuationReport(
+                    state.rootReport(),
                     walkReport,
+                  ),
                 }
               : {}),
             ...(reportOnly && args.format === "mermaid"
@@ -3440,12 +3469,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
           args.liveSessionId !== live.id
         )
           throw Error("The live simulation session changed.");
-        const followLimit = args.followContinuations as number | undefined;
-        if (
-          followLimit !== undefined &&
-          (!Number.isInteger(followLimit) || followLimit < 1 || followLimit > 8)
-        )
-          throw Error("followContinuations must be an integer from 1 to 8.");
+        const followLimit = continuationLimit(args);
         const continuationDeadline =
           followLimit === undefined ? undefined : AbortSignal.timeout(100_000);
         const direction = name === "wave_trace_loads" ? "loads" : "drivers";
@@ -3597,7 +3621,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
             direction,
             buildVerification: verification,
             continuationCursor: staticOutput.continuationCursor,
-            graphSnapshot: pagedStatic(graph, args.format, report),
+            graphSnapshot: pagedStatic(graph, args.format, report, staticWalk),
             ...(staticWalk
               ? {
                   continuation: {
@@ -3790,7 +3814,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
         };
         const follow = async (
           context: Parameters<typeof temporalOutput>[0],
-          report?: () => string,
+          rootReport: () => string,
         ) => {
           if (followLimit === undefined || !continuationDeadline) {
             if (pagedGraph) {
@@ -3804,7 +3828,11 @@ export function createWaveAnalysis<V extends AnalysisView>(
                 },
               );
               return {
-                graphSnapshot: pagedTemporal(graph, args.format, report?.()),
+                graphSnapshot: pagedTemporal(
+                  graph,
+                  args.format,
+                  fullReport ? rootReport() : undefined,
+                ),
                 walkReport: undefined,
               };
             }
@@ -3849,7 +3877,10 @@ export function createWaveAnalysis<V extends AnalysisView>(
                 historyStart,
                 waveform: viewer.uri.fsPath,
                 output: "temporal",
+                detail: undefined,
+                format: undefined,
                 followContinuations: undefined,
+                followAllContinuations: undefined,
               },
               abort,
             );
@@ -3867,22 +3898,23 @@ export function createWaveAnalysis<V extends AnalysisView>(
           operation.throwIfAborted();
           if (pagedGraph) {
             const graph = mergeTemporalContinuationGraph(initial, walk);
-            const markdown =
-              report &&
-              appendContinuationReport(
-                report(),
-                continuationReport(
-                  walk,
-                  continuationMermaidPages(root, walk),
-                  graph,
-                ),
-              );
+            const markdown = fullReport
+              ? appendContinuationReport(
+                  rootReport(),
+                  continuationReport(
+                    walk,
+                    continuationMermaidPages(root, walk),
+                    graph,
+                  ),
+                )
+              : undefined;
             return {
-              graphSnapshot: pagedTemporal(graph, args.format, markdown),
+              graphSnapshot: pagedTemporal(graph, args.format, markdown, walk),
               continuationCursor: retain({
                 kind: "temporal",
                 root,
                 initial,
+                rootReport,
                 waveform: viewer.uri.fsPath,
                 walk,
                 assertCurrent,
@@ -3908,6 +3940,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
               kind: "temporal",
               root,
               initial,
+              rootReport,
               waveform: viewer.uri.fsPath,
               walk,
               assertCurrent,
@@ -3949,7 +3982,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
             ) + liveTraceReport(evidence, trace);
           const { walkReport, ...continuations } = await follow(
             context,
-            fullReport ? report : undefined,
+            report,
           );
           if (pagedGraph)
             return {
@@ -4049,7 +4082,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
           (execution ? executionReport(execution) : "") +
           traceExecutionComparisonReport(evidence, execution?.events);
         const { walkReport, ...continuations } = context
-          ? await follow(context, fullReport ? report : undefined)
+          ? await follow(context, report)
           : { walkReport: undefined };
         if (pagedGraph && context)
           return {

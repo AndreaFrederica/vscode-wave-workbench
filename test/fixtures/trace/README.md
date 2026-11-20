@@ -209,6 +209,27 @@ the physical target instance and the component statement ID. Supply a matched
 build manifest and the sealed reference recording to `wave_live_trace` to
 recover both changes from the callbacks at the pause.
 
+To reproduce repeated evaluations in one slot, use a scratch copy of
+`modport_nested_tb.sv` and replace the single tick 3 assignment of
+`b = 7'b1000101` with the following block, preserving the other stimulus.
+
+~~~systemverilog
+begin
+  b = 7'b1000101;
+  #0 b = 7'b0100011;
+  #0 b = 7'b1000101;
+end
+~~~
+
+Build the original copy's KDB, regenerate its execution maps, and watch
+`nested_tb.overlap.data`, `nested_tb.overlap.bypass`, `nested_tb.writer.d`
+and `nested_tb.b`. At tick 3 the physical data callbacks report
+`0101, 1001, 1011, 0101, 1001`. Query the whole bus and bit 2, including
+the individual bit changes through `changeOrder`. The last callback pairs
+with the third evaluation of the upper slice when the full slot supports
+a unique one-to-one match. The report keeps the physical commit status
+`assignment-unobserved`.
+
 ### VCS live trace
 
 Compile `vpi_live_tb.sv` with the same shared library in a scratch
