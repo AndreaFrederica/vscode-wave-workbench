@@ -55,4 +55,52 @@ for (const independent of [false, true]) {
   assert.deepEqual(query.result["!"].events[0], ["10", "0"]);
 }
 
+const calls = [
+  ["wave_open", { path: "demo.vcd" }],
+  ["wave_clip", { signals: ["tb.dut.clk"], start: "12", end: "31" }],
+  ["wave_tcl", { script: 'waveTool wave_search {{"query":"tb.dut.valid"}}' }],
+];
+const headless = spawnSync(
+  process.execPath,
+  [resolve("dist", "mcp-headless.js"), resolve("examples")],
+  {
+    encoding: "utf8",
+    timeout: 30_000,
+    input:
+      calls
+        .map(([name, args], id) =>
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            method: "tools/call",
+            params: { name, arguments: args },
+          }),
+        )
+        .join("\n") + "\n",
+  },
+);
+if (headless.error) throw headless.error;
+assert.equal(headless.status, 0, headless.stderr);
+const responses = headless.stdout.trim().split("\n").map(JSON.parse);
+assert.deepEqual(
+  responses.map(({ id }) => id),
+  [0, 1, 2],
+);
+const [opened, clip, tclSearch] = responses.map(({ result }) => {
+  assert(!result.isError, result.content[0].text);
+  return JSON.parse(result.content[0].text);
+});
+assert.equal(opened.backend, "rust-vcd");
+assert.deepEqual(clip.traces[0].events, [
+  ["12", "0"],
+  ["15", "1"],
+  ["20", "0"],
+  ["25", "1"],
+  ["30", "0"],
+]);
+const { signals } = JSON.parse(tclSearch.result);
+assert(
+  signals.some(({ scope, name }) => scope === "tb.dut" && name === "valid"),
+);
+
 await import("./smoke-mcp.mjs");

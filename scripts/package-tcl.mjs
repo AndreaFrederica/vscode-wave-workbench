@@ -8,6 +8,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -21,6 +22,7 @@ const sourceUrl =
   "https://codeload.github.com/tcltk/tcl/tar.gz/refs/tags/core-8-6-18";
 const sourceHash =
   "8b9b554f3539b37bea20ee6cef14faa63df1259896e466328f596eca9f0c49a5";
+const sourceRevision = "515167c897a7c8066abfbd71e8fe7bd8bf3569de";
 
 function run(command, args, cwd) {
   const result = spawnSync(command, args, { cwd, stdio: "inherit" });
@@ -67,6 +69,13 @@ export async function packageTcl(platform, preparedRuntime) {
       mkdirSync(binaryDir, { recursive: true });
       let shell;
       if (windows) {
+        // The source archive has no Git checkout for makefile.vc to query.
+        writeFileSync(
+          join(build, "manifest.uuid"),
+          readFileSync(join(buildDir, "gitmanifest.in"), "utf8") +
+            sourceRevision +
+            "\r\n",
+        );
         const machine = platform.endsWith("-arm64") ? "ARM64" : "AMD64";
         const output = join(buildDir, "wave-out");
         run(
