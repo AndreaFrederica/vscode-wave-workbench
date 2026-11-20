@@ -1021,8 +1021,16 @@ test('mixed wave rows preserve real cursor values and Tcl range measurements', a
   }
 });
 
-async function openSchematic(page) {
-  await page.addInitScript(() => { window.acquireVsCodeApi = () => ({postMessage: window.bridge}); });
+async function openSchematic(page, persistent = false) {
+  await page.addInitScript(persistent => {
+    window.acquireVsCodeApi = () => ({
+      postMessage: window.bridge,
+      ...(persistent ? {
+        getState: () => JSON.parse(sessionStorage.getItem('schematic')),
+        setState: state => sessionStorage.setItem('schematic', JSON.stringify(state)),
+      } : {}),
+    });
+  }, persistent);
   await page.route('http://schematic.test/**', async route => {
     const name = new URL(route.request().url()).pathname.slice(1) || 'schematic.html';
     if (!['schematic.html', 'schematic.js', 'schematic.css'].includes(name)) return route.abort();
@@ -1059,6 +1067,8 @@ test('local RTL schematic lays out data and control and dispatches cross-probe a
   const bounds = await scene.boundingBox();
   const viewBox = async () => (await page.locator('#diagram').getAttribute('viewBox')).split(' ').map(Number);
   const before = await viewBox();
+  const overview = page.getByRole('group', {name: /原理图鸟瞰图/});
+  await expect(overview).toBeVisible();
   await page.mouse.move(bounds.x + bounds.width * 0.4, bounds.y + bounds.height * 0.3);
   await page.mouse.wheel(0, -160);
   await expect.poll(async () => (await viewBox())[2]).toBeLessThan(before[2]);
@@ -1074,6 +1084,11 @@ test('local RTL schematic lays out data and control and dispatches cross-probe a
   expect(shifted[2]).toBeCloseTo(zoomed[2]);
   await page.getByRole('button', {name: '适应视图'}).click();
   expect(await viewBox()).toEqual(before);
+  const overviewButton = page.getByRole('button', {name: '鸟瞰图'});
+  await overviewButton.click();
+  await expect(overview).toBeHidden();
+  await overviewButton.click();
+  await expect(overview).toBeVisible();
   await page.getByRole('button', {name: 'a', exact: true}).click();
   await page.getByRole('button', {name: '查看源码'}).click();
   await page.getByRole('button', {name: '加入波形'}).click();
@@ -1121,6 +1136,20 @@ test('dense trace renders visible nodes and keeps pan and zoom interactive', asy
   await page.mouse.move(800, 500, {steps: 5});
   await page.mouse.up();
   await expect(page.locator('#diagram')).not.toHaveAttribute('viewBox', zoomed);
+  const overview = page.getByRole('group', {name: /原理图鸟瞰图/});
+  const overviewBounds = await overview.boundingBox();
+  const footprint = overview.locator('#overview-window');
+  const footprintY = await footprint.getAttribute('y');
+  const beforeJump = await page.locator('#diagram').getAttribute('viewBox');
+  await overview.click({position: {x: overviewBounds.width / 2, y: overviewBounds.height * .65}});
+  await expect(page.locator('#diagram')).not.toHaveAttribute('viewBox', beforeJump);
+  await expect(footprint).not.toHaveAttribute('y', footprintY);
+  const afterJump = await page.locator('#diagram').getAttribute('viewBox');
+  await page.mouse.move(overviewBounds.x + overviewBounds.width / 2, overviewBounds.y + overviewBounds.height * .65);
+  await page.mouse.down();
+  await page.mouse.move(overviewBounds.x + overviewBounds.width / 2, overviewBounds.y + overviewBounds.height * .82, {steps: 5});
+  await page.mouse.up();
+  await expect(page.locator('#diagram')).not.toHaveAttribute('viewBox', afterJump);
   await page.getByRole('button', {name: '适应视图'}).click();
   await expect(page.locator('#status')).toContainText('放大查看连线');
 });
@@ -1150,6 +1179,7 @@ test('module schematic draws named pins and navigates hierarchy', async ({page})
   });
   await openSchematic(page);
   await expect(page.getByText('[7:4]', {exact: true})).toBeVisible();
+  await expect(page.getByRole('group', {name: /原理图鸟瞰图/})).toBeVisible();
   await expect(page.locator('.node.module .pin text')).toHaveText(['d', 'q']);
   await expect(page.getByRole('button', {name: '刷新 A 游标'})).toBeHidden();
   await page.getByRole('button', {name: 'dut', exact: true}).click();
@@ -1168,4 +1198,110 @@ test('module schematic draws named pins and navigates hierarchy', async ({page})
   await page.getByRole('button', {name: '上一级'}).click();
   await expect(page.locator('.node.module')).toHaveCount(1);
   await expect(page.locator('#title')).toHaveText('top');
+});
+
+test('trace schematic groups instances, exposes boundary ports and restores its view', async ({page}) => {
+  const messages = [];
+  const graph = {
+    root: 'q', partial: false,
+    nodes: [
+      {id: 'd', kind: 'signal', label: 'd', detail: '', instance: 'tb.cpu', source: true},
+      {id: 'ff', kind: 'register', label: 'DFF', detail: '', instance: 'tb.bus', source: true},
+      {id: 'q', kind: 'signal', label: 'q', detail: '', instance: 'tb.bus'},
+    ],
+    edges: [{from: 'd', to: 'ff', control: true}, {from: 'ff', to: 'q'}],
+  };
+  await page.exposeFunction('bridge', message => {
+    messages.push(message);
+    if (message.type === 'ready')
+      return page.evaluate(graph => window.dispatchEvent(new MessageEvent('message', {data: {
+        type: 'schematic', traceSnapshot: true, title: 'trace', graph, restore: {version: 1},
+      }})), graph);
+  });
+  await openSchematic(page, true);
+  const mode = page.getByRole('combobox', {name: '追踪图显示方式'});
+  await mode.selectOption('modules');
+  await expect(page.locator('.node.module')).toHaveCount(2);
+  await expect(page.locator('.node.module .pin')).toHaveCount(2);
+  await page.getByRole('button', {name: 'bus', exact: true}).dblclick();
+  await expect(page.getByRole('button', {name: 'DFF', exact: true})).toBeVisible();
+  await expect(page.locator('.node.port')).toHaveAttribute('aria-label', 'd');
+  await page.getByRole('button', {name: 'DFF', exact: true}).click();
+  await page.getByRole('button', {name: '放大', exact: true}).click();
+  await expect.poll(() => page.evaluate(() => JSON.parse(sessionStorage.getItem('schematic')).view.zoom)).toBeGreaterThan(1);
+  const viewBox = await page.locator('#diagram').getAttribute('viewBox');
+  await page.reload();
+  await expect(mode).toHaveValue('modules');
+  await expect(page.locator('#title')).toHaveText('trace · tb.bus');
+  await expect(page.locator('#diagram')).toHaveAttribute('viewBox', viewBox);
+  await page.getByRole('button', {name: '查看源码'}).click();
+  await expect.poll(() => messages.at(-1)).toMatchObject({type: 'source', id: 'ff'});
+  await page.getByRole('button', {name: '返回'}).click();
+  await expect(page.locator('.node.module')).toHaveCount(2);
+  await mode.selectOption('signals');
+  await expect(page.locator('.node.module')).toHaveCount(0);
+  await expect(page.locator('.node')).toHaveCount(3);
+});
+
+test('expanded trace draws module boundaries around nodes and connects their pins', async ({page}) => {
+  const messages = [];
+  const graph = {
+    root: 'q', partial: false,
+    nodes: [
+      {id: 'cmd', kind: 'signal', label: 'cmd', detail: '', instance: 'tb.cpu', source: true},
+      {id: 'req', kind: 'signal', label: 'req', detail: '', instance: 'tb.cpu', wave: true},
+      {id: 'ff', kind: 'register', label: 'DFF', detail: '', instance: 'tb.bus', source: true},
+      {id: 'q', kind: 'signal', label: 'q', detail: '', instance: 'tb.bus'},
+    ],
+    edges: [
+      {from: 'cmd', to: 'req'},
+      {from: 'req', to: 'ff', control: true, label: '[7:4]'},
+      {from: 'ff', to: 'q'},
+    ],
+  };
+  await page.exposeFunction('bridge', message => {
+    messages.push(message);
+    if (message.type === 'ready')
+      return page.evaluate(graph => window.dispatchEvent(new MessageEvent('message', {data: {
+        type: 'schematic', traceSnapshot: true, title: 'trace', graph, restore: {version: 1},
+      }})), graph);
+  });
+
+  await openSchematic(page, true);
+  const mode = page.getByRole('combobox', {name: '追踪图显示方式'});
+  await mode.selectOption('expanded');
+  await expect(page.locator('.trace-frame')).toHaveCount(2);
+  await expect(page.locator('.trace-boundary-port')).toHaveCount(2);
+  await expect(page.locator('.trace-interface.control')).toHaveCount(1);
+  await expect(page.getByText('[7:4]', {exact: true})).toBeVisible();
+  const geometry = await page.locator('#scene').evaluate(scene => {
+    const frame = instance => scene.querySelector(`.trace-frame[data-instance="${instance}"] rect`).getBoundingClientRect();
+    const cpu = frame('tb.cpu');
+    const bus = frame('tb.bus');
+    const element = label => scene.querySelector(`.node[aria-label="${label}"]`).getBoundingClientRect();
+    const inside = (node, box) => node.left > box.left && node.right < box.right &&
+      node.top > box.top && node.bottom < box.bottom;
+    const center = selector => {
+      const {left, width} = scene.querySelector(selector).getBoundingClientRect();
+      return left + width / 2;
+    };
+    return {
+      bothInside: inside(element('req'), cpu) && inside(element('DFF'), bus),
+      outputDistance: Math.abs(center('[data-direction=output] circle') - cpu.right),
+      inputDistance: Math.abs(center('[data-direction=input] circle') - bus.left),
+    };
+  });
+  expect(geometry.bothInside).toBe(true);
+  expect(geometry.outputDistance).toBeLessThan(1);
+  expect(geometry.inputDistance).toBeLessThan(1);
+  await page.getByRole('button', {name: 'DFF', exact: true}).click();
+  await page.getByRole('button', {name: '查看源码'}).click();
+  await expect.poll(() => messages.at(-1)).toMatchObject({type: 'source', id: 'ff'});
+  await page.reload();
+  await expect(mode).toHaveValue('expanded');
+  await expect(page.locator('.trace-frame')).toHaveCount(2);
+  await expect(page.getByRole('button', {name: '查看源码'})).toBeEnabled();
+  await mode.selectOption('signals');
+  await expect(page.locator('.trace-frame')).toHaveCount(0);
+  await expect(page.locator('.node')).toHaveCount(4);
 });

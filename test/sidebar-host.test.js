@@ -20,7 +20,7 @@ test('registered sidebar drives real Tcl/VCD, keeps per-wave variables, reveals 
   }
   const vscode={EventEmitter,Uri:{file:uri,joinPath:(u,...p)=>uri(path.join(u.fsPath,...p))},ViewColumn:{Beside:2},extensions:{getExtension:()=>null},
     workspace:{getConfiguration:()=>({get:()=>undefined})},
-    window:{registerWebviewViewProvider:(id,p)=>{assert.equal(id,'waveWorkbench.control');sidebar=p;return disposable;},registerCustomEditorProvider:(_id,p)=>{provider=p;return disposable;},createOutputChannel:()=>({append(){},appendLine(){},dispose(){}}),showErrorMessage:m=>{throw Error(m);}},
+    window:{registerWebviewViewProvider:(id,p)=>{assert.equal(id,'waveWorkbench.control');sidebar=p;return disposable;},registerCustomEditorProvider:(_id,p)=>{provider=p;return disposable;},registerWebviewPanelSerializer:()=>disposable,createOutputChannel:()=>({append(){},appendLine(){},dispose(){}}),showErrorMessage:m=>{throw Error(m);}},
     commands:{registerCommand:(name,fn)=>{commands.set(name,fn);return disposable;},executeCommand:async(name,...args)=>commands.get(name)?.(...args)}};
   const context={extensionUri:uri(root),asAbsolutePath:p=>path.join(root,p),subscriptions:[],workspaceState:{get:()=>undefined,update:async()=>{}}};t.after(()=>context.subscriptions.forEach(d=>d.dispose()));
   const mod={exports:{}};vm.runInThisContext('(function(require,module,exports){'+fs.readFileSync(path.join(root,'dist/extension.js'),'utf8')+'\n})')(name=>name==='vscode'?vscode:name.startsWith('.')?require(path.join(root,'dist',name)):require(name),mod,mod.exports);mod.exports.activate(context);

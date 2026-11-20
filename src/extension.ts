@@ -3,6 +3,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import type { SchematicGraph } from "./shared/schematic";
 import type { Viewer, WaveDocument } from "./viewer";
 import type {
   ClipContext,
@@ -4336,20 +4337,25 @@ function activate(context: vscode.ExtensionContext) {
     | "scale"
     | "provider"
   >;
+  type StoredTrace = {
+    trace: VideTrace;
+    direction: TraceDirection;
+    evidence?: SchematicEvidence;
+    combined?: ReturnType<typeof mergeTemporalContinuationGraph>;
+    combinedStatic?: ReturnType<typeof mergeStaticContinuationGraph>;
+    waveform?: string;
+    fullname?: string;
+  };
+  const traceStorageKey = "rtlTrace.lastResult.v1";
   let traceSnapshot:
-    | {
-        trace: VideTrace;
-        direction: TraceDirection;
-        evidence?: SchematicEvidence;
-        combined?: ReturnType<typeof mergeTemporalContinuationGraph>;
-        combinedStatic?: ReturnType<typeof mergeStaticContinuationGraph>;
+    | (StoredTrace & {
         wave?: {
           viewer: Viewer;
           fullname: string;
           backend: Viewer["backend"];
           result: Awaited<ReturnType<typeof traceWaveSignal>>;
         };
-      }
+      })
     | undefined;
   let traceCursorTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -4419,6 +4425,7 @@ function activate(context: vscode.ExtensionContext) {
     combined?: ReturnType<typeof mergeTemporalContinuationGraph>,
     combinedStatic?: ReturnType<typeof mergeStaticContinuationGraph>,
     wave = traceSnapshot?.wave,
+    restored?: StoredTrace,
   ) {
     traceSnapshot = {
       trace,
@@ -4426,8 +4433,18 @@ function activate(context: vscode.ExtensionContext) {
       evidence,
       combined,
       combinedStatic,
+      waveform: wave?.viewer.uri.fsPath ?? restored?.waveform,
+      fullname: wave?.fullname ?? restored?.fullname,
       wave,
     };
+    if (!restored) {
+      const { wave: _viewer, ...saved } = traceSnapshot;
+      void context.workspaceState
+        .update(traceStorageKey, saved)
+        .then(undefined, (error) =>
+          output.appendLine("Cannot save RTL Trace: " + String(error)),
+        );
+    }
     traceExplorer.show(
       trace,
       direction,
@@ -4454,8 +4471,11 @@ function activate(context: vscode.ExtensionContext) {
           evidence?.scale,
           evidence?.provider.kind === "live",
         ),
-        wave?.fullname ?? traceSubject(trace),
-        wave ? "波形 " + path.basename(wave.viewer.uri.fsPath) : "RTL 源码",
+        traceSnapshot.fullname ?? traceSubject(trace),
+        traceSnapshot.waveform
+          ? "波形 " + path.basename(traceSnapshot.waveform)
+          : "RTL 源码",
+        restored && "已恢复的追踪结果",
       ]
         .filter(Boolean)
         .join("\n"),
@@ -4646,8 +4666,9 @@ function activate(context: vscode.ExtensionContext) {
       editor.revealRange(new vscode.Range(position, position));
     },
     async (subject, bit) => {
-      const viewer = traceViewer;
       const selection = traceSelection;
+      const viewer =
+        traceViewer ?? (await schematicViewer(traceSnapshot?.waveform));
       const scope = traceSignalScope(subject);
       if (!viewer || viewer.disposed || !scope) return;
       try {
@@ -4662,7 +4683,8 @@ function activate(context: vscode.ExtensionContext) {
         );
         const currentTrace = () =>
           selection === traceSelection &&
-          traceViewer === viewer &&
+          (traceViewer === viewer ||
+            traceSnapshot?.waveform === viewer.uri.fsPath) &&
           !viewer.disposed;
         if (!currentTrace()) return;
         if (!viewer.panel.visible)
@@ -4680,7 +4702,8 @@ function activate(context: vscode.ExtensionContext) {
     async (subject, direction, point, packedSelection, continuationSignal) => {
       try {
         const { instance, name, declaration } = subject;
-        const viewer = traceViewer;
+        const viewer =
+          traceViewer ?? (await schematicViewer(traceSnapshot?.waveform));
         if (continuationSignal && viewer && !viewer.disposed) {
           await showSignalTrace(viewer, continuationSignal, direction);
           return;
@@ -4768,7 +4791,8 @@ function activate(context: vscode.ExtensionContext) {
     },
     async (tick) => {
       try {
-        const viewer = traceViewer;
+        const viewer =
+          traceViewer ?? (await schematicViewer(traceSnapshot?.waveform));
         const time = Number(tick);
         if (!viewer || viewer.disposed) return;
         if (!Number.isSafeInteger(time))
@@ -4783,6 +4807,38 @@ function activate(context: vscode.ExtensionContext) {
     },
     resumeTraceBatch,
   );
+
+  const restoredTrace =
+    context.workspaceState.get<StoredTrace>(traceStorageKey);
+  if (restoredTrace?.trace?.schemaVersion === 1) {
+    const { trace, direction, evidence, combined, combinedStatic } =
+      restoredTrace;
+    try {
+      showWaveEvidence(
+        trace,
+        direction,
+        evidence,
+        combined,
+        combinedStatic,
+        undefined,
+        restoredTrace,
+      );
+    } catch (error) {
+      output.appendLine("Cannot restore RTL Trace: " + String(error));
+    }
+  }
+
+  async function schematicViewer(filename: string | undefined) {
+    if (!filename || !isWaveform(filename) || !fs.existsSync(filename)) return;
+    const existing = [...viewers].find(
+      (viewer) => !viewer.disposed && viewer.uri.fsPath === filename,
+    );
+    if (existing) {
+      await existing.ready;
+      if (!existing.disposed && !existing.openError) return existing;
+    }
+    return openWaveform(filename);
+  }
 
   async function showExecutionEvidence(
     evidence: Awaited<ReturnType<typeof readExecutionEvidence>>,
@@ -5008,8 +5064,11 @@ function activate(context: vscode.ExtensionContext) {
           node.wave = true;
         }
       }
+    } else if (snapshot.waveform) {
+      for (const node of model.graph.nodes)
+        node.wave = node.kind === "signal" && !!node.instance;
     }
-    const fullname = wave?.fullname ?? traceSubject(trace);
+    const fullname = snapshot.fullname ?? traceSubject(trace);
     const title = [
       evidence
         ? "时间追踪 @ " + evidence.tick
@@ -5027,6 +5086,8 @@ function activate(context: vscode.ExtensionContext) {
       direction,
       { ...model, mapped },
       true,
+      undefined,
+      snapshot.waveform,
     );
   }
 
@@ -5053,24 +5114,90 @@ function activate(context: vscode.ExtensionContext) {
     openSignalSchematic(viewer, fullname, tick, direction, diagram);
   }
 
+  type SignalDiagram = NonNullable<
+    Awaited<ReturnType<typeof queryWaveSchematic>>
+  >;
+  type SavedDiagram = {
+    graph: SchematicGraph;
+    locations: [string, VideTrace["signals"][number]["declaration"]][];
+    mapped: [string, Signal][];
+  };
+  type SavedSignalSchematic = {
+    version: 1;
+    kind: "signal";
+    fullname: string;
+    waveform?: string;
+    tick?: string;
+    direction: TraceDirection;
+    snapshot: boolean;
+    diagram: SavedDiagram;
+  };
+  type SavedModuleSchematic = {
+    version: 1;
+    kind: "module";
+    database: string;
+    waveform?: string;
+    instance: string;
+    previous: string[];
+    traceProject?: TraceProjectSelection | null;
+  };
+
+  function schematicPanelOptions() {
+    return {
+      enableScripts: true,
+      localResourceRoots: ["media", "dist/webview"].map((dir) =>
+        vscode.Uri.joinPath(context.extensionUri, dir),
+      ),
+    };
+  }
+
+  function schematicViewColumn(viewer?: Viewer): vscode.ViewColumn {
+    const editorGroup = vscode.window.tabGroups.all.find(
+      (group) =>
+        !group.tabs.some(
+          ({ input }) =>
+            input instanceof vscode.TabInputCustom &&
+            input.viewType === "waveWorkbench.viewer",
+        ),
+    );
+    return (
+      editorGroup?.viewColumn ??
+      viewer?.panel.viewColumn ??
+      vscode.ViewColumn.Active
+    );
+  }
+
   function openSignalSchematic(
     viewer: Viewer | undefined,
     fullname: string,
     tick: string | undefined,
     direction: TraceDirection,
-    initial: NonNullable<Awaited<ReturnType<typeof queryWaveSchematic>>>,
+    initial: SignalDiagram,
     snapshot = false,
+    restoredPanel?: vscode.WebviewPanel,
+    waveform = viewer?.uri.fsPath,
   ) {
-    const backend = viewer?.backend;
+    let backend = viewer?.backend;
+    const reconnect = async () => {
+      if (viewer && !viewer.disposed && viewer.backend === backend)
+        return viewer;
+      if (!restoredPanel && viewer) return;
+      viewer = await schematicViewer(waveform);
+      backend = viewer?.backend;
+      return viewer;
+    };
     let diagram = initial;
     const media = vscode.Uri.joinPath(context.extensionUri, "media");
     const built = vscode.Uri.joinPath(context.extensionUri, "dist", "webview");
-    const panel = vscode.window.createWebviewPanel(
-      "waveWorkbench.schematic",
-      snapshot ? "RTL 追踪原理图" : "RTL 原理图",
-      vscode.ViewColumn.Beside,
-      { enableScripts: true, localResourceRoots: [media, built] },
-    );
+    const panel =
+      restoredPanel ??
+      vscode.window.createWebviewPanel(
+        "waveWorkbench.schematic",
+        snapshot ? "RTL 追踪原理图" : "RTL 原理图",
+        schematicViewColumn(viewer),
+        { enableScripts: true, localResourceRoots: [media, built] },
+      );
+    panel.webview.options = schematicPanelOptions();
     let busy = false;
     let graphRevision = 0;
     let disposed = false;
@@ -5089,9 +5216,24 @@ function activate(context: vscode.ExtensionContext) {
         revision: ++graphRevision,
         canGoBack: previous.length > 0,
         traceSnapshot: snapshot,
+        restore: {
+          version: 1,
+          kind: "signal",
+          fullname,
+          waveform,
+          direction,
+          tick,
+          snapshot,
+          diagram: {
+            graph: diagram.graph,
+            locations: [...diagram.locations],
+            mapped: [...diagram.mapped],
+          },
+        } satisfies SavedSignalSchematic,
         canOpenModule:
           !snapshot &&
-          (viewer?.kdb instanceof VerilatorDesign ||
+          ((!!restoredPanel && !!waveform) ||
+            viewer?.kdb instanceof VerilatorDesign ||
             (viewer?.kdb instanceof KdbSession && !!viewer.kdb.portLinks)),
       });
     const subscription = webview.onDidReceiveMessage(
@@ -5107,10 +5249,15 @@ function activate(context: vscode.ExtensionContext) {
             return;
           }
           if (message.revision !== graphRevision || busy) return;
-          if (
-            !snapshot &&
-            (!viewer || viewer.disposed || viewer.backend !== backend)
-          ) {
+          const needsViewer = [
+            "moduleView",
+            "follow",
+            "refresh",
+            "wave",
+          ].includes(message.type);
+          const connected = needsViewer ? await reconnect() : undefined;
+          if (disposed || message.revision !== graphRevision || busy) return;
+          if (needsViewer && !connected) {
             await webview.postMessage({
               type: "navigationError",
               message: "关联的波形已关闭或更换。",
@@ -5194,6 +5341,7 @@ function activate(context: vscode.ExtensionContext) {
               }
               fullname = nextSignal;
               direction = nextDirection;
+              if (nextTick !== undefined) tick = String(nextTick);
               diagram = next;
               await sendDiagram();
             } finally {
@@ -5213,17 +5361,37 @@ function activate(context: vscode.ExtensionContext) {
               viewColumn: vscode.ViewColumn.Active,
               selection: new vscode.Range(position, position),
             });
-          } else if (message.id && message.type === "wave") {
+          } else if (message.id && message.type === "wave" && connected) {
             const signal = diagram.mapped.get(message.id);
+            const node = diagram.graph.nodes.find(
+              ({ id }) => id === message.id,
+            );
+            const name = signal
+              ? [
+                  signal.scope,
+                  WaveSignal.label({ ...signal, displayName: undefined }),
+                ]
+                  .filter(Boolean)
+                  .join(".")
+              : node?.instance && node.kind === "signal"
+                ? dumpScope(connected, node.instance) +
+                  (node.signal?.startsWith(node.instance + ".")
+                    ? node.signal.slice(node.instance.length)
+                    : "." + node.label)
+                : undefined;
+            if (!name) return;
+            const currentSignal =
+              signal && !restoredPanel
+                ? signal
+                : await findSignal(connected.backend, name, ".");
             if (
-              !signal ||
-              !viewer ||
-              viewer.disposed ||
-              viewer.backend !== backend
+              disposed ||
+              connected.disposed ||
+              message.revision !== graphRevision
             )
               return;
-            viewer.panel.reveal(viewer.panel.viewColumn);
-            await viewer.ui("batchAdd", { signals: [signal] });
+            connected.panel.reveal(connected.panel.viewColumn);
+            await connected.ui("batchAdd", { signals: [currentSignal] });
           }
         } catch (error) {
           report(error);
@@ -5289,10 +5457,66 @@ function activate(context: vscode.ExtensionContext) {
       await showModuleSchematic(design, viewer, record.instance);
   }
 
+  async function openSchematicDesign(file: vscode.Uri) {
+    const tree = verilatorTreeFile(file.fsPath);
+    let design: VerilatorDesign | KdbSession;
+    if (tree) {
+      const directory = path.dirname(tree);
+      const folder = vscode.workspace.getWorkspaceFolder(file);
+      design = await VerilatorDesign.open(
+        tree,
+        [],
+        [
+          directory,
+          path.dirname(directory),
+          ...(folder ? [folder.uri.fsPath] : []),
+        ],
+      );
+    } else {
+      const directory = fs.statSync(file.fsPath).isDirectory();
+      const kdbNames = ["simv.kdb", "kdb.elab++"];
+      if (!directory && !kdbNames.includes(path.basename(file.fsPath)))
+        throw Error("请选择 Verilator 展开树、simv.kdb 或 VCS simv.daidir。");
+      const folder = directory ? file.fsPath : path.dirname(file.fsPath);
+      if (!kdbNames.some((name) => fs.existsSync(path.join(folder, name))))
+        throw Error("目录中找不到 VCS KDB。");
+      const config = vscode.workspace.getConfiguration("waveWorkbench", file);
+      const log = (message: string) => output.append(message);
+      const plan = backendPlan(context, config, "design.fsdb", log);
+      const open = async (kind: KdbSession) => {
+        try {
+          await kind.open(file.fsPath);
+          return kind;
+        } catch (error) {
+          kind.dispose();
+          throw error;
+        }
+      };
+      try {
+        design = await open(plan.createKdb());
+      } catch (error) {
+        if (plan.kdbKind !== "verdi" || config.get("fsdbBackend") === "verdi")
+          throw error;
+        log(`Verdi KDB open failed; trying WaveBench Reader: ${error}\n`);
+        design = await open(
+          backendPlan(
+            context,
+            config,
+            "design.fsdb",
+            log,
+            "independent",
+          ).createKdb(),
+        );
+      }
+    }
+    return design;
+  }
+
   async function showModuleSchematic(
     design: VerilatorDesign | KdbSession,
     viewer?: Viewer,
     initialInstance?: string,
+    restored?: { panel: vscode.WebviewPanel; state: SavedModuleSchematic },
   ) {
     if (design instanceof KdbSession && !design.portLinks)
       throw Error("该 KDB 后端不支持端口连接查询。");
@@ -5313,11 +5537,14 @@ function activate(context: vscode.ExtensionContext) {
             )?.label;
       if (!initialInstance) return false;
     }
+    const waveformPath = viewer?.uri.fsPath ?? restored?.state.waveform;
     let logicProject:
       | Promise<{ session?: VideTraceProject; directory: string }>
       | undefined;
     const openLogicProject = async (kdb: KdbSession) => {
-      const selected = viewer ? traceProjectSelection(viewer) : undefined;
+      const selected = viewer
+        ? traceProjectSelection(viewer)
+        : restored?.state.traceProject;
       const directory = path.dirname(kdb.path);
       if (selected) {
         const project = await openSimulationTrace(selected, viewer, kdb);
@@ -5328,7 +5555,7 @@ function activate(context: vscode.ExtensionContext) {
       }
       if (selected !== null) {
         const manifest =
-          viewer && (await readAdjacentTraceBuildManifest(viewer.uri.fsPath));
+          waveformPath && (await readAdjacentTraceBuildManifest(waveformPath));
         if (
           manifest &&
           (manifest.roots.length || manifest.library_files?.length)
@@ -5410,15 +5637,18 @@ function activate(context: vscode.ExtensionContext) {
     }
     const media = vscode.Uri.joinPath(context.extensionUri, "media");
     const built = vscode.Uri.joinPath(context.extensionUri, "dist", "webview");
-    const panel = vscode.window.createWebviewPanel(
-      "waveWorkbench.moduleSchematic",
-      "RTL 模块原理图",
-      vscode.ViewColumn.Beside,
-      { enableScripts: true, localResourceRoots: [media, built] },
-    );
+    const panel =
+      restored?.panel ??
+      vscode.window.createWebviewPanel(
+        "waveWorkbench.moduleSchematic",
+        "RTL 模块原理图",
+        schematicViewColumn(viewer),
+        { enableScripts: true, localResourceRoots: [media, built] },
+      );
+    panel.webview.options = schematicPanelOptions();
     const { webview } = panel;
     const backend = viewer?.backend;
-    const previous: string[] = [];
+    const previous = restored?.state.previous ?? [];
     let revision = 0;
     let disposed = false;
     let navigating = false;
@@ -5431,13 +5661,25 @@ function activate(context: vscode.ExtensionContext) {
         : undefined;
     const send = () => {
       for (const node of graph.nodes)
-        node.wave = !!node.signal && !!liveViewer();
+        node.wave =
+          !!node.signal && (!!liveViewer() || !!restored?.state.waveform);
       return webview.postMessage({
         type: "schematic",
         title: graph.module!.instance + " · " + graph.module!.name,
         graph,
         revision: ++revision,
         canGoBack: previous.length > 0,
+        restore: {
+          version: 1,
+          kind: "module",
+          database: design.path,
+          waveform: waveformPath,
+          instance: graph.module!.instance,
+          previous,
+          traceProject: viewer
+            ? traceProjectSelection(viewer)
+            : restored?.state.traceProject,
+        } satisfies SavedModuleSchematic,
       });
     };
     const subscription = webview.onDidReceiveMessage(
@@ -5505,14 +5747,16 @@ function activate(context: vscode.ExtensionContext) {
               selection: new vscode.Range(position, position),
             });
           } else if (node?.instance && node.signal && message.type === "wave") {
-            const waveform = liveViewer();
+            const waveform =
+              liveViewer() ??
+              (restored && (await schematicViewer(waveformPath)));
             if (!waveform) throw Error("关联的波形已关闭或更换。");
             const signal = await findSignal(
               waveform.backend,
               dumpScope(waveform, node.instance) + "." + node.signal,
               ".",
             );
-            if (!liveViewer()) return;
+            if (waveform.disposed || (!restored && !liveViewer())) return;
             waveform.panel.reveal(waveform.panel.viewColumn);
             await waveform.ui("batchAdd", { signals: [signal] });
           }
@@ -5534,6 +5778,70 @@ function activate(context: vscode.ExtensionContext) {
     webview.html = schematicHtml(webview, media, built, randomUUID());
     return true;
   }
+
+  context.subscriptions.push(
+    vscode.window.registerWebviewPanelSerializer("waveWorkbench.schematic", {
+      async deserializeWebviewPanel(panel, saved) {
+        const state: SavedSignalSchematic | undefined = (
+          saved as { panel?: SavedSignalSchematic } | undefined
+        )?.panel;
+        if (state?.version !== 1 || state.kind !== "signal") {
+          panel.webview.html =
+            "<p>此原理图没有可恢复的记录，请从波形重新打开。</p>";
+          return;
+        }
+        const { diagram } = state;
+        openSignalSchematic(
+          undefined,
+          state.fullname,
+          state.tick,
+          state.direction,
+          {
+            graph: diagram.graph,
+            locations: new Map(diagram.locations),
+            mapped: new Map(diagram.mapped),
+            signalNodes: new Map(),
+          },
+          state.snapshot,
+          panel,
+          state.waveform,
+        );
+      },
+    }),
+    vscode.window.registerWebviewPanelSerializer(
+      "waveWorkbench.moduleSchematic",
+      {
+        async deserializeWebviewPanel(panel, saved) {
+          const state: SavedModuleSchematic | undefined = (
+            saved as { panel?: SavedModuleSchematic } | undefined
+          )?.panel;
+          if (state?.version !== 1 || state.kind !== "module") {
+            panel.webview.html =
+              "<p>此模块原理图没有可恢复的记录，请从波形重新打开。</p>";
+            return;
+          }
+          let design: VerilatorDesign | KdbSession | undefined;
+          try {
+            design = await openSchematicDesign(vscode.Uri.file(state.database));
+            if (
+              !(await showModuleSchematic(design, undefined, state.instance, {
+                panel,
+                state,
+              }))
+            )
+              design.dispose();
+          } catch (error) {
+            design?.dispose();
+            output.appendLine(
+              "Cannot restore module schematic: " + String(error),
+            );
+            panel.webview.html =
+              "<p>未能恢复模块原理图，请检查设计数据库是否仍可访问。</p>";
+          }
+        },
+      },
+    ),
+  );
 
   async function showSignalTrace(
     viewer: Viewer,
@@ -6389,68 +6697,7 @@ function activate(context: vscode.ExtensionContext) {
           }
           if (!file) return;
           if (file.scheme !== "file") throw Error("请选择本地设计数据库。");
-          const tree = verilatorTreeFile(file.fsPath);
-          let design: VerilatorDesign | KdbSession;
-          if (tree) {
-            const directory = path.dirname(tree);
-            const folder = vscode.workspace.getWorkspaceFolder(file);
-            design = await VerilatorDesign.open(
-              tree,
-              [],
-              [
-                directory,
-                path.dirname(directory),
-                ...(folder ? [folder.uri.fsPath] : []),
-              ],
-            );
-          } else {
-            const directory = fs.statSync(file.fsPath).isDirectory();
-            const kdbNames = ["simv.kdb", "kdb.elab++"];
-            if (!directory && !kdbNames.includes(path.basename(file.fsPath)))
-              throw Error(
-                "请选择 Verilator 展开树、simv.kdb 或 VCS simv.daidir。",
-              );
-            const folder = directory ? file.fsPath : path.dirname(file.fsPath);
-            if (
-              !kdbNames.some((name) => fs.existsSync(path.join(folder, name)))
-            )
-              throw Error("目录中找不到 VCS KDB。");
-            const config = vscode.workspace.getConfiguration(
-              "waveWorkbench",
-              file,
-            );
-            const log = (message: string) => output.append(message);
-            const plan = backendPlan(context, config, "design.fsdb", log);
-            const open = async (kind: KdbSession) => {
-              try {
-                await kind.open(file.fsPath);
-                return kind;
-              } catch (error) {
-                kind.dispose();
-                throw error;
-              }
-            };
-            try {
-              design = await open(plan.createKdb());
-            } catch (error) {
-              if (
-                plan.kdbKind !== "verdi" ||
-                config.get("fsdbBackend") === "verdi"
-              )
-                throw error;
-              log(`Verdi KDB open failed; trying WaveBench Reader: ${error}
-`);
-              design = await open(
-                backendPlan(
-                  context,
-                  config,
-                  "design.fsdb",
-                  log,
-                  "independent",
-                ).createKdb(),
-              );
-            }
-          }
+          const design = await openSchematicDesign(file);
           try {
             if (!(await showModuleSchematic(design))) design.dispose();
           } catch (error) {

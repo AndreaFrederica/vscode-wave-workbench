@@ -3,6 +3,7 @@
 import {
   temporalEdgeLabel,
   temporalGapLabels,
+  traceSignalScope,
   type mergeTemporalContinuationGraph,
   type StaticTraceDiagram,
   type VideTrace,
@@ -34,6 +35,9 @@ export function traceSchematic(
     VideTrace["signals"][number]["declaration"]
   >();
   const signalNodes = new Map<string, number>();
+  const instances = new Map(
+    trace.signals.map(({ id, instance }) => [id, instance]),
+  );
   for (const signal of trace.signals) {
     const id = signalId(signal.id);
     graph.nodes.push({
@@ -41,6 +45,10 @@ export function traceSchematic(
       kind: "signal",
       label: signal.name,
       detail: signal.instance ?? "",
+      instance: signal.instance,
+      signal: signal.instance
+        ? [traceSignalScope(signal), signal.name].join(".")
+        : undefined,
       source: !!signal.declaration,
     });
     signalNodes.set(id, signal.id);
@@ -65,6 +73,7 @@ export function traceSchematic(
       label: clocked ? "DFF" : mux ? "MUX" : operator || assignment.kind,
       detail: assignment.targetRange ? assignment.targetRange.join(":") : "",
       kind: clocked ? "register" : mux ? "mux" : "logic",
+      instance: assignment.instance ?? instances.get(assignment.targets[0]),
       source: true,
     });
     locations.set(id, assignment.location);
@@ -119,6 +128,7 @@ export function traceTimeSchematic(
       kind: "signal",
       label: signal.slice(split + 1),
       instance: split > 0 ? signal.slice(0, split) : undefined,
+      signal,
       detail: [
         "tick " + point.tick,
         point.value === undefined ? undefined : "= " + point.value,
@@ -152,6 +162,7 @@ export function traceTimeSchematic(
       kind: "logic",
       detail: "tick " + time.nodes[target].point.tick,
       source: !!record?.location,
+      instance: record?.instance ?? graph.nodes[target]?.instance,
     });
     if (record?.location) locations.set(id, record.location);
     graph.edges.push({ from: id, to: pointId(target) });
@@ -188,6 +199,9 @@ export function traceTimeSchematic(
       graph.nodes.push({
         id,
         label: gap.signal,
+        instance: gap.signal.includes(".")
+          ? gap.signal.slice(0, gap.signal.lastIndexOf("."))
+          : undefined,
         kind: "gap",
         detail:
           "tick " +

@@ -25,6 +25,8 @@
   "activationEvents": [
     "onCustomEditor:waveWorkbench.viewer",
     "onStartupFinished",
+    "onWebviewPanel:waveWorkbench.schematic",
+    "onWebviewPanel:waveWorkbench.moduleSchematic",
     "onView:waveWorkbench.control"
   ],
   "extensionPack": [

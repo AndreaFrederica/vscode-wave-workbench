@@ -38,3 +38,17 @@ header button{flex-shrink:0}
 #scene{position:relative}
 #trace-edges{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 #diagram{position:relative}
+
+#overview{position:absolute;right:10px;bottom:10px;width:clamp(92px,27%,174px);height:clamp(66px,24%,118px);border:1px solid var(--vscode-contrastBorder,var(--vscode-panel-border,#515e70));border-radius:4px;background:var(--vscode-editor-background,#18212b);overflow:hidden;cursor:crosshair}
+#overview:focus-visible{outline:1px solid var(--vscode-focusBorder,#6cf);outline-offset:2px}
+#overview.dragging{cursor:grabbing}
+#overview-map,#overview-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+#overview-window{fill:var(--vscode-focusBorder,#6cf);fill-opacity:.17;stroke:var(--vscode-focusBorder,#6cf);stroke-width:1.5}
+#trace-layout{font:inherit;color:var(--vscode-dropdown-foreground,inherit);background:var(--vscode-dropdown-background,#354354);border:1px solid var(--vscode-dropdown-border,var(--vscode-panel-border));border-radius:4px;padding:3px 6px;flex-shrink:0}
+@media(max-width:540px){header{flex-wrap:wrap}#title{order:-1;flex:1 0 100%}}
+#trace-frames{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.trace-frame rect{fill:var(--vscode-editor-background,#18212b);stroke:var(--vscode-charts-purple,#b99ae5);stroke-width:1.6;vector-effect:non-scaling-stroke}
+.trace-frame .header{stroke:var(--vscode-editorGroup-border,#576271);stroke-width:1;vector-effect:non-scaling-stroke}
+.trace-frame text{fill:var(--vscode-editor-foreground,#ddd);font-size:14px;font-weight:600}
+.trace-boundary-port circle{fill:var(--vscode-editor-background,#18212b);stroke:var(--vscode-charts-purple,#b99ae5);stroke-width:1.5}
+.trace-boundary-port text{fill:var(--vscode-editor-foreground,#ddd);paint-order:stroke;stroke:var(--vscode-editor-background,#18212b);stroke-width:3px;font-size:11px}
