@@ -141,18 +141,10 @@ export interface BackendProtocol {
       context: import("../decoder-runtime/types").DecoderContext;
       measure?: boolean;
     };
-    result: null;
+    result: typeof import("../decoder-runtime/types").eventBatchVersion;
   };
   decoderBatch: {
-    args: {
-      start: string;
-      end: string;
-      initial: (string | null)[];
-      times: string[];
-      inputs: number[];
-      offsets: number[];
-      values: string;
-    };
+    args: import("../decoder-runtime/types").EventBatchHeader;
     result: import("../decoder-runtime/types").DecodeResult;
   };
   decoderFlush: {

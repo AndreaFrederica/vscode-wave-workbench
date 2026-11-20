@@ -109,8 +109,10 @@ try {
       for (const id of ["word", "example.lua.word", "example.js.word"]) {
         const definition = definitions.get(id);
         let scriptMs = 0;
-        const onExecution = (ms) => {
+        let preparationMs = 0;
+        const onExecution = (ms, prepare = 0) => {
           scriptMs += ms;
+          preparationMs += prepare;
         };
         const instantiate = async (signal) =>
           definition.profile
@@ -121,6 +123,7 @@ try {
         const setup = [],
           engine = [],
           inEngine = [],
+          nativePreparation = [],
           boundary = [],
           endToEnd = [],
           cached = [];
@@ -134,6 +137,7 @@ try {
             if (attempt) setup.push(performance.now() - started);
             let elapsed = 0;
             scriptMs = 0;
+            preparationMs = 0;
             const all = [];
             for (let first = 0; first < events; first += 4096) {
               const last = Math.min(first + 4096, events);
@@ -160,6 +164,8 @@ try {
               engine.push(elapsed);
               const execution = definition.profile ? elapsed : scriptMs;
               inEngine.push(execution);
+              if (definition.manifest.engine === "lua")
+                nativePreparation.push(preparationMs);
               boundary.push(Math.max(0, elapsed - execution));
             }
             if (reference) assert.deepEqual(all, reference);
@@ -193,6 +199,9 @@ try {
           setupMs: stats(setup),
           batchExecutionAndTransportMs: stats(engine),
           engineExecutionMs: stats(inEngine),
+          luaPreparationMs: nativePreparation.length
+            ? stats(nativePreparation)
+            : null,
           boundaryAndPreparationMs: stats(boundary),
           transactionsPerSecond: Math.round(
             (reference.length / stats(engine).p50) * 1000,
@@ -227,6 +236,7 @@ try {
     node: process.version,
     v8: process.versions.v8,
     lua: "LuaJIT 2.1 via mlua 0.12.2 built with Cargo --release",
+    eventBatchVersion: 1,
     repeats,
     warmup: 1,
     scenario: "equivalent eight-bit rule with stateful interval accumulation",
@@ -268,6 +278,7 @@ try {
       "All three engines produced the same transaction list before timing was reported.",
       "The engine metric measures the script call and its event API. Boundary is the remaining measured batch time, including preparation, validation and Worker messages or Lua IPC. E2E includes reading the VCD through the Rust backend.",
       "The Builtin engine runs in the measuring process and reports its batch time as engine time.",
+      "The JSON report also records time spent materializing the Lua event table and reading the binary columns inside the decoder.",
       "Each row has " +
         report.repeats +
         " measured runs after " +

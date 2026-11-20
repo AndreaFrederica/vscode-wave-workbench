@@ -3,8 +3,10 @@
 import { Worker } from "node:worker_threads";
 import * as path from "node:path";
 import { Backend } from "../backend";
+import { binaryBatch } from "./event-batch";
 import type { DecoderDefinition } from "./registry";
 import {
+  eventBatchVersion,
   readCheckpoint,
   validateResult,
   type DecoderContext,
@@ -58,10 +60,15 @@ export function javascriptRuntime(
         pending = { resolve, reject };
         const { batch } = command;
         const transfers = batch
-          ? [batch.inputs.buffer, batch.offsets.buffer, batch.values.buffer]
+          ? [
+              ...new Set([
+                batch.times.buffer,
+                batch.inputs.buffer,
+                batch.offsets.buffer,
+                batch.values.buffer,
+              ]),
+            ]
           : [];
-        if (batch && !Array.isArray(batch.times))
-          transfers.push(batch.times.buffer);
         worker.postMessage(command, transfers as ArrayBuffer[]);
       });
     } finally {
@@ -90,7 +97,7 @@ export async function luaRuntime(
   definition: DecoderDefinition,
   context: DecoderContext,
   signal: AbortSignal,
-  reportTime?: (engineMs: number) => void,
+  reportTime?: (engineMs: number, preparationMs?: number) => void,
 ): Promise<DecoderRuntime> {
   signal.throwIfAborted();
   const backend = new Backend(binary, {
@@ -100,34 +107,32 @@ export async function luaRuntime(
   const close = () => backend.dispose();
   signal.addEventListener("abort", close, { once: true });
   try {
-    await backend.request("decoderInit", {
+    const version = await backend.request("decoderInit", {
       source: definition.source!,
       context,
       measure: !!reportTime,
     });
+    if (version !== eventBatchVersion)
+      throw Error(
+        "The native Lua decoder does not support binary event batches. Rebuild or reinstall the extension.",
+      );
   } catch (error) {
     signal.removeEventListener("abort", close);
     close();
     throw error;
   }
   function measured(result: unknown) {
-    const { engineMs, ...payload } = result as { engineMs?: number };
-    if (typeof engineMs === "number") reportTime?.(engineMs);
+    const { engineMs, preparationMs, ...payload } = result as {
+      engineMs?: number;
+      preparationMs?: number;
+    };
+    if (typeof engineMs === "number") reportTime?.(engineMs, preparationMs);
     return validateResult(payload);
   }
   return {
     async decode(batch) {
-      return measured(
-        await backend.request("decoderBatch", {
-          start: batch.start,
-          end: batch.end,
-          initial: batch.initial,
-          times: Array.from(batch.times as Iterable<string | bigint>, String),
-          inputs: Array.from(batch.inputs),
-          offsets: Array.from(batch.offsets),
-          values: Buffer.from(batch.values).toString("ascii"),
-        }),
-      );
+      const { header, chunks } = binaryBatch(batch);
+      return measured(await backend.requestDecoderBatch(header, chunks));
     },
     async flush() {
       return measured(await backend.request("decoderFlush"));

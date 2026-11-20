@@ -4,19 +4,90 @@ use mlua::{Function, Lua, LuaOptions, LuaSerdeExt, StdLib, Table, Value};
 use serde::Deserialize;
 use serde_json::{json, Value as Json};
 use std::cell::RefCell;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::rc::Rc;
 use std::time::Instant;
 
+const EVENT_BATCH_VERSION: u32 = 1;
+const MAX_EVENTS: usize = 4096;
+const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Deserialize)]
-struct Batch {
+#[serde(rename_all = "lowercase")]
+enum TimeEncoding {
+    U64,
+    Decimal,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchHeader {
+    version: u32,
     start: String,
     end: String,
     initial: Vec<Option<String>>,
-    times: Vec<String>,
-    inputs: Vec<u32>,
-    offsets: Vec<usize>,
-    values: String,
+    count: usize,
+    time_encoding: TimeEncoding,
+    time_bytes: usize,
+    value_bytes: usize,
+}
+
+impl BatchHeader {
+    fn payload_size(&self) -> io::Result<usize> {
+        if self.version != EVENT_BATCH_VERSION
+            || self.count > MAX_EVENTS
+            || self.initial.len() > 64
+            || self.start.len() > 80
+            || self.end.len() > 80
+            || self.value_bytes > MAX_VALUE_BYTES
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid decoder batch header",
+            ));
+        }
+        let valid_time_bytes = match self.time_encoding {
+            TimeEncoding::U64 => self.time_bytes == self.count * 8,
+            TimeEncoding::Decimal => (self.count * 2..=self.count * 81).contains(&self.time_bytes),
+        };
+        if !valid_time_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid decoder time column size",
+            ));
+        }
+        Ok(self.time_bytes + (self.count * 2 + 1) * 4 + self.value_bytes)
+    }
+}
+
+fn read_tick<'a>(
+    encoding: &TimeEncoding,
+    times: &mut &'a [u8],
+) -> mlua::Result<std::borrow::Cow<'a, str>> {
+    let invalid = || mlua::Error::runtime("Invalid decoder timestamp");
+    match encoding {
+        TimeEncoding::U64 => {
+            let (tick, rest) = times.split_first_chunk::<8>().ok_or_else(invalid)?;
+            *times = rest;
+            Ok(u64::from_le_bytes(*tick).to_string().into())
+        }
+        TimeEncoding::Decimal => {
+            let (&length, rest) = times.split_first().ok_or_else(invalid)?;
+            let length = usize::from(length);
+            let (digits, rest) = rest.split_at_checked(length).ok_or_else(invalid)?;
+            if length == 0
+                || length > 80
+                || (length > 1 && digits[0] == b'0')
+                || !digits.iter().all(u8::is_ascii_digit)
+            {
+                return Err(invalid());
+            }
+            *times = rest;
+            Ok(std::str::from_utf8(digits)
+                .map_err(mlua::Error::external)?
+                .into())
+        }
+    }
 }
 
 struct Runtime {
@@ -135,33 +206,47 @@ impl Runtime {
         })
     }
 
-    fn decode(&self, input: Batch) -> mlua::Result<Json> {
-        let count = input.times.len();
-        if count > 4096
-            || count != input.inputs.len()
-            || input.offsets.len() != count + 1
-            || input.offsets.first() != Some(&0)
-            || input.offsets.last() != Some(&input.values.len())
-            || input.values.len() > 16 * 1024 * 1024
-        {
-            return Err(mlua::Error::runtime("Invalid Lua decoder batch"));
+    fn decode(&self, header: BatchHeader, payload: &[u8]) -> mlua::Result<Json> {
+        let prepare_started = self.measure.then(Instant::now);
+        let (mut times, rest) = payload.split_at(header.time_bytes);
+        let (inputs, rest) = rest.split_at(header.count * 4);
+        let (offsets, values) = rest.split_at((header.count + 1) * 4);
+        let offset = |index: usize| {
+            u32::from_le_bytes(offsets[index * 4..][..4].try_into().unwrap()) as usize
+        };
+        if offset(0) != 0 || offset(header.count) != values.len() {
+            return Err(mlua::Error::runtime("Invalid decoder sample offsets"));
         }
-        let events = self.lua.create_table_with_capacity(count, 0)?;
-        for (i, (tick, input_id)) in input.times.into_iter().zip(input.inputs).enumerate() {
-            let value = input
-                .values
-                .get(input.offsets[i]..input.offsets[i + 1])
+
+        let events = self.lua.create_table_with_capacity(header.count, 0)?;
+        let mut previous_offset = 0;
+        for (index, input) in inputs.chunks_exact(4).enumerate() {
+            let input = u32::from_le_bytes(input.try_into().unwrap());
+            if input as usize >= header.initial.len() {
+                return Err(mlua::Error::runtime("Invalid decoder input index"));
+            }
+            let end = offset(index + 1);
+            let value = values
+                .get(previous_offset..end)
                 .ok_or_else(|| mlua::Error::runtime("Invalid decoder sample offsets"))?;
+            previous_offset = end;
+            let tick = read_tick(&header.time_encoding, &mut times)?;
             let event = self.lua.create_table()?;
-            event.set("tick", tick)?;
-            event.set("input", input_id)?;
-            event.set("value", value)?;
-            events.set(i + 1, event)?;
+            event.set("tick", tick.as_ref())?;
+            event.set("input", input)?;
+            event.set(
+                "value",
+                std::str::from_utf8(value).map_err(mlua::Error::external)?,
+            )?;
+            events.set(index + 1, event)?;
+        }
+        if !times.is_empty() {
+            return Err(mlua::Error::runtime("Trailing decoder timestamp bytes"));
         }
         let batch = self.lua.create_table()?;
-        batch.set("start", input.start)?;
-        batch.set("end", input.end)?;
-        batch.set("initial", self.lua.to_value(&input.initial)?)?;
+        batch.set("start", header.start)?;
+        batch.set("end", header.end)?;
+        batch.set("initial", self.lua.to_value(&header.initial)?)?;
         batch.set("events", events)?;
         let started = self.measure.then(Instant::now);
         self.module.get::<Function>("decode")?.call::<()>((
@@ -169,7 +254,11 @@ impl Runtime {
             self.state.clone(),
             batch,
         ))?;
-        Ok(self.take_result(started))
+        let mut result = self.take_result(started);
+        if let (Some(started), Some(prepare_started)) = (started, prepare_started) {
+            result["preparationMs"] = json!((started - prepare_started).as_secs_f64() * 1000.0);
+        }
+        Ok(result)
     }
 
     fn flush(&self) -> mlua::Result<Json> {
@@ -221,8 +310,12 @@ impl Runtime {
 pub fn run() -> io::Result<()> {
     let mut output = io::BufWriter::new(io::stdout().lock());
     let mut runtime: Option<Runtime> = None;
-    for line in io::stdin().lock().lines() {
-        let request: Json = serde_json::from_str(&line?)?;
+    let mut input = io::stdin().lock();
+    let mut line = String::new();
+    let mut payload = Vec::new();
+    while input.read_line(&mut line)? != 0 {
+        let request: Json = serde_json::from_str(&line)?;
+        line.clear();
         let result = match request["method"].as_str() {
             Some("decoderInit") => Runtime::new(
                 request["source"].as_str().unwrap_or(""),
@@ -231,16 +324,18 @@ pub fn run() -> io::Result<()> {
             )
             .map(|created| {
                 runtime = Some(created);
-                Json::Null
+                json!(EVENT_BATCH_VERSION)
             }),
-            Some("decoderBatch") => runtime
-                .as_ref()
-                .ok_or_else(|| mlua::Error::runtime("Decoder is not initialized"))
-                .and_then(|runtime| {
-                    serde_json::from_value(request.clone())
-                        .map_err(mlua::Error::external)
-                        .and_then(|input| runtime.decode(input))
-                }),
+            Some("decoderBatch") => {
+                // An invalid header ends the stream because the next frame boundary is unknown.
+                let header = BatchHeader::deserialize(&request)?;
+                payload.resize(header.payload_size()?, 0);
+                input.read_exact(&mut payload)?;
+                runtime
+                    .as_ref()
+                    .ok_or_else(|| mlua::Error::runtime("Decoder is not initialized"))
+                    .and_then(|runtime| runtime.decode(header, &payload))
+            }
             Some("decoderFlush") => runtime
                 .as_ref()
                 .ok_or_else(|| mlua::Error::runtime("Decoder is not initialized"))

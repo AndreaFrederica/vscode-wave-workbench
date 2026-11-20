@@ -93,15 +93,31 @@ class Backend {
         else p.resolve(msg.result);
       });
   }
-  request<M extends keyof BackendProtocol>(
+  request<M extends Exclude<keyof BackendProtocol, "decoderBatch">>(
     method: M,
     ...[args]: {} extends BackendProtocol[M]["args"]
       ? [args?: BackendProtocol[M]["args"]]
       : [args: BackendProtocol[M]["args"]]
   ): Promise<BackendProtocol[M]["result"]> {
+    return this.send(method, args);
+  }
+
+  requestDecoderBatch(
+    header: BackendProtocol["decoderBatch"]["args"],
+    chunks: readonly Uint8Array[],
+  ): Promise<BackendProtocol["decoderBatch"]["result"]> {
+    return this.send("decoderBatch", header, chunks);
+  }
+
+  private send<M extends keyof BackendProtocol>(
+    method: M,
+    args: BackendProtocol[M]["args"] | undefined,
+    chunks: readonly Uint8Array[] = [],
+  ): Promise<BackendProtocol[M]["result"]> {
     if (this.closed) return Promise.reject(new Error("Wave backend is closed"));
     return new Promise((resolve, reject) => {
       const id = ++this.sequence;
+      const line = JSON.stringify({ id, method, ...args }) + "\n";
       const timer = setTimeout(() => {
         this.dispose();
         reject(
@@ -111,7 +127,19 @@ class Backend {
         );
       }, 120000);
       this.pending.set(id, { resolve, reject, timer });
-      this.child.stdin.write(JSON.stringify({ id, method, ...args }) + "\n");
+      const stream = this.child.stdin;
+      if (chunks.length) stream.cork();
+      try {
+        stream.write(line);
+        for (const chunk of chunks) stream.write(chunk);
+      } catch (error) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(error);
+        if (chunks.length) this.dispose();
+      } finally {
+        if (chunks.length) stream.uncork();
+      }
     });
   }
   dispose() {

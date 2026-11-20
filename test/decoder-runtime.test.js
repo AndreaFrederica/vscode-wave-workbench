@@ -12,6 +12,7 @@ const {
 } = require("../dist/decoder-runtime/registry");
 const { DecoderScheduler } = require("../dist/decoder-runtime/scheduler");
 const {
+  binaryBatch,
   packEvents,
   scriptEvents,
 } = require("../dist/decoder-runtime/event-batch");
@@ -360,6 +361,109 @@ test(
     assert.deepEqual(trace[id].events, [
       ["2", "x"],
       ["8", "z"],
+    ]);
+  },
+);
+
+test(
+  "Lua and V8 read u64 and extended clocks from the same binary batch format",
+  { skip: !existsSync(binary) },
+  async () => {
+    const ctx = {
+      inputs: [
+        { id: "wide", width: 512 },
+        { id: "flag", width: 1 },
+      ],
+      options: {},
+      scale: "1ns",
+    };
+    const scripts = {
+      lua: 'return {decode = function(ctx, _, batch) for _, event in ipairs(batch.events) do ctx.emit({start = event.tick, ["end"] = batch["end"], label = event.value, fields = { input = event.input, initial = batch.initial[2] }}) end end}',
+      javascript:
+        "module.exports = {decode(ctx, _, batch) { for (const event of batch.events()) ctx.emit({start: event.tick, end: batch.end, label: event.value, fields: {input: event.input, initial: batch.initial[1]}}); }};",
+    };
+    const signal = AbortSignal.timeout(5000);
+    const lua = await luaRuntime(binary, { source: scripts.lua }, ctx, signal);
+    const js = javascriptRuntime({ source: scripts.javascript }, ctx);
+    try {
+      for (const tick of [(1n << 64n) - 1n, 1n << 79n]) {
+        const initial = [null, "z"];
+        const events = [
+          { tick: String(tick), input: 0, value: "01xz".repeat(128) },
+          { tick: String(tick), input: 1, value: "x" },
+        ];
+        const end = tick + 1n;
+        const l = await lua.decode(
+          packEvents(tick, end, initial, events),
+          signal,
+        );
+        const v = await js.decode(
+          packEvents(tick, end, initial, events),
+          signal,
+        );
+        assert.deepEqual(l, v);
+        assert.deepEqual(
+          l.transactions,
+          events.map((event) => ({
+            start: event.tick,
+            end: String(end),
+            label: event.value,
+            fields: { input: event.input, initial: "z" },
+          })),
+        );
+      }
+    } finally {
+      lua.dispose();
+      js.dispose();
+    }
+  },
+);
+
+test(
+  "an invalid binary sample leaves the next Lua frame readable",
+  { skip: !existsSync(binary) },
+  async (t) => {
+    const backend = new Backend(binary, {
+      args: ["--decoder-lua"],
+      useVerdiLibraries: false,
+    });
+    t.after(() => backend.dispose());
+    assert.equal(
+      await backend.request("decoderInit", {
+        source: "return {decode = function() end}",
+        context: {
+          inputs: [{ id: "data", width: 1 }],
+          options: {},
+          scale: "1ns",
+        },
+      }),
+      1,
+    );
+    const batch = packEvents(
+      0n,
+      2n,
+      [null],
+      [
+        { tick: "0", input: 0, value: "1" },
+        { tick: "1", input: 0, value: "0" },
+      ],
+    );
+    const damaged = binaryBatch({ ...batch, offsets: Uint32Array.of(0, 3, 2) });
+    const valid = binaryBatch(batch);
+    await Promise.all([
+      assert.rejects(
+        backend.requestDecoderBatch(damaged.header, damaged.chunks),
+        /Invalid decoder sample offsets/,
+      ),
+      backend
+        .requestDecoderBatch(valid.header, valid.chunks)
+        .then((result) =>
+          assert.deepEqual(result, {
+            transactions: [],
+            warnings: [],
+            truncated: false,
+          }),
+        ),
     ]);
   },
 );

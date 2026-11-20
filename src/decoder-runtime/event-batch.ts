@@ -3,7 +3,12 @@
 import type { Backend } from "../backend";
 import type { Signal } from "../shared/protocol";
 import { project } from "../shared/signals";
-import { maxBatchEvents, type EventBatch } from "./types";
+import {
+  eventBatchVersion,
+  maxBatchEvents,
+  type EventBatch,
+  type EventBatchHeader,
+} from "./types";
 
 export interface DecoderEvent {
   tick: string;
@@ -27,16 +32,27 @@ export function packEvents(
   const times =
     end <= 1n << 64n
       ? new BigUint64Array(events.length)
-      : new Array<string>(events.length);
+      : new Uint8Array(
+          events.reduce((size, event) => size + 1 + event.tick.length, 0),
+        );
+  let tickOffset = 0;
   events.forEach((event, index) => {
     inputs[index] = event.input;
-    if (Array.isArray(times)) times[index] = event.tick;
-    else times[index] = BigInt(event.tick);
+    if (times instanceof BigUint64Array) {
+      times[index] = BigInt(event.tick);
+    } else {
+      times[tickOffset++] = event.tick.length;
+      tickOffset += encode.encodeInto(
+        event.tick,
+        times.subarray(tickOffset),
+      ).written;
+    }
     offsets[index + 1] =
       offsets[index] +
       encode.encodeInto(event.value, values.subarray(offsets[index])).written;
   });
   return {
+    version: eventBatchVersion,
     start: String(start),
     end: String(end),
     initial,
@@ -47,16 +63,61 @@ export function packEvents(
   };
 }
 
+const littleEndian = new Uint8Array(Uint32Array.of(1).buffer)[0] === 1;
+
+function columnBytes(column: BigUint64Array | Uint32Array | Uint8Array) {
+  const bytes = new Uint8Array(
+    column.buffer,
+    column.byteOffset,
+    column.byteLength,
+  );
+  if (littleEndian || column instanceof Uint8Array) return bytes;
+  const data = new DataView(new ArrayBuffer(bytes.byteLength));
+  if (column instanceof BigUint64Array) {
+    column.forEach((value, index) => data.setBigUint64(index * 8, value, true));
+  } else {
+    column.forEach((value, index) => data.setUint32(index * 4, value, true));
+  }
+  return new Uint8Array(data.buffer);
+}
+
+export function binaryBatch(batch: EventBatch) {
+  const header: EventBatchHeader = {
+    version: batch.version,
+    start: batch.start,
+    end: batch.end,
+    initial: batch.initial,
+    count: batch.inputs.length,
+    timeEncoding: batch.times instanceof BigUint64Array ? "u64" : "decimal",
+    timeBytes: batch.times.byteLength,
+    valueBytes: batch.values.byteLength,
+  };
+  const columns = [batch.times, batch.inputs, batch.offsets, batch.values];
+  return { header, chunks: columns.map(columnBytes) };
+}
+
 export function scriptEvents(batch: EventBatch) {
+  if (batch.version !== eventBatchVersion)
+    throw Error("Unsupported decoder event batch version.");
   return {
     start: batch.start,
     end: batch.end,
     initial: batch.initial,
     count: batch.inputs.length,
     *events() {
+      const times = batch.times;
+      let tickOffset = 0;
       for (let i = 0; i < batch.inputs.length; ++i) {
+        let tick: string;
+        if (times instanceof BigUint64Array) {
+          tick = String(times[i]);
+        } else {
+          const length = times[tickOffset++];
+          tick = text.decode(times.subarray(tickOffset, tickOffset + length));
+          tickOffset += length;
+        }
         yield {
-          tick: String(batch.times[i]),
+          tick,
           input: batch.inputs[i],
           value: text.decode(
             batch.values.subarray(batch.offsets[i], batch.offsets[i + 1]),

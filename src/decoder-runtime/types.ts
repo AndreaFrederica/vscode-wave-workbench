@@ -56,11 +56,25 @@ export interface DecodeResult {
   warnings: string[];
   truncated: boolean;
 }
-export interface EventBatch {
+export const eventBatchVersion = 1;
+
+export interface EventBatchHeader {
+  version: typeof eventBatchVersion;
   start: string;
   end: string;
   initial: (string | null)[];
-  times: BigUint64Array | string[];
+  count: number;
+  timeEncoding: "u64" | "decimal";
+  timeBytes: number;
+  valueBytes: number;
+}
+
+export interface EventBatch {
+  version: typeof eventBatchVersion;
+  start: string;
+  end: string;
+  initial: (string | null)[];
+  times: BigUint64Array | Uint8Array;
   inputs: Uint32Array;
   offsets: Uint32Array;
   values: Uint8Array;
