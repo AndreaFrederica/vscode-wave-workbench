@@ -165,7 +165,7 @@ interface VcsRebuildInputs {
 }
 
 export async function discoverVcsRebuild(database: string) {
-  database = path.resolve(database);
+  database = await realpath(database).catch(() => path.resolve(database));
   if (!database.endsWith(".daidir")) return undefined;
   const filelist = path.join(database, "vcs_rebuild");
   const metadataPath = path.join(database, "simv.kdb");

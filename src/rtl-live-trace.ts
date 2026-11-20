@@ -21,6 +21,8 @@ import type { Signal } from "./shared/protocol";
 import { project } from "./shared/signals";
 import { normalizeBits } from "./rtl-trace-values";
 import type { TraceRuntimeInputs } from "./rtl-build-verification";
+import type { LiveWaveUpdate } from "./shared/live-wave";
+import { LiveWaveHistory } from "./live-wave-history";
 
 export interface LiveSnapshot {
   tick: string;
@@ -189,6 +191,15 @@ export class LiveTraceSession {
   private breakEvent?: ExecutionEvent;
   private advancing = false;
   private matchingEvent?: ExecutionEvent;
+  private debugMatch?: { id: number; event: ExecutionEvent };
+  private debugHit?: number;
+  private debugBreakpoints?: {
+    statement(event: ExecutionEvent): number | undefined;
+    sample(snapshot: LiveSnapshot): number | undefined;
+  };
+  private readonly stopListeners = new Set<() => void>();
+  private readonly waveHistory = new LiveWaveHistory();
+  private readonly waveListeners = new Set<() => void>();
   private state: "paused" | "running" | "stepping" | "exited" | "error" =
     "paused";
   private failure?: string;
@@ -227,6 +238,7 @@ export class LiveTraceSession {
       if (this.waiting)
         this.fail(Error("The live simulation closed before its reply."));
       if (this.state !== "error") this.state = "exited";
+      if (!this.run) this.notifyStop();
     });
     const lines = createInterface({
       input: this.child.stdout,
@@ -256,6 +268,10 @@ export class LiveTraceSession {
             throw Error("Live execution events are out of order.");
           this.missingOrdinals += event.ordinal - (previous?.ordinal ?? -1) - 1;
           this.events.push(event);
+          if (this.advancing && !this.debugMatch && this.debugBreakpoints) {
+            const id = this.debugBreakpoints.statement(event);
+            if (id !== undefined) this.debugMatch = { id, event };
+          }
           const breakpoint = this.breakpoint;
           if (
             this.advancing &&
@@ -308,6 +324,8 @@ export class LiveTraceSession {
         )
           throw Error("Simulation time moved backwards.");
         this.snapshot = snapshot;
+        const { tick, values } = snapshot;
+        this.waveHistory.push({ tick, values });
         if (this.snapshots.at(-1)?.tick === snapshot.tick)
           this.snapshots[this.snapshots.length - 1] = snapshot;
         else this.snapshots.push(snapshot);
@@ -317,6 +335,7 @@ export class LiveTraceSession {
         }
         if (snapshot.done) this.state = "exited";
         this.waiting?.resolve(snapshot);
+        this.notifyWave();
       } catch (error) {
         this.fail(error instanceof Error ? error : Error(String(error)));
         this.dispose();
@@ -435,6 +454,7 @@ export class LiveTraceSession {
       breakpoint: this.breakpoint,
       breakHit: this.breakHit,
       breakEvent: this.breakEvent,
+      debugHit: this.debugHit,
       capabilities: {
         statementBreakpoints: this.breakpointKinds().length > 0,
         statementEventKinds: this.breakpointKinds(),
@@ -531,7 +551,7 @@ export class LiveTraceSession {
         const raw = Object.hasOwn(snapshot.values, waveformSignal)
           ? snapshot.values[waveformSignal]
           : undefined;
-        if (!binding) return raw;
+        if (!binding || binding.real) return raw;
         return project(
           normalizeBits(raw, binding.sourceWidth ?? binding.width),
           binding,
@@ -556,6 +576,7 @@ export class LiveTraceSession {
             ? waveformSignal
             : waveformSignal + "[" + selection.bit + "]",
         width: binding?.width ?? value?.length ?? 0,
+        real: binding?.real || undefined,
         signed: signedness?.get(signal),
         ...selection,
         value,
@@ -641,6 +662,58 @@ export class LiveTraceSession {
     return this.status();
   }
 
+  setDebugBreakpoints(breakpoints?: LiveTraceSession["debugBreakpoints"]) {
+    this.debugBreakpoints = breakpoints;
+    this.debugMatch = undefined;
+  }
+
+  onStop(listener: () => void) {
+    this.stopListeners.add(listener);
+    return () => this.stopListeners.delete(listener);
+  }
+
+  private notifyStop() {
+    this.notifyWave();
+    for (const listener of this.stopListeners) listener();
+  }
+
+  waveUpdate(): LiveWaveUpdate {
+    return {
+      sessionId: this.id,
+      state: this.state,
+      failure: this.failure,
+      scale: this.snapshot?.scale,
+      ...this.waveHistory.overviewFrame(),
+    };
+  }
+
+  readWaveWindow(start: bigint, end: bigint, cursor: bigint) {
+    return this.waveHistory.read(start, end, cursor);
+  }
+
+  readWavePage(start: bigint, end: bigint, limit: number, signal: AbortSignal) {
+    return this.waveHistory.page(start, end, limit, signal);
+  }
+
+  disposeWaveHistory() {
+    this.waveHistory.dispose();
+  }
+
+  onWaveUpdate(listener: () => void) {
+    this.waveListeners.add(listener);
+    return () => this.waveListeners.delete(listener);
+  }
+
+  private notifyWave() {
+    for (const listener of this.waveListeners) listener();
+  }
+
+  private clearHit() {
+    this.breakHit = undefined;
+    this.breakEvent = undefined;
+    this.debugHit = undefined;
+  }
+
   private supportsExecutionEvents() {
     return this.snapshot?.executionEvents ?? this.events.length > 0;
   }
@@ -664,8 +737,8 @@ export class LiveTraceSession {
   resume() {
     this.requirePaused();
     this.state = "running";
-    this.breakHit = undefined;
-    this.breakEvent = undefined;
+    this.notifyWave();
+    this.clearHit();
     this.run = (async () => {
       try {
         while (this.state === "running") await this.advance();
@@ -673,6 +746,7 @@ export class LiveTraceSession {
         this.fail(error instanceof Error ? error : Error(String(error)));
       } finally {
         this.run = undefined;
+        this.notifyStop();
       }
     })();
     return this.status();
@@ -688,23 +762,47 @@ export class LiveTraceSession {
       !/^[01]$/.test(this.snapshot?.values[clock] ?? "")
     )
       throw Error("Choose a sampled one-bit clock and 1–1000 cycles.");
-    this.state = "stepping";
-    this.breakHit = undefined;
-    this.breakEvent = undefined;
     let remaining = cycles;
+    await this.step(
+      10000,
+      () => remaining > 0,
+      (previous, next) => {
+        if (previous.values[clock] === "0" && next.values[clock] === "1")
+          remaining--;
+      },
+      operation,
+    );
+    return { ...this.status(), elapsedCycles: cycles - remaining };
+  }
+
+  async stepSlot() {
+    this.requirePaused();
+    await this.step(1, () => true);
+    return this.status();
+  }
+
+  private async step(
+    limit: number,
+    more: () => boolean,
+    advanced?: (previous: LiveSnapshot, next: LiveSnapshot) => void,
+    operation?: AbortSignal,
+  ) {
+    this.state = "stepping";
+    this.notifyWave();
+    this.clearHit();
     let slots = 0;
     this.run = (async () => {
       try {
         // Let the current command finish so the next request starts at a slot boundary.
         while (
-          remaining &&
+          more() &&
           this.state === "stepping" &&
           !operation?.aborted &&
-          slots++ < 10000
+          slots++ < limit
         ) {
-          const previous = this.snapshot.values[clock];
+          const previous = this.snapshot;
           const next = await this.advance();
-          if (previous === "0" && next.values[clock] === "1") remaining--;
+          advanced?.(previous, next);
         }
       } catch (error) {
         if (this.state !== "exited")
@@ -712,11 +810,11 @@ export class LiveTraceSession {
       } finally {
         if (this.state === "stepping") this.state = "paused";
         this.run = undefined;
+        this.notifyStop();
       }
     })();
     await this.run;
     operation?.throwIfAborted();
-    return { ...this.status(), elapsedCycles: cycles - remaining };
   }
 
   private requirePaused() {
@@ -727,6 +825,7 @@ export class LiveTraceSession {
   private async advance() {
     this.advancing = true;
     this.matchingEvent = undefined;
+    this.debugMatch = undefined;
     try {
       const next = await this.request("advance");
       const breakpoint = this.breakpoint;
@@ -742,10 +841,18 @@ export class LiveTraceSession {
           if (!next.done) this.state = "paused";
         }
       }
+      const match = this.debugMatch;
+      const debugHit = match?.id ?? this.debugBreakpoints?.sample(next);
+      if (debugHit !== undefined) {
+        this.debugHit = debugHit;
+        this.breakEvent = match?.event ?? this.breakEvent;
+        if (!next.done) this.state = "paused";
+      }
       return next;
     } finally {
       this.advancing = false;
       this.matchingEvent = undefined;
+      this.debugMatch = undefined;
     }
   }
 
@@ -788,5 +895,6 @@ export class LiveTraceSession {
     if (this.state !== "error") this.state = "exited";
     this.waiting?.reject(Error("Live trace session closed."));
     this.child.kill();
+    if (!this.run) this.notifyStop();
   }
 }

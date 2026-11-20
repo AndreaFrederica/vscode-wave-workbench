@@ -55,7 +55,7 @@ export interface VerilatorArtifacts {
 }
 
 export interface DesignSession {
-  readonly kind: "kdb" | "verilator";
+  readonly kind: "kdb" | "verilator" | "vendor-hdl";
   readonly path: string;
   readonly verilatorArtifacts?: VerilatorArtifacts;
   resolve(fullname: string): Promise<Location | undefined>;

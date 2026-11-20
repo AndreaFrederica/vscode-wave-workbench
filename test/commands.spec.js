@@ -9,7 +9,7 @@ const {test,expect}=require('@playwright/test');
 const path=require('node:path'),fs=require('node:fs'),os=require('node:os');
 const {Backend}=require('../dist/backend');const {TclRunner}=require('../dist/tcl');const {WaveCommands,quote}=require('../dist/commands');const {KdbSession}=require('../dist/kdb');
 async function setup(page,filename,kdbPath,decoderConfig){
-  const backend=new Backend(path.resolve(__dirname,'../bin/wave-backend'));const pending=new Map();let sequence=0,queryDelay=0;const logs=[],queries=[],catalogRequests=[],decoderRequests=[],rtlRequests=[];
+  const backend=new Backend(path.resolve(__dirname,'../bin/wave-backend'));const pending=new Map();let sequence=0,queryDelay=0;const logs=[],queries=[],catalogRequests=[],decoderRequests=[],rtlRequests=[],mathRequests=[];
   const viewer={backend,uri:{fsPath:filename},meta:await backend.request('open',{path:filename})};
   const send=m=>page.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),m);
   viewer.ui=(action,payload)=>new Promise((resolve,reject)=>{const id=++sequence;pending.set(id,{resolve,reject});send({type:'ui',id,action,payload}).catch(reject);});
@@ -17,6 +17,7 @@ async function setup(page,filename,kdbPath,decoderConfig){
   const engine=new WaveCommands({getViewer:()=>viewer,open:async file=>{if(path.resolve(file)!==filename)throw Error('Unexpected test open');},scope:async name=>{await send({type:'kdbHierarchy',scope:name,children:await viewer.kdb.children(name)});}});
   const runner=new TclRunner((name,args,dir)=>{viewer.scriptDirectory=dir;return engine.execute(name,args);},{log:text=>logs.push(text)});
   await page.exposeFunction('bridge',async m=>{
+    if(m.type==='waveMath')mathRequests.push(m);
     if(['rtlTrace','rtlSchematic','rtlModuleSchematic','rtlTraceSchematic'].includes(m.type))rtlRequests.push(m);
     if(m.type==='ready'){await send({type:'metadata',...viewer.meta,title:path.basename(filename),vide:'1.2.5'});}
     else if(m.type==='queryWaveDecoder'){decoderRequests.push(m);}
@@ -43,7 +44,7 @@ async function setup(page,filename,kdbPath,decoderConfig){
   await page.addInitScript(()=>{window.acquireVsCodeApi=()=>({getState:()=>null,setState(s){window.__savedWaveState=s;},postMessage:m=>window.bridge(m)});});
   await page.route('http://wave.test/**',async route=>{const name=new URL(route.request().url()).pathname.slice(1)||'index.html';if(!['index.html','wave.js','wave.css'].includes(name)){await route.abort();return;}let body=fs.readFileSync(path.resolve(__dirname,name.endsWith('.js')?'../dist/webview':'../media',name),'utf8');if(name==='index.html')body=body.replaceAll('{{csp}}','http://wave.test').replaceAll('{{nonce}}','testnonce').replace('{{css}}','/wave.css').replace('{{script}}','/wave.js');await route.fulfill({body,contentType:name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});});
   await page.goto('http://wave.test/');await expect(page.locator('#backend')).toContainText(viewer.meta.backend);
-  return {viewer,send,logs,queries,catalogRequests,decoderRequests,rtlRequests,running:()=>!!runner.pending,setQueryDelay(ms){queryDelay=ms;},run:(script,directory)=>runner.run(script,directory||path.dirname(filename)),dispose(){runner.dispose();backend.dispose();viewer.kdb?.dispose();}};
+  return {viewer,send,logs,queries,catalogRequests,decoderRequests,rtlRequests,mathRequests,running:()=>!!runner.pending,setQueryDelay(ms){queryDelay=ms;},run:(script,directory)=>runner.run(script,directory||path.dirname(filename)),dispose(){runner.dispose();backend.dispose();viewer.kdb?.dispose();}};
 }
 test('real Tcl and wave UI: groups, units, values, markers, transition, export/replay, errors',async({page})=>{
   const env=await setup(page,path.resolve(__dirname,'../examples/demo.vcd'));
@@ -1012,6 +1013,28 @@ test('mixed wave rows preserve real cursor values and Tcl range measurements', a
     await env.run('wvAddSignal /tb/voltage /tb/ready; wvSetCursor 9');
     await expect(page.locator('.row').nth(0).locator('.value')).toHaveText('0.9');
     await expect(page.locator('.row').nth(1).locator('.value')).toHaveText('1');
+    await page.locator('.row').nth(0).click();
+    await page.locator('.row').nth(1).click({modifiers:['Control']});
+    await clickTool(page, '#mathMenu [data-action=math-adc]');
+    await expect.poll(() => env.mathRequests).toMatchObject([
+      { type: 'waveMath', operation: 'adc', signals: [{name:'voltage'}, {name:'ready'}] },
+    ]);
+    const answers = ['0, 1, 3', '0', 'adc_code'];
+    const code = {
+      window: {
+        showInputBox: async () => answers.shift(),
+        showQuickPick: async (choices) => choices[0],
+      },
+    };
+    env.viewer.panel = {webview: {postMessage: env.send}};
+    await require('../dist/wave-math-editor').showWaveMath(
+      code, env.viewer, 'adc', env.mathRequests[0].signals, undefined,
+      (work) => work(), async () => { throw Error('unexpected open'); },
+    );
+    await expect(page.locator('.row')).toHaveCount(3);
+    await expect(page.locator('.row').last().locator('.value')).toHaveText('6');
+    const snapshot = await env.viewer.ui('snapshot');
+    expect(snapshot.virtualDefinitions[0].definition.samples).toEqual([['0','xxx'], ['9','110']]);
     expect(await env.run('wvGetSigValueByTime /tb/voltage -time 1')).toBe('-0.125');
     const stats = JSON.parse(await env.run('waveMeasureAnalog /tb/voltage 0 9'));
     expect(stats).toMatchObject({min: -0.125, max: 0.125, rms: 0.125, coveredTicks: '9'});

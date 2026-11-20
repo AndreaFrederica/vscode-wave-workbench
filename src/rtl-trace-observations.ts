@@ -12,6 +12,7 @@ interface CursorSamples {
 }
 
 function traceSample(raw: string | undefined, signal: Signal) {
+  if (signal.real) return raw;
   const value = project(raw, signal);
   return normalizeBits(value, signal.width) ?? value;
 }
@@ -243,6 +244,7 @@ export async function readTraceObservations(
     return {
       signal,
       width: binding.width,
+      real: binding.real || undefined,
       signed: signedness?.get(signal),
       ...tracePackedSelection(binding),
       waveformSignal:

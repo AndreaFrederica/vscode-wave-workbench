@@ -84,6 +84,36 @@ impl VendorWave {
         })
     }
 
+    pub fn hdl_locations(&self) -> Result<serde_json::Value, String> {
+        fn position(value: Option<ondas::HdlPosition>) -> serde_json::Value {
+            value.map_or(serde_json::Value::Null, |position| {
+                serde_json::json!({ "file": position.file.to_string_lossy(), "line": position.line })
+            })
+        }
+        let locations = self
+            .wave
+            .borrow()
+            .hdl_locations()
+            .map_err(|error| error.to_string())?;
+        Ok(serde_json::Value::Array(
+            locations
+                .into_iter()
+                .map(|location| {
+                    serde_json::json!({
+                        "fullname": location.path.to_string(),
+                        "parent": location.path.parent().map(|path| path.to_string()),
+                    "waveName": location.path.parent().zip(location.path.name()).map(|(parent, name)| {
+                        if parent.is_empty() { name.to_owned() } else { format!("{parent}.{name}") }
+                    }),
+                        "scope": location.scope,
+                        "declaration": position(location.declaration),
+                        "instance": position(location.instance),
+                    })
+                })
+                .collect(),
+        ))
+    }
+
     pub fn query(
         &self,
         id: &str,

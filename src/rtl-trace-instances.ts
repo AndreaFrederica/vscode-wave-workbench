@@ -321,7 +321,18 @@ export async function expandInstanceTrace(
         },
       ],
     };
-  if (!instance || !design.portLinks) return initial;
+  if (!instance) return initial;
+  if (!design.portLinks) {
+    return design.kind === "vendor-hdl"
+      ? {
+          ...initial,
+          frontier: [
+            ...initial.frontier,
+            { signal: initial.root, reason: "vendorPortLinksUnavailable" },
+          ],
+        }
+      : initial;
+  }
   const result: VideTrace = {
     ...initial,
     scope: "elaborated",

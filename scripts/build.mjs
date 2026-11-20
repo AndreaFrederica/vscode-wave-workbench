@@ -32,6 +32,7 @@ await build({
   entryPoints: [
     "src/webview/wave.ts",
     "src/webview/sidebar.ts",
+    "src/webview/live-wave.ts",
     "src/webview/schematic.ts",
   ],
   outdir: "dist/webview",
@@ -51,5 +52,7 @@ await build({
   format: "cjs",
   target: "node18",
   legalComments: "linked",
+  mainFields: ["module", "main"],
+  external: ["./decoder-runtime/scheduler", "./decoder-runtime/registry"],
 });
 await copyFile("node_modules/pureimage/LICENSE", "dist/pureimage-license.txt");

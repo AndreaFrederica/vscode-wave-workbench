@@ -20,6 +20,7 @@ export type Definition =
       op: "samples";
       inputs: [];
       width: number;
+      real?: true;
       source: string;
       samples: [string, string][];
     };
@@ -66,6 +67,17 @@ export interface Metadata {
   title?: string;
   vide?: string;
 }
+export interface HdlLocation {
+  fullname: string;
+  waveName?: string;
+  parent?: string | null;
+  scope: boolean;
+  generate?: boolean;
+  module?: string;
+  declaration?: { file: string; line: number } | null;
+  instance?: { file: string; line: number } | null;
+}
+
 export interface Location {
   fullname: string;
   kind: string;
@@ -273,6 +285,7 @@ export interface BackendProtocol {
     result: null;
   };
   open: { args: { path: string }; result: Metadata };
+  hdlLocations: { args: Record<string, never>; result: HdlLocation[] };
   query: {
     args: {
       signals: string[];

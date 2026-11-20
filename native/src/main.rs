@@ -257,7 +257,7 @@ impl Database {
         let (start, end, scale, backend) = match self {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::Vendor(v) => (v.start, v.end, v.scale.clone(), v.backend),
-            Self::Raw(v) => (v.start, v.end, v.scale.into(), v.backend),
+            Self::Raw(v) => (v.start, v.end, v.scale.clone(), v.backend),
             Self::Vcd(v) => (0, v.end, v.scale.clone(), "rust-vcd"),
             Self::Fst(reader, _) => {
                 let reader = reader.borrow();
@@ -479,6 +479,16 @@ impl Store {
         if self.virtuals.len() >= 4096 {
             return Err("Maximum 4096 virtual definitions per waveform".into());
         }
+        if definition.real == Some(true)
+            && self.virtuals.values()
+                .filter(|v| v.signal.real)
+                .filter_map(|v| v.definition.samples.as_ref())
+                .map(Vec::len)
+                .sum::<usize>()
+                + definition.samples.as_ref().map_or(0, Vec::len) > 131_072
+        {
+            return Err("Maximum 131072 derived real samples per waveform".into());
+        }
         let signal = Signal {
             id: id.clone(),
             scope: "$virtual".into(),
@@ -489,7 +499,7 @@ impl Store {
             },
             width,
             supported: true,
-            real: false,
+            real: definition.real == Some(true),
             unit: None,
         };
         let v = Virtual {
@@ -759,6 +769,11 @@ fn run(
             *db = Some(Store::new(new, budget));
             Ok(result)
         }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        "hdlLocations" => match &db.as_ref().ok_or("No open database")?.database {
+            Database::Vendor(wave) => wave.hdl_locations(),
+            _ => Ok(json!([])),
+        },
         "scopeSignals" => Ok(db.as_mut().ok_or("No open database")?.scope_signals(
             r.query.unwrap_or_default(),
             r.offset.unwrap_or(0),

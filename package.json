@@ -1,7 +1,7 @@
 {
   "name": "wave-workbench",
   "displayName": "Wave Workbench — Verilator Waveforms & RTL Debugging",
-  "version": "0.9.22",
+  "version": "0.9.23",
   "publisher": "andreafrederica",
   "description": "Debug Verilator FST and VCD in VS Code with elaborated RTL hierarchy, waveform projects, Tcl and MCP. Supports Verdi FSDB and KDB.",
   "license": "MPL-2.0",
@@ -33,6 +33,128 @@
     "pascal-lab.vide-code-extension"
   ],
   "contributes": {
+    "breakpoints": [
+      {
+        "language": "verilog"
+      },
+      {
+        "language": "systemverilog"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "wave-workbench-live",
+        "label": "Wave Workbench RTL",
+        "languages": [
+          "verilog",
+          "systemverilog"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Path to a live Verilator harness or VCS simv."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Simulation working directory.",
+                "default": "${workspaceFolder}"
+              },
+              "backend": {
+                "enum": [
+                  "harness",
+                  "vcs"
+                ],
+                "default": "harness"
+              },
+              "clock": {
+                "type": "string",
+                "description": "Sampled one-bit signal for rising-edge stepping. When omitted, step one simulator slot."
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": true
+              },
+              "plusargs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "stimulusFiles": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "signals": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Sampled hierarchical paths for VCS."
+              },
+              "statementScopes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "VCS instance paths for statement-entry events."
+              },
+              "recording": {
+                "type": "string",
+                "description": "Optional VCS output recording path."
+              },
+              "executionLog": {
+                "type": "string",
+                "description": "Execution recording from the matching build for source breakpoints."
+              }
+            }
+          },
+          "attach": {
+            "properties": {
+              "clock": {
+                "type": "string",
+                "description": "Sampled one-bit signal for rising-edge stepping."
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": true
+              },
+              "executionLog": {
+                "type": "string",
+                "description": "Execution recording from the matching build for source breakpoints."
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "name": "RTL: Attach to live simulation",
+            "type": "wave-workbench-live",
+            "request": "attach"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Wave Workbench RTL: Launch live harness",
+            "description": "Start an instrumented Verilator harness or VCS simv.",
+            "body": {
+              "name": "RTL: Launch live harness",
+              "type": "wave-workbench-live",
+              "request": "launch",
+              "program": "${workspaceFolder}/obj_dir/Vtestbench",
+              "cwd": "${workspaceFolder}",
+              "stopOnEntry": true
+            }
+          }
+        ]
+      }
+    ],
     "commands": [
       {
         "command": "waveWorkbench.open",
@@ -95,6 +217,14 @@
       {
         "command": "waveWorkbench.openExecutionRecording",
         "title": "Wave Workbench: Open Execution Recording"
+      },
+      {
+        "command": "waveWorkbench.showLiveWave",
+        "title": "Wave Workbench: 显示实时波形"
+      },
+      {
+        "command": "waveWorkbench.debugLiveTrace",
+        "title": "Wave Workbench: Attach VS Code Debugger to Live RTL"
       },
       {
         "command": "waveWorkbench.controlLiveTrace",
@@ -515,6 +645,13 @@
       }
     ],
     "viewsContainers": {
+      "panel": [
+        {
+          "id": "waveWorkbenchLive",
+          "title": "实时波形",
+          "icon": "media/activity-wave.svg"
+        }
+      ],
       "activitybar": [
         {
           "id": "waveWorkbench",
@@ -530,6 +667,14 @@
       }
     ],
     "views": {
+      "waveWorkbenchLive": [
+        {
+          "type": "webview",
+          "id": "waveWorkbench.liveWave",
+          "name": "在线仿真",
+          "icon": "media/activity-wave.svg"
+        }
+      ],
       "waveWorkbench": [
         {
           "type": "webview",
@@ -576,6 +721,8 @@
     "url": "https://github.com/AndreaFrederica/vscode-wave-workbench/issues"
   },
   "dependencies": {
-    "elkjs": "0.12.1"
+    "elkjs": "0.12.1",
+    "jsonc-parser": "3.3.1",
+    "vscode-jsonrpc": "8.2.0"
   }
 }

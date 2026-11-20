@@ -11,3 +11,28 @@ export function scaleSeconds(scale: string) {
     throw new Error(`Unsupported time scale ${scale}`);
   return Number(match[1]) * UNITS[match[2].toLowerCase() as keyof typeof UNITS];
 }
+
+export function scaleHertz(scale: string) {
+  const match = /^([\d.e+-]+)\s*(mHz|Hz)$/.exec(scale);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  return match[2] === "mHz" ? value / 1000 : value;
+}
+
+export function frequencyLabel(hertz: number) {
+  const magnitude = Math.abs(hertz);
+  const [factor, unit] =
+    magnitude >= 1e12
+      ? [1e12, "THz"]
+      : magnitude >= 1e9
+        ? [1e9, "GHz"]
+        : magnitude >= 1e6
+          ? [1e6, "MHz"]
+          : magnitude >= 1e3
+            ? [1e3, "kHz"]
+            : magnitude > 0 && magnitude < 1
+              ? [1e-3, "mHz"]
+              : [1, "Hz"];
+  return Number((hertz / Number(factor)).toPrecision(6)) + " " + unit;
+}

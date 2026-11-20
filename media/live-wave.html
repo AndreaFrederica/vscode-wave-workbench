@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-{{nonce}}'; style-src {{csp}};">
+<link rel="stylesheet" href="{{css}}">
+<title>实时波形</title>
+</head>
+<body>
+<header id="controls">
+  <label><input id="follow" type="checkbox" checked> 跟随最新</label>
+  <button id="zoom-out" type="button" aria-label="缩小">−</button>
+  <button id="zoom-in" type="button" aria-label="放大">+</button>
+  <button id="fit" type="button">全览</button>
+  <details id="channels">
+    <summary>信号</summary>
+    <div class="signal-picker">
+      <input id="filter" type="search" placeholder="筛选信号" aria-label="筛选信号">
+      <div id="channel-options"></div>
+    </div>
+  </details>
+  <span id="status" role="status">等待启动在线仿真</span>
+  <output id="time"></output>
+</header>
+<div id="wave" hidden>
+  <div id="rows"></div>
+  <canvas id="timeline" aria-label="在线仿真波形"></canvas>
+</div>
+<p id="empty">启动或附加在线仿真后，采样的信号会显示在这里。</p>
+<script nonce="{{nonce}}" src="{{script}}"></script>
+</body>
+</html>

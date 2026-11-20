@@ -70,6 +70,7 @@ verilator --cc --exe --build --trace-fst --top-module top --Mdir obj_fst fixture
 
 ## 调试、解码与自动化
 
+- **在线 RTL 调试**。从 VS Code「运行和调试」启动或附加在线仿真，使用源码断点、时钟步进、变量和监视。 [启动配置](WORKFLOW.md#在-vs-code-中调试在线-rtl)
 - **浏览波形**。拖动底部滚动条浏览整个时间轴，用 Ctrl 加滚轮缩放，按 `[` 和 `]` 跳到选中信号的相邻边沿，按 `M` 添加命名标记。
 - **解码与标注**。给总线和指令绑定 RISC-V、TL-UL、AXI、UART 或 I²C 规则，为关键状态添加标签和注释，工作区可以维护自己的解码配置。 [解码规则](COMMANDS.md#波形解码和信号注释)
 - **Tcl**。使用侧栏或底部控制台执行 `wvAddSignal`、`wvZoom` 和 `wvSetCursor` 等命令。插件默认使用内置 Tcl，也可通过 `waveWorkbench.tclshPath` 指定其他解释器。 [Tcl 命令](COMMANDS.md)

@@ -22,6 +22,7 @@ import type { DecoderInstance, DecodeResult } from "./decoder-runtime/types";
 import * as fs from "node:fs";
 import * as path from "node:path";
 const HELP = `Supported nWave Tcl commands (current window):
+waveTool list / waveTool toolName ?argumentsJson?
 wvCreateWindow / wvGetCurrentWindow
 wvOpenFile filename
 wvAddSignal [-clear] signal... | -group {group {signal}...}
@@ -112,26 +113,28 @@ function formatValue(
   if (f === "2com" && bits[0] === "1") number -= 1n << BigInt(width);
   return String(number);
 }
-interface CommandHooks {
-  getViewer: () => Viewer;
+type CommandViewer = Pick<Viewer, "uri" | "meta" | "backend" | "ui" | "kdb" | "attachKdb" | "scriptDirectory">;
+
+interface CommandHooks<V extends CommandViewer> {
+  getViewer: () => V;
   open?: (file: string) => Promise<void>;
   source?: unknown;
   scope?: (scope: string) => Promise<void>;
-  decoderProfiles?: (viewer: Viewer) => Promise<DecoderProfile[]>;
+  decoderProfiles?: (viewer: V) => Promise<DecoderProfile[]>;
   decodeTransactions?: (
-    viewer: Viewer,
+    viewer: V,
     instance: DecoderInstance,
     start: string,
     end: string,
   ) => Promise<DecodeResult>;
 }
-class WaveCommands {
-  getViewer: CommandHooks["getViewer"];
-  open: CommandHooks["open"];
+class WaveCommands<V extends CommandViewer = Viewer> {
+  getViewer: CommandHooks<V>["getViewer"];
+  open: CommandHooks<V>["open"];
   source: unknown;
-  scope: CommandHooks["scope"];
-  decoderProfiles: CommandHooks["decoderProfiles"];
-  decodeTransactions: CommandHooks["decodeTransactions"];
+  scope: CommandHooks<V>["scope"];
+  decoderProfiles: CommandHooks<V>["decoderProfiles"];
+  decodeTransactions: CommandHooks<V>["decodeTransactions"];
   windowScale: string;
   constructor({
     getViewer,
@@ -140,7 +143,7 @@ class WaveCommands {
     scope,
     decoderProfiles,
     decodeTransactions,
-  }: CommandHooks) {
+  }: CommandHooks<V>) {
     Object.assign(this, {
       getViewer,
       open,

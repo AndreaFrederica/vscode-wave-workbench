@@ -6,7 +6,38 @@ const path = require("node:path");
 const { test } = require("node:test");
 const { setTimeout: delay } = require("node:timers/promises");
 const { LiveTraceSession, matchLiveExecution } = require("../dist/rtl-live-trace");
+const { LiveWaveHistory } = require("../dist/live-wave-history");
 const { readExecutionEvidence, readExecutionEvidenceBatch } = require("../dist/rtl-execution");
+
+test("live waves grow from the first tick and can seek into spilled history", async (t) => {
+  const history = new LiveWaveHistory(8, 640, 12);
+  t.after(() => history.dispose());
+  const start = 18_446_744_073_709_540_000n;
+  function tick(i) { return start + BigInt(i); }
+  for (let i = 0; i < 5000; i++) {
+    history.push({ tick: String(tick(i)), values: { clk: String(i % 2) } });
+  }
+  const updated = { tick: String(tick(4999)), values: { clk: "x" } };
+  history.push(updated);
+  const frame = history.overviewFrame();
+  assert.equal(frame.firstTick, String(start));
+  assert.equal(frame.lastTick, updated.tick);
+  assert.equal(frame.approximate, true);
+  assert.deepEqual(frame.samples.at(-1), updated);
+  assert.equal(frame.samples[0].tick, String(start));
+  const early = await history.read(tick(10), tick(13), tick(11));
+  assert.equal(early.approximate, false);
+  assert(early.samples.some((entry) => entry.tick === String(tick(10))));
+  assert.deepEqual(early.cursor.values, { clk: "1" });
+  const wide = await history.read(start, tick(4999), tick(101));
+  assert.equal(wide.approximate, true);
+  assert.deepEqual(wide.cursor.values, { clk: "1" });
+  assert.equal(wide.samples[0].tick, String(start));
+  assert.deepEqual(wide.samples.at(-1), updated);
+  const tail = await history.read(tick(4996), tick(4999), tick(4999));
+  assert.deepEqual(tail.cursor, updated);
+  assert.equal(tail.approximate, false);
+});
 
 test("the active launch preserves argument order and checks stimulus identity", {
   skip: process.platform === "win32",

@@ -148,7 +148,7 @@ test("extension host opens Verilator FST, links RTL both ways and reopens a save
     },
     window: {
       registerCustomEditorProvider(_id, value) { provider = value; return disposable; },
-      registerWebviewViewProvider(_id, value) { sidebarProvider = value; return disposable; },
+      registerWebviewViewProvider(id, value) { if (id === "waveWorkbench.control") sidebarProvider = value; return disposable; },
       registerTreeDataProvider(_id, value) { traceTree = value; return disposable; },
       onDidChangeActiveTextEditor(handler) { activeEditor = handler; return disposable; },
       createOutputChannel: () => ({ append() {}, appendLine() {}, dispose() {} }),

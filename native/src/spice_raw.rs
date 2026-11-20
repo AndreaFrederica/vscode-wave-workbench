@@ -10,7 +10,7 @@ pub struct SpiceRaw {
     pub signals: Vec<Signal>,
     pub start: u64,
     pub end: u64,
-    pub scale: &'static str,
+    pub scale: String,
     pub backend: &'static str,
     data: Vec<Events>,
 }
@@ -82,6 +82,7 @@ impl SpiceRaw {
         let mut vars = 0usize;
         let mut points = 0usize;
         let mut complex = false;
+        let mut frequency_tick = None;
         let binary = loop {
             let entry = line(&mut reader)?;
             let Some((key, value)) = entry.trim().split_once(':') else {
@@ -104,6 +105,15 @@ impl SpiceRaw {
                     vars = value.parse().map_err(|_| "Invalid RAW variable count")?
                 }
                 "No. Points" => points = value.parse().map_err(|_| "Invalid RAW point count")?,
+                "WaveWorkbench Frequency Tick" => {
+                    frequency_tick = Some(
+                        value
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|n| n.is_finite() && *n > 0.0)
+                            .ok_or("Invalid RAW frequency tick")?,
+                    );
+                }
                 "Variables" => {
                     if !(2..=16384).contains(&vars) {
                         return Err("Invalid RAW variable count".into());
@@ -118,7 +128,8 @@ impl SpiceRaw {
                         }
                         let name = fields.next().ok_or("Missing RAW variable")?;
                         let kind = fields.next().ok_or("Missing RAW variable kind")?;
-                        names.push((name.to_owned(), kind.to_owned()));
+                        let unit = fields.collect::<Vec<_>>().join(" ");
+                        names.push((name.to_owned(), kind.to_owned(), unit));
                     }
                 }
                 "Values" => break false,
@@ -140,9 +151,12 @@ impl SpiceRaw {
             "frequency" => ("ac", "1mHz", 1e3),
             _ => return Err("RAW requires a transient time or AC frequency axis".into()),
         };
+        if frequency_tick.is_some() && (scope != "ac" || complex) {
+            return Err("FFT grid requires a real frequency axis".into());
+        }
         let mut data = vec![Events::new(); (vars - 1) * if complex { 2 } else { 1 }];
         let mut signals = Vec::with_capacity(data.len());
-        for (name, kind) in names.iter().skip(1) {
+        for (name, kind, unit) in names.iter().skip(1) {
             for component in if complex {
                 &[".re", ".im"][..]
             } else {
@@ -158,6 +172,9 @@ impl SpiceRaw {
                     unit: match kind.as_str() {
                         "voltage" => Some("V".into()),
                         "current" => Some("A".into()),
+                        _ if frequency_tick.is_some() && !unit.is_empty() && unit.len() <= 128 => {
+                            Some(unit.clone())
+                        }
                         _ => None,
                     },
                 });
@@ -168,7 +185,15 @@ impl SpiceRaw {
         let mut previous = None;
         for index in 0..points {
             let (axis, _) = read_value(&mut reader, binary, complex, Some(index))?;
-            let scaled = (axis * ticks_per_unit).round();
+            let scaled = if let Some(bin_width) = frequency_tick {
+                let bin = axis / bin_width;
+                if !bin.is_finite() || (bin - index as f64).abs() > 1e-6 {
+                    return Err("Unexpected FFT frequency bin".into());
+                }
+                index as f64
+            } else {
+                (axis * ticks_per_unit).round()
+            };
             if !scaled.is_finite() || !(0.0..=(1u64 << 53) as f64 - 1.0).contains(&scaled) {
                 return Err("RAW axis exceeds the supported coordinate range".into());
             }
@@ -208,7 +233,7 @@ impl SpiceRaw {
             signals,
             start,
             end,
-            scale,
+            scale: frequency_tick.map_or_else(|| scale.into(), |tick| format!("{tick:e}Hz")),
             backend: "rust-ngspice-raw",
             data,
         })
@@ -329,7 +354,7 @@ impl SpiceRaw {
             signals,
             start: first.unwrap(),
             end: last.unwrap(),
-            scale: "1fs",
+            scale: "1fs".into(),
             backend: "rust-psfascii",
             data,
         })

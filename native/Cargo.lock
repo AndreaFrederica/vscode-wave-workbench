@@ -405,7 +405,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "ondas"
 version = "2.1.0"
-source = "git+https://github.com/AndreaFrederica/ondas.git?rev=5461334f0ce1102e8dd559650565f9058ace6ffc#5461334f0ce1102e8dd559650565f9058ace6ffc"
+source = "git+https://github.com/AndreaFrederica/ondas.git?rev=6e6cc63ba13a3358b12ffd2b90ce6f75116624d9#6e6cc63ba13a3358b12ffd2b90ce6f75116624d9"
 dependencies = [
  "blake3",
  "cc",

@@ -638,6 +638,20 @@ export function isObservationCoverage(
   );
 }
 
+export async function readExecutionSourceMap(filename: string) {
+  const source = await realpath(filename);
+  if (!(await stat(source)).isFile()) throw Error("Execution source map must be a regular file.");
+  for await (const { line } of executionLines(source, 0)) {
+    if (!line.trim()) continue;
+    const header: unknown = JSON.parse(line);
+    if (!isHeader(header)) throw Error("Unsupported execution trace header.");
+    return new Map(Object.entries(header.statements).map(([id, statement]) =>
+      [id, { ...statement, file: path.resolve(path.dirname(source), statement.file) }] as const,
+    ));
+  }
+  throw Error("The execution recording has no header.");
+}
+
 function isHeader(value: unknown): value is ExecutionHeader {
   const header = value as ExecutionHeader;
   return (

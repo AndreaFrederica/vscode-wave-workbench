@@ -185,7 +185,7 @@ function previousValue(observation: Observation, tick: string) {
   return previous ? previous.value : observation.initial?.value;
 }
 
-function bitsAtStableTick(observation: Observation | undefined, tick: string) {
+function valueAtStableTick(observation: Observation | undefined, tick: string) {
   if (!observation || observation.historyTruncated) return undefined;
   const before = previousValue(observation, tick);
   if (
@@ -199,13 +199,17 @@ function bitsAtStableTick(observation: Observation | undefined, tick: string) {
 }
 
 function stableOperand(observation: Observation | undefined, tick: string) {
-  if (!observation || observation.projected) return undefined;
+  if (!observation || observation.projected || observation.real) return undefined;
   return {
     width: observation.width,
     signed: observation.signed,
     range: observation.range,
-    bits: bitsAtStableTick(observation, tick),
+    bits: valueAtStableTick(observation, tick),
   };
+}
+
+function observedBits(value: string | undefined, observation: Observation) {
+  return observation.real ? undefined : normalizeBits(value, observation.width);
 }
 
 function truth(bits: string | undefined): Truth | undefined {
@@ -268,7 +272,7 @@ function compareAssignmentValue(
   if (!expression || (root.projected && root.bit === undefined))
     return undefined;
   const evaluatedRange = targetRange ?? root.range;
-  const wholeValue = normalizeBits(change.value, root.width);
+  const wholeValue = observedBits(change.value, root);
   const observed =
     wholeValue &&
     (!root.projected && targetRange
@@ -289,7 +293,7 @@ function compareAssignmentValue(
   if (!expected) return undefined;
   const prior =
     !root.projected && targetRange && !root.historyTruncated
-      ? normalizeBits(previousValue(root, change.tick), root.width)
+      ? observedBits(previousValue(root, change.tick), root)
       : undefined;
   const previousSlice =
     prior && targetRange && sliceTraceBits(prior, root.range, ...targetRange);
@@ -336,14 +340,11 @@ function compareSampleCombinations(
     );
     if (!samples.length && !recorded) continue;
     if (observation.projected || observation.historyTruncated) return;
-    const before = normalizeBits(
-      previousValue(observation, tick),
-      observation.width,
-    );
+    const before = observedBits(previousValue(observation, tick), observation);
     if (before === undefined || (recorded && !/^[01]+$/.test(before))) return;
     const values = new Set([before]);
     for (const sample of samples) {
-      const bits = normalizeBits(sample.value, observation.width);
+      const bits = observedBits(sample.value, observation);
       if (bits === undefined || (recorded && !/^[01]+$/.test(bits))) return;
       values.add(bits);
     }
@@ -872,7 +873,7 @@ export function buildTemporalTrace(
   );
   const span = (id: number) => {
     const item = observations.get(id);
-    if (!item || item.projected) return undefined;
+    if (!item || item.projected || item.real) return undefined;
     if (
       item.range &&
       Math.abs(item.range[0] - item.range[1]) + 1 === item.width
@@ -896,7 +897,7 @@ export function buildTemporalTrace(
     const existing = views.get(key);
     if (existing) return existing;
     const project = (bits?: string) => {
-      const normalized = normalizeBits(bits, whole.width);
+      const normalized = observedBits(bits, whole);
       return normalized && sliceTraceBits(normalized, span(signal), bit, bit);
     };
     const sample = ({ tick, value }: Observation["history"][number]) => ({
@@ -1213,7 +1214,7 @@ export function buildTemporalTrace(
     BigInt(cursorWrite.tick) <= BigInt(evidence.historyEnd ?? evidence.tick) &&
     (!rootChanges.length ||
       BigInt(rootChanges[0].tick) < BigInt(cursorWrite.tick)) &&
-    bitsAtStableTick(rootView, cursorWrite.tick) === cursorWrite.value
+    valueAtStableTick(rootView, cursorWrite.tick) === cursorWrite.value
       ? cursorWrite
       : undefined;
   if (root.status === "noObservedChange" && !heldWrite) {
@@ -1483,7 +1484,7 @@ export function buildTemporalTrace(
                 .map(({ value }) => value),
             ];
             for (const bits of values) {
-              const normalized = normalizeBits(bits, item.width);
+              const normalized = observedBits(bits, item);
               const index =
                 normalized && item.signed !== undefined
                   ? traceInteger(normalized, item.signed)
@@ -1782,7 +1783,7 @@ export function buildTemporalTrace(
             } else {
               const stable = concurrent
                 ? previousValue(upstream, sampleTick)
-                : bitsAtStableTick(upstream, sampleTick);
+                : valueAtStableTick(upstream, sampleTick);
               if (stable !== undefined) {
                 stableWithoutChange = true;
                 possibilities.push({
@@ -1827,29 +1828,31 @@ export function buildTemporalTrace(
             compatibleValues &&
             upstream &&
             possibilities.some((sample) =>
-              compatibleValues.has(normalizeBits(sample.value, upstream.width)),
+              compatibleValues.has(observedBits(sample.value, upstream)),
             );
           // A direct port transfers the same bits. Other samples of the source
           // cannot explain this transition when the matching sample is present.
+          const portTarget = directPort ? view(event.signal, event.bit) : undefined;
           const portValue =
-            directPort &&
+            portTarget &&
             upstream &&
+            !upstream.real &&
             event.bit === bit &&
-            upstream.width === view(event.signal, event.bit)?.width
-              ? normalizeBits(event.value, upstream.width)
+            upstream.width === portTarget.width
+              ? observedBits(event.value, portTarget)
               : undefined;
           const hasMatchingPortSample =
             portValue !== undefined &&
             upstream &&
             possibilities.some(
               (sample) =>
-                normalizeBits(sample.value, upstream.width) === portValue,
+                observedBits(sample.value, upstream) === portValue,
             );
           const targetView = selectedData
             ? view(event.signal, event.bit)
             : undefined;
           const targetBits =
-            targetView && normalizeBits(event.value, targetView.width);
+            targetView && observedBits(event.value, targetView);
           const sourceRange = port?.toField ? port.fromRange : undefined;
           const targetRange = portField ? port?.toRange : undefined;
           const expected =
@@ -1894,7 +1897,7 @@ export function buildTemporalTrace(
                 const change = observed(input.signal, part.bit, tick).at(-1);
                 if (!change)
                   return (
-                    bitsAtStableTick(
+                    valueAtStableTick(
                       view(input.signal, part.bit),
                       sampleTick,
                     ) === part.value
@@ -1948,7 +1951,7 @@ export function buildTemporalTrace(
             selectedIndex === undefined
               ? possibilities
               : possibilities.filter(({ value }) => {
-                  const bits = upstream && normalizeBits(value, upstream.width);
+                  const bits = upstream && observedBits(value, upstream);
                   return (
                     bits &&
                     traceInteger(bits, upstream.signed) ===
@@ -1970,7 +1973,7 @@ export function buildTemporalTrace(
           }
           for (const sample of candidateSamples) {
             const normalized =
-              upstream && normalizeBits(sample.value, upstream.width);
+              upstream && observedBits(sample.value, upstream);
             if (
               selectedIndex === undefined &&
               useRecordedRhs &&

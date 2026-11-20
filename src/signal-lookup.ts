@@ -69,7 +69,9 @@ async function lookupSignal(backend: Backend, normalized: string) {
 }
 
 async function findSignal(backend: Backend, name: string, delimiter = "/") {
-  const signal = await lookupSignal(backend, normalName(name, delimiter));
+  const [signal] = name.startsWith("@virtual:")
+    ? await backend.request("describe", { descriptors: [{ id: name }] })
+    : [await lookupSignal(backend, normalName(name, delimiter))];
   if (!signal) throw new Error(`Dumped signal not found: ${name}`);
   return signal;
 }

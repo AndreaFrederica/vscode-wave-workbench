@@ -11,6 +11,8 @@ const { Backend } = require("../dist/backend");
 const { DecoderScheduler } = require("../dist/decoder-runtime/scheduler");
 const { measureAnalog, thresholdSamples } = require("../dist/shared/analog");
 const { traceSchematic } = require("../dist/rtl-schematic");
+const { readTraceObservations } = require("../dist/rtl-trace-observations");
+const { traceAssignmentCandidates } = require("../dist/rtl-trace-candidates");
 
 const binary = path.resolve(
   "bin/wave-backend-independent" + (process.platform === "win32" ? ".exe" : ""),
@@ -280,6 +282,7 @@ async function openAnalog(t, filename, env) {
   t.after(() => backend.dispose());
   const meta = await backend.request("open", { path: filename });
   return {
+    backend,
     meta,
     async window(signal, start = meta.start, end = meta.end, limit = 5000) {
       return (await backend.request("query", {
@@ -289,12 +292,45 @@ async function openAnalog(t, filename, env) {
   };
 }
 
+test("Trace preserves integer real samples without evaluating them as bits", {
+  skip: !existsSync(binary),
+}, async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "wave-real-trace-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const filename = path.join(directory, "integer-real.vcd");
+  await fs.writeFile(filename, fixture.replace("r0.9 !", "r10 !"));
+  const { backend, meta } = await openAnalog(t, filename);
+  const voltage = meta.signals.find(({ name }) => name === "voltage");
+  const ready = meta.signals.find(({ name }) => name === "ready");
+  const evidence = await readTraceObservations(
+    backend, meta, new Map([[0, voltage], [1, ready]]), "9", "0", 0,
+  );
+  const [real, digital] = evidence.observations;
+  assert.equal(real.real, true);
+  assert.equal(real.value, "10");
+  assert.deepEqual(real.history.at(-1), { tick: "9", value: "10" });
+  assert.equal(digital.value, "1");
+  const trace = {
+    root: 0,
+    assignments: [{
+      kind: "continuous",
+      targets: [0],
+      inputs: [],
+      value: { op: "literal", args: ["10", false] },
+    }],
+  };
+  const result = traceAssignmentCandidates(trace, evidence);
+  assert.deepEqual(result.change, { tick: "9", value: "10" });
+  assert.equal(result.candidates[0].status, "possible");
+  assert.equal(result.candidates[0].value, undefined);
+});
+
 for (const [variable, reader] of [["WAVE_TEST_ANALOG_SHM", "shm-lib"], ["WAVE_TEST_ANALOG_WDB", "wdb-lib"]]) {
   test(`${reader} reads real and digital samples with the same clock`, {
     skip: !process.env[variable] || !existsSync(binary),
   }, async (t) => {
     const wave = await openAnalog(t, process.env[variable]);
-    const { meta } = wave;
+    const { backend, meta } = wave;
     assert.equal(meta.backend, reader);
     assert.equal(meta.scale, "1ns");
     const voltage = meta.signals.find(({ name }) => name === "voltage");
@@ -308,6 +344,16 @@ for (const [variable, reader] of [["WAVE_TEST_ANALOG_SHM", "shm-lib"], ["WAVE_TE
     assert.deepEqual(await wave.window(voltage, "5", "16", 2), {
       events: [["4", "0.125"], ["9", "0.9"]], truncated: true,
     });
+    const evidence = await readTraceObservations(
+      backend, meta, new Map([[0, voltage], [1, ready]]), "9", "0", 0,
+    );
+    assert.deepEqual(
+      evidence.observations.map(({ real, value, history }) => [real, value, history.at(-1)]),
+      [
+        [true, "0.9", { tick: "9", value: "0.9" }],
+        [undefined, "1", { tick: "9", value: "1" }],
+      ],
+    );
   });
 }
 

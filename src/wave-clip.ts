@@ -5,6 +5,7 @@ import type { Viewer } from "./viewer";
 import type { ClipContext, WaveClip } from "./shared/protocol";
 import { findSignal } from "./signal-lookup";
 import * as WaveSignal from "./shared/signals";
+import { scaleHertz } from "./shared/time";
 
 export const clipFormats = ["png", "csv", "json", "vcd"] as const;
 export type ClipFormat = (typeof clipFormats)[number];
@@ -160,10 +161,12 @@ export function serializeClip(
 ) {
   if (format === "json") return JSON.stringify(clip, null, 2) + "\n";
   if (format === "csv") {
-    const mixed = clip.traces.some((trace) => trace.real);
+    const hertz = scaleHertz(clip.timescale);
+    const mixed = hertz !== undefined || clip.traces.some((trace) => trace.real);
     const rows = [
       mixed
-        ? "signal,tick,timescale,value,truncated,value_type,unit"
+        ? "signal,tick,timescale,value,truncated,value_type,unit" +
+          (hertz === undefined ? "" : ",frequency_hz")
         : "signal,tick,timescale,value_binary,truncated",
     ];
     const csvField = (value: string) => '"' + value.replaceAll('"', '""') + '"';
@@ -179,6 +182,7 @@ export function serializeClip(
             ...(mixed
               ? [trace.real ? "real" : "digital", csvField(trace.unit ?? "")]
               : []),
+            ...(hertz === undefined ? [] : [String(Number(time) * hertz)]),
           ].join(","),
         );
     }

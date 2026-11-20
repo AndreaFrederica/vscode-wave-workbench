@@ -2803,6 +2803,8 @@ export function traceReport(
       "depends on an increment or decrement whose evaluation order could not be reconstructed.",
     mismatchedDesign:
       "could only be traced in its source file because the attached design differs from the build manifest.",
+    vendorPortLinksUnavailable:
+      "was traced within its RTL file. The SHM or WDB source index lacks connections between instances.",
     unverifiedVcsParameterPath:
       "could only be traced in its source file because VCS KDB may omit an indexed parameter override.",
   };

@@ -139,3 +139,33 @@ AND/OR/XOR/NOT 是按位运算，较短输入按 unsigned 零扩展到最大输�
 ## 范围
 
 现有 Tcl、主题、虚拟滚动和 Rust 缓存继续工作。Signals 面板是 FSDB 中已记录的信号，不等于 KDB 的所有声明；KDB 每级子项仍受现有 SDK 接口返回上限约束。driver/load 追踪、原理图、任意表达式虚拟信号、完整复合类型展开及 Verdi 全部菜单仍未实现。
+
+## 在 VS Code 中调试在线 RTL
+
+已经通过 Wave Workbench 启动在线仿真时，从命令面板运行 **Wave Workbench: Attach VS Code Debugger to Live RTL**。调试工具栏可暂停、继续和单步。「变量」显示当前采样的信号，「监视」和「调试控制台」可按完整层次路径查询值，也可用 `$tick` 查询时间。
+
+也可在 `.vscode/launch.json` 中使用 **Wave Workbench RTL**，按 F5 启动已经构建好的在线仿真。
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "RTL: Launch Verilator",
+      "type": "wave-workbench-live",
+      "request": "launch",
+      "program": "${workspaceFolder}/obj_dir/Vtestbench",
+      "cwd": "${workspaceFolder}",
+      "clock": "TOP.testbench.clk",
+      "executionLog": "${workspaceFolder}/execution.jsonl",
+      "stopOnEntry": true
+    }
+  ]
+}
+```
+
+`clock` 指定单步目标的 1 bit 时钟，单步推进至下一上升沿，省略时推进一个仿真时间槽。Verilator 需要带在线采样接口的 harness，源码断点还需要匹配构建的 `executionLog`。VCS 使用带 Wave Workbench VPI 的 `simv`，在启动配置中填 `"backend": "vcs"`、`signals` 和需要源码断点的 `statementScopes`。VCS 在首次观察到目标行时确认断点。需要保存 VCS 记录时，可在 `recording` 中指定输出路径。
+
+在「断点」面板新增函数断点并填 `tb.dut.q == 0010` 可以按采样值暂停。源码断点的定位来自 RTL 执行事件，变量视图展示暂停时间槽结束时的采样。停止启动的调试会话会关闭仿真，结束附加调试会保留原仿真。原有 Trace Live Signal 和 MCP 可查询同一在线会话。
+
+在线会话启动或附加时，VS Code 底部打开「实时波形」。可在「信号」菜单选择已采样的信号。默认从仿真起点显示到最新采样，时间轴随仿真向右扩展。缩放或点击时间轴可检查历史，勾选「跟随最新」回到自动增长视图。长时间运行时，早期采样存入当前会话的临时文件。大范围显示采样概览，放大可读取原始采样，历史游标查询也使用原始采样。

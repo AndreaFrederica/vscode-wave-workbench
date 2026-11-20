@@ -614,7 +614,9 @@ export function createTraceExplorer(
                                   ? "Design differs from build manifest"
                                   : item.reason === "unverifiedVcsParameterPath"
                                     ? "VCS KDB parameter override is unverified"
-                                    : "Trace incomplete · " + item.reason,
+                                    : item.reason === "vendorPortLinksUnavailable"
+                                      ? "SHM/WDB instance connections unavailable"
+                                      : "Trace incomplete · " + item.reason,
           });
         }
       }

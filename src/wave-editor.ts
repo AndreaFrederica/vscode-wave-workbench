@@ -21,8 +21,16 @@ import {
   VerilatorDesign,
   verilatorTreeFile,
 } from "./verilator";
+import {
+  exportXceliumHdl,
+  readHdlIndex,
+  shmDirectory,
+  shmSourceIndex,
+  VendorHdlDesign,
+} from "./vendor-hdl";
 import { registerVirtuals, restoreView } from "./view-state";
 import * as WaveSignal from "./shared/signals";
+import { mathActions, showWaveMath } from "./wave-math-editor";
 
 interface EditorActions {
   trackTask<T>(
@@ -281,6 +289,22 @@ export function createWaveEditor(
       selected: ReturnType<typeof choosePlan>,
       choice: FsdbBackend,
     ) => {
+      const mappings = cfg.get<Record<string, string>>("sourcePathMappings");
+      if (
+        /\.wdb$/i.test(document.uri.fsPath) &&
+        database === document.uri.fsPath
+      )
+        return VendorHdlDesign.open(
+          database,
+          await viewer.backend.request("hdlLocations", {}),
+          mappings,
+        );
+      if (/\.hdl\.json$/i.test(database))
+        return VendorHdlDesign.open(
+          database,
+          await readHdlIndex(database),
+          mappings,
+        );
       if (verilatorTreeFile(database)) {
         const directory = path.dirname(database);
         const sourceDirectories = [
@@ -323,30 +347,71 @@ export function createWaveEditor(
       viewer.attaching = (async () => {
         let database = suggested;
         if (!database) {
+          const shm = shmDirectory(document.uri.fsPath);
+          const xceliumIndex = "从 Xcelium 仿真快照生成 HDL 索引";
+          const recordedWdb = "读取 WDB 的 HDL 调试位置";
+          const choices = ["Verilator elaboration JSON", "KDB"];
+          if (shm) choices.unshift(xceliumIndex, "SHM HDL 索引文件");
+          if (/\.wdb$/i.test(document.uri.fsPath)) choices.unshift(recordedWdb);
           const kind = isFsdb(document.uri.fsPath)
             ? "KDB"
-            : await vscode.window.showQuickPick(
-                ["Verilator elaboration JSON", "KDB"],
-                { placeHolder: "选择设计数据库类型" },
-              );
+            : await vscode.window.showQuickPick(choices, {
+                placeHolder: "选择设计数据库类型",
+              });
           if (!kind) return false;
-          const selection = await vscode.window.showOpenDialog(
-            kind === "KDB"
-              ? {
-                  title: "选择 VCS simv.daidir（KDB）",
-                  canSelectFiles: false,
-                  canSelectFolders: true,
-                  canSelectMany: false,
-                }
-              : {
-                  title: "选择 Verilator .tree.json",
-                  filters: { "Verilator JSON": ["json"] },
-                  canSelectMany: false,
-                },
-          );
-          database = selection?.[0]?.fsPath;
-          if (database && kind !== "KDB" && !verilatorTreeFile(database))
-            throw Error("请选择 Verilator --json-only 生成的 .tree.json");
+          if (kind === recordedWdb) {
+            database = document.uri.fsPath;
+          } else if (shm && kind === xceliumIndex) {
+            const candidates = [
+              path.dirname(shm),
+              path.dirname(path.dirname(shm)),
+            ];
+            const suggested = candidates.find((candidate) =>
+              fs.existsSync(path.join(candidate, "xcelium.d")),
+            );
+            const folder = await vscode.window.showOpenDialog({
+              title: "选择原 Xcelium 仿真运行目录",
+              canSelectFolders: true,
+              canSelectFiles: false,
+              canSelectMany: false,
+              defaultUri: vscode.Uri.file(suggested ?? candidates[0]),
+            });
+            if (!folder?.[0]) return false;
+            database = shmSourceIndex(shm)!;
+            await trackTask("读取 Xcelium HDL 源码位置", shm, () =>
+              exportXceliumHdl(
+                context.asAbsolutePath("native/xcelium_hdl.c"),
+                cfg.get<string>("xceliumHome") || process.env.XCELIUM_HOME,
+                folder[0].fsPath,
+                database!,
+              ),
+            );
+          } else {
+            const selection = await vscode.window.showOpenDialog(
+              kind === "KDB"
+                ? {
+                    title: "选择 VCS simv.daidir（KDB）",
+                    canSelectFiles: false,
+                    canSelectFolders: true,
+                    canSelectMany: false,
+                  }
+                : {
+                    title:
+                      kind === "SHM HDL 索引文件"
+                        ? "选择 SHM .hdl.json"
+                        : "选择 Verilator .tree.json",
+                    filters: { "Verilator JSON": ["json"] },
+                    canSelectMany: false,
+                  },
+            );
+            database = selection?.[0]?.fsPath;
+            if (
+              database &&
+              kind === "Verilator elaboration JSON" &&
+              !verilatorTreeFile(database)
+            )
+              throw Error("请选择 Verilator --json-only 生成的 .tree.json");
+          }
         }
         if (!database) return false;
         const session = await openKdb(database, plan, preference);
@@ -457,15 +522,30 @@ export function createWaveEditor(
             path.dirname(document.uri.fsPath),
           tree,
         );
-      const database =
+      const sourceIndex = shmSourceIndex(document.uri.fsPath);
+      const ownDesign = /\.wdb$/i.test(document.uri.fsPath)
+        ? document.uri.fsPath
+        : sourceIndex && fs.existsSync(sourceIndex)
+          ? sourceIndex
+          : undefined;
+      const savedDatabase =
         document.backup?.kdb ||
-        context.workspaceState.get<string>(`kdb:${document.uri.toString()}`) ||
-        (!isFsdb(document.uri.fsPath) &&
+        context.workspaceState.get<string>(`kdb:${document.uri.toString()}`);
+      const otherDesign =
+        !savedDatabase &&
+        !ownDesign &&
+        !sourceIndex &&
+        ((!isFsdb(document.uri.fsPath) &&
           (configuredTree || (await findVerilatorTree(document.uri.fsPath)))) ||
-        (fs.existsSync(sibling) ? sibling : null) ||
-        cfg.get<string>("kdbPath");
+          (fs.existsSync(sibling) ? sibling : null) ||
+          cfg.get<string>("kdbPath"));
+      const database = savedDatabase || ownDesign || otherDesign;
       try {
-        if (database && !viewer.kdb) await viewer.attachKdb(database);
+        if (database && !viewer.kdb)
+          await viewer.attachKdb(database).catch((error) => {
+            if (database !== ownDesign || savedDatabase) throw error;
+            log("HDL source metadata unavailable: " + String(error) + "\n");
+          });
         if (!document.dirty) document.savedKdb = viewer.kdb?.path;
         const backup = document.backup;
         if (backup) {
@@ -900,6 +980,12 @@ export function createWaveEditor(
           } else if (msg.type === "rtlModuleSchematic") {
             if (msg.signal === undefined || typeof msg.signal === "string")
               await showWaveModuleSchematic(viewer, msg.signal);
+          } else if (msg.type === "waveMath" && mathActions.includes(msg.operation)) {
+            await showWaveMath(
+              vscode, viewer, msg.operation, msg.signals, msg.range,
+              (work) => trackTask(msg.operation === "fft" ? "计算 FFT" : "计算派生波形", viewer.uri.fsPath, work),
+              (uri) => openWaveform(uri),
+            );
           } else if (msg.type === "analogOperation") {
             const id = msg.id;
             if (typeof id !== "string") return;

@@ -64,9 +64,10 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=wave_bridge");
     println!("cargo:rustc-link-search=native={}", lib.display());
-    for name in ["nffr", "nsys", "stdc++", "z"] {
+    for name in ["nffr", "stdc++", "z"] {
         println!("cargo:rustc-link-lib=dylib={name}");
     }
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib.display());
-    println!("cargo:rustc-link-arg=-Wl,--no-as-needed,-ldl,-lrt,-lz,-lstdc++,--as-needed");
+    // Some Verdi SDKs resolve libnffr's libnsys symbols from the executable's dependencies.
+    println!("cargo:rustc-link-arg=-Wl,--no-as-needed,-lnsys,-ldl,-lrt,-lz,-lstdc++,--as-needed");
 }

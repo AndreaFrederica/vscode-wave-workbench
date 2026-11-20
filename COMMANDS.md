@@ -555,13 +555,30 @@ Tcl 和 MCP 的 `wave_tcl` 可使用 `waveDecode list`、`waveDecode set signal 
 
 Verilator 视图还按语句显示模块内部的 `assign` 和 `always_*`。KDB 视图当前显示实例、正式端口和实例间连线，包括后端能够解析的端口表达式。内部行为逻辑、复杂接口连接、综合网表和直接从 RTL 自动生成列入后续。 [Vivado Schematic](https://docs.amd.com/r/en-US/ug906-vivado-design-analysis/Using-the-Schematic-Window) · [Verilator --json-only](https://verilator.org/guide/latest/exe_verilator.html#cmdoption-json-only)
 
-## 后台波形 MCP
+## 前台 MCP、后台 MCP 和 Tcl
 
-在波形文件所在机器运行 `node <插件路径>/dist/mcp-headless.js <工作区绝对路径>`。MCP 客户端通过 stdio 启动这个进程，可在 VS Code 关闭时运行。工作区参数用于解析相对路径，并让同一工作区的 Wave Workbench 状态栏找到后台任务。
+前台 `dist/mcp.js` 使用当前 VS Code 窗口的波形工程和在线仿真。后台 `dist/mcp-headless.js` 在波形所在机器上通过 stdio 启动，使用独立的波形、调试和仿真会话。启动参数为工作区绝对路径。两个服务器提供相同的 `tools/list`，Tcl 可用 `waveTool list` 查看这套接口。
 
-- `wave_open` 读取 FSDB、FST、VCD 或 `.waveproj`，返回时间边界、时基、信号数和后端。FSDB 可用 `backend` 选择 `auto`、`independent` 或 `verdi`。
-- `wave_search` 分页查找信号。 `wave_list` 和 `wave_close` 管理当前后台会话打开的波形。
-- `wave_clip` 接受 `signals` 以及可选的整数 tick 字符串 `start`、`end`。工程文件提供已保存的信号行、时间窗口、游标和标记。普通波形文件需要显式传入信号名，省略范围时使用文件的完整时间范围。
-- `wave_export` 支持 PNG、CSV、JSON 和 VCD。PNG 可直接返回图片，导出路径以工作区为基准，目标文件须为新文件。后台结果覆盖波形样本、虚拟信号和已保存的内置总线标签。交互式 RTL 追踪、Tcl 和脚本解码器事务使用前台 MCP。
+| 功能 | 命令 |
+| --- | --- |
+| 波形和工程 | `wave_open`、`wave_close`、`wave_list`、`wave_search`、`wave_view`、`wave_save_project`、`wave_clip`、`wave_export` |
+| 源码和原理图 | `wave_design_attach`、`wave_source`、`wave_schematic`、`wave_module_schematic` |
+| RTL 追踪和记录 | `wave_trace_drivers`、`wave_trace_loads`、`wave_trace_context`、`wave_trace_resume`、`wave_trace_graph_page`、`wave_execution_map`、`wave_execution_trace` |
+| 模拟和数学 | `wave_math` 的 `measure`、`hysteresis`、`expression`、`derivative`、`integral`、`filter`、`adc`、`dac`、`fft`、`external` |
+| 仿真和 RTL 调试 | `wave_live_start`、`wave_live_debug`、`wave_debug_request`、`wave_live_control`、`wave_live_status`、`wave_live_history`、`wave_live_trace`、`wave_live_stop` |
+| 协议解码 | `wave_decoder_list`、`wave_decoder_query`、`wave_decoder_attach`、`wave_decoder_detach`、`wave_decoder_status`、`wave_decoder_reload` |
 
-有任务执行时，VS Code 状态栏显示前台或后台任务。悬停或点击可查看文件和耗时。后台任务与启动参数指定的工作区关联。
+Tcl 使用 `waveTool 工具名 {JSON对象}`，返回 JSON。以下写法的双层花括号保留 JSON 对象本身的花括号。
+
+```tcl
+waveTool wave_open {{"path":"mixed.waveproj"}}
+waveTool wave_math {{"operation":"adc","signals":["tb.voltage","tb.sample_clk"],"options":{"name":"ADC","bits":8,"low":0,"high":1.8,"sampling":{"mode":"external","edge":"rising","delay":"2"}}}}
+waveTool wave_source {{"signal":"tb.dut.data"}}
+waveTool wave_live_history {{"start":"0","end":"100000","limit":512}}
+```
+
+在后台也可通过 `wave_tcl` 执行 nWave 兼容命令。两个 MCP 的源码和原理图接口均返回数据。前台可以传 `show: true` 打开对应编辑器，或通过 `wave_live_debug` 将仿真附加到 VS Code 调试面板。自动化调试通过 `wave_debug_request` 执行 DAP 请求，涵盖启动、附加、断点、单步、堆栈、变量和求值。历史窗口可使用 `cursor` 取精确采样，或使用 `limit` 和返回的 `nextStart` 分页读取全部采样。停止仿真后仍可查询本次波形。
+
+RTL 分析依赖 Wave Workbench 的修改版 VIDE。后台自动查找已安装的 VIDE 扩展，也可使用 `WAVE_WORKBENCH_VIDE_PATH` 指定其中的服务器程序。若工程提供 KDB、filelist 或 `vide.toml`，分析使用相应的设计和编译配置。后台可读取工作区的 `.vscode/settings.json`。运行 Lua/JS 解码器或外部数学算子时，后台启动环境可设置 `WAVE_WORKBENCH_TRUSTED=1`，前台沿用 VS Code 工作区信任。
+
+状态栏显示前台和后台任务。后台任务与启动参数指定的工作区关联。

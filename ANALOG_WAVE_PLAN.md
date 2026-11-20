@@ -70,6 +70,18 @@ Linux x64 扩展使用固定版本的 Ondas fork。安装 SDK 后通过 VS Code 
 | PSF ASCII | 从 Spectre 输出实值瞬态数据，打开 `.tran` 或 `.psfascii` | Spectre 25.1 RC 瞬态，电压单位、区间测量和 CSV 导出。二进制 PSF 和 PSFXL 待验收 |
 | RAW | 打开 ngspice 的单 plot ASCII 或 little-endian binary 文件 | RC 瞬态电压、电流、AC 复数分量，ASCII 与 binary 逐点对照 |
 
+### SHM 和 WDB 的 HDL 导航
+
+在波形中选中数字或实数信号，再用「源码」菜单打开「信号声明」「实例位置」或「模块定义」。WDB 直接读取数据库中的 XSim HDL 调试位置。生成 WDB 时用 `xelab -debug all` 保留位置。
+
+SHM 可在「接入设计数据库」选择「从 Xcelium 仿真快照生成 HDL 索引」。选中含原始 `xcelium.d` 的运行目录后，插件使用本机 Xcelium 和 C 编译器，通过 VPI 读取声明、实例和定义位置。生成的 `.shm.hdl.json` 保存在 SHM 目录旁，以后打开对应 SHM 时会自动加载。也可手动附加已生成的索引。快照中的 HDL 路径如果与当前工作区不同，可用 `waveWorkbench.sourcePathMappings` 映射。
+
+### 实数信号的 RTL Trace
+
+使用修改版 VIDE 和可访问的 HDL 源码，可在实数波形行用「追踪驱动」「追踪负载」和「在游标 A 追踪」。在 Xcelium SHM 与 Vivado XSim WDB 的同一 testbench 中，实测模块内的 `assign voltage = sample` 可定位到源码，游标 A 可读取输出及上游实数的 `-0.125 → 0.9` 变化。没有同一 tick 的事件顺序时，时序图显示可能的关系。
+
+当前 SHM 和 WDB 的 HDL 索引提供源码位置，跨实例的端口连接尚未接入 Trace，查询会标记为部分覆盖。实数运算和同一 tick 的因果顺序仍待验证。独立的 Spectre PSF 与 ngspice RAW 可查询模拟值，这些样本没有可供 RTL Trace 使用的 HDL 映射。
+
 RAW 和 PSF ASCII 使用现有的窗口查询。瞬态使用 1 fs tick。RAW 的 AC 使用 1 mHz tick，复数保存在成对的 `.re` 和 `.im` 实数通道。当前内存读取上限为每文件 400 万个标量。 [ngspice RAW 文件说明](https://ngspice.sourceforge.io/docs/ngspice-45-manual.pdf)
 
 从工作区外的临时目录复现，以下命令中的 `fixture` 指向本仓库的 `test/fixtures/analog`。WDB 和 SHM 使用同一个 testbench。
@@ -98,3 +110,7 @@ export LD_LIBRARY_PATH="$XILINX_VIVADO/lib/lnx64.o${LD_LIBRARY_PATH:+:$LD_LIBRAR
 npm run build
 node --test test/analog-wave.test.js
 ```
+
+### 波形数学
+
+「数学」菜单支持算式、微分、积分、一阶低通、带采样与触发配置的 ADC/DAC、FFT 以及 JavaScript 和 Native 外部算子。派生波形调用同一查询、渲染、导出和工程恢复路径。详见 [波形数学和算子 API](WAVE_MATH.md)。

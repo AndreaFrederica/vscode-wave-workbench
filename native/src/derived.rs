@@ -24,7 +24,12 @@ pub struct Definition {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub samples: Option<Vec<(String, String)>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub real: Option<bool>,
 }
+
+pub const MAX_REAL_SAMPLES: usize = 16_384;
+
 impl Definition {
     pub fn width(&self, widths: &[u32]) -> Result<u32, String> {
         if self.op == "samples" {
@@ -33,17 +38,25 @@ impl Definition {
                 .filter(|n| (1..=256).contains(n))
                 .ok_or("Invalid sampled virtual width")?;
             let samples = self.samples.as_ref().ok_or("Missing virtual samples")?;
+            let real = self.real == Some(true);
             if !self
                 .source
                 .as_ref()
                 .is_some_and(|name| !name.is_empty() && name.len() <= 130)
                 || !self.inputs.is_empty()
                 || samples.is_empty()
-                || samples.len() > 4097
+                || samples.len() > if real { MAX_REAL_SAMPLES } else { 4097 }
+                || (real && width != 64)
                 || samples.iter().any(|(tick, value)| {
                     tick.parse::<u64>().is_err()
-                        || value.len() != width as usize
-                        || !value.bytes().all(|c| b"01xz".contains(&c))
+                        || if real {
+                            value != "NaN"
+                                && (value.len() > 32
+                                    || !value.parse::<f64>().is_ok_and(f64::is_finite))
+                        } else {
+                            value.len() != width as usize
+                                || !value.bytes().all(|c| b"01xz".contains(&c))
+                        }
                 })
                 || samples
                     .windows(2)
@@ -53,7 +66,11 @@ impl Definition {
             }
             return Ok(width);
         }
-        if self.width.is_some() || self.samples.is_some() || self.source.is_some() {
+        if self.width.is_some()
+            || self.samples.is_some()
+            || self.source.is_some()
+            || self.real.is_some()
+        {
             return Err("Virtual expression cannot have recorded samples".into());
         }
         if self.inputs.is_empty() || self.inputs.len() > 64 {
@@ -242,6 +259,7 @@ mod tests {
     #[test]
     fn simultaneous_changes_and_truncation() {
         let d = Definition {
+            real: None,
             width: None,
             source: None,
             samples: None,
