@@ -293,13 +293,50 @@ fn vector_packet(
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum Encoding {
+    Digital(usize),
+    Real,
+}
+
+fn real_packet(
+    input: &mut impl Input,
+    deltas: &[u64],
+    count: usize,
+    states: u8,
+) -> io::Result<(Events, u64)> {
+    if input.uint(2)? != 0x0304 || input.uint(4)? != 8 || states != 0 {
+        return Err(invalid("Unrecognized FSDB real packet header"));
+    }
+    let mut packet = Packet::new(count);
+    loop {
+        let opcode = input.byte()?;
+        let delay = match opcode {
+            0xc1 => return packet.finish(states),
+            0x30 if packet.events.is_empty() => 0,
+            0 | 0x10 | 0x20 => delta(input, deltas, 1 << (opcode >> 4))?,
+            _ => {
+                return Err(invalid(format!(
+                    "Unrecognized FSDB real operation {opcode:#x}"
+                )))
+            }
+        };
+        let bits = input.uint(8)?;
+        let sample = f64::from_bits(bits);
+        packet.push(format!("{sample:e}"), delay, 0)?;
+    }
+}
+
 fn packet(
     input: &mut impl Input,
     deltas: &[u64],
     count: usize,
     states: u8,
-    width: usize,
+    encoding: Encoding,
 ) -> io::Result<(Events, u64)> {
+    let Encoding::Digital(width) = encoding else {
+        return real_packet(input, deltas, count, states);
+    };
     if count.checked_mul(width).is_none_or(|size| size > MAX_BLOCK) {
         return Err(invalid("FSDB packet exceeds decoded bit budget"));
     }
@@ -535,7 +572,7 @@ impl EventReader {
         &mut self,
         file: &mut FileReader,
         address: u64,
-        width: usize,
+        encoding: Encoding,
         latest: u64,
     ) -> io::Result<(Events, u64, u8)> {
         let page = (address >> 16) as usize;
@@ -570,14 +607,17 @@ impl EventReader {
             let wide = flags & 4 != 0;
             if !(1..=8).contains(&count)
                 || if wide {
-                    dictionary.mode != 8 || previous == 0 || width != 1 || flags & 0x20 != 0
+                    dictionary.mode != 8
+                        || previous == 0
+                        || !matches!(encoding, Encoding::Digital(1) | Encoding::Real)
+                        || flags & 0x20 != 0
                 } else {
                     dictionary.mode != 4 || flags & 0x20 != 0
                 }
             {
                 return Err(invalid("Unrecognized FSDB inline event record"));
             }
-            let (events, _) = packet(&mut input, &dictionary.deltas, count, states, width)?;
+            let (events, _) = packet(&mut input, &dictionary.deltas, count, states, encoding)?;
             return Ok((events, previous, states));
         }
         if flags & !0x3fff != 0 {
@@ -615,7 +655,7 @@ impl EventReader {
             &dictionary.deltas,
             count as usize,
             states,
-            width,
+            encoding,
         )?;
         if actual_delta != max_delta
             || events[0].0 != first_time
@@ -638,7 +678,7 @@ impl EventReader {
         &mut self,
         file: &mut FileReader,
         signal: u32,
-        width: usize,
+        encoding: Encoding,
         start: u64,
         end: u64,
     ) -> io::Result<Events> {
@@ -650,7 +690,7 @@ impl EventReader {
         let mut segments = Vec::new();
         let mut states = 0;
         while address != 0 {
-            let (segment, previous, flags) = self.record(file, address, width, end)?;
+            let (segment, previous, flags) = self.record(file, address, encoding, end)?;
             states |= flags;
             address = previous;
             if let Some(first) = segment.first() {
@@ -679,4 +719,25 @@ fn index_window(bases: &[usize], page: usize) -> io::Result<usize> {
         return Err(invalid("FSDB index page is out of bounds"));
     }
     Ok(bases.partition_point(|&base| base <= page) - 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn real_value_packet_preserves_samples_and_checks_boundaries() {
+        let mut bytes = vec![4, 3, 8, 0, 0, 0, 0x30];
+        bytes.extend_from_slice(&(-0.125_f64).to_le_bytes());
+        bytes.extend_from_slice(&[0, 1]);
+        bytes.extend_from_slice(&(0.9_f64).to_le_bytes());
+        bytes.push(0xc1);
+        let (samples, largest_delta) =
+            real_packet(&mut Cursor::new(&bytes), &[0, 14], 2, 0).unwrap();
+        assert_eq!(samples, [(0, "-1.25e-1".into()), (14, "9e-1".into())]);
+        assert_eq!(largest_delta, 14);
+        assert!(real_packet(&mut Cursor::new(&bytes), &[0], 2, 0).is_err());
+        assert!(real_packet(&mut Cursor::new(&bytes[..bytes.len() - 1]), &[0, 14], 2, 0).is_err());
+        assert!(real_packet(&mut Cursor::new(&bytes), &[0, 14], 1, 0).is_err());
+    }
 }

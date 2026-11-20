@@ -353,7 +353,9 @@ impl PhysicalSources<'_> {
         if !supported || width != expected_width || !self.events.indexed(signal) {
             return Err(invalid("FSDB connection driver encoding or width mismatch"));
         }
-        self.events.events(self.file, signal, width, 0, u64::MAX)
+        self.events.events(
+            self.file, signal, super::events::Encoding::Digital(width), 0, u64::MAX,
+        )
     }
 }
 

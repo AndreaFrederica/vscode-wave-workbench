@@ -114,9 +114,10 @@ impl Graph {
             }
         }
         let attributes = input.take(count as usize)?.to_vec();
-        let edges = u32(&mut input)?;
-        if edges > count {
-            return Err(invalid("FSDB connection edge count exceeds vertices"));
+        // A destination can have several edges, including array port connections.
+        let edges = u32(&mut input)? as usize;
+        if edges > 1_000_000 || edges > input.remaining().len() / 8 {
+            return Err(invalid("FSDB connection edge count exceeds bounds"));
         }
         let mut by_node = HashMap::<u32, Vec<Edge>>::new();
         for _ in 0..edges {

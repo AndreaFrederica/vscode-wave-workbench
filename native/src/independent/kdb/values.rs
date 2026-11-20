@@ -19,35 +19,39 @@ const TYPE_PARAMETER_MASK: u64 = 0x00ff00ff;
 const TYPE_PARAMETER: u64 = 0x00400039;
 type Dimensions = Vec<(i64, i64)>;
 
+pub(super) struct ResolvedValue {
+    pub kind: &'static str,
+    pub position: Position,
+    pub scope: bool,
+    pub packed: Option<(i64, i64)>,
+    pub two_state: bool,
+    pub packed_signed: Option<bool>,
+}
+
 #[derive(Default)]
 pub(super) struct Declarations {
     scopes: HashMap<(u32, u64), HashMap<String, (u64, u64)>>,
 }
 
 impl Declarations {
-    pub(super) fn resolve(
+    pub(super) fn scope(
         &mut self,
-        objects: &mut Objects,
-        sources: &Sources,
-        contexts: &[&Node],
-        packages: &HashMap<u32, Node>,
-        name: &str,
-    ) -> io::Result<(&'static str, Position, bool)> {
-        let owner = contexts[0];
-        let view = objects.view(owner.unit)?;
-        let source = lexical::source_scope(&view, owner.source)?;
+        view: &View,
+        owner: &Node,
+    ) -> io::Result<&HashMap<String, (u64, u64)>> {
+        let source = lexical::source_scope(view, owner.source)?;
         let slots: &[u64] = match view.uint(source, 1)? {
             31 | 32 => &[64, 128],
             66 if owner.kind == "npiGenScope" => &[104, 112],
             66 if owner.kind == "npiNamedBegin" => &[104],
             _ => return Err(invalid("Unrecognized KDB value scope kind")),
         };
-        let declarations = match self.scopes.entry((owner.unit, source)) {
+        Ok(match self.scopes.entry((owner.unit, source)) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let mut declarations = HashMap::new();
                 for slot in slots {
-                    for key in lexical::chain(&view, view.pointer(source + slot)?)? {
+                    for key in lexical::chain(view, view.pointer(source + slot)?)? {
                         let header = view.uint(key, 4)?;
                         if !(51..=58).contains(&(header & 255)) {
                             return Err(invalid("Unrecognized KDB declaration kind"));
@@ -63,7 +67,20 @@ impl Declarations {
                 }
                 entry.insert(declarations)
             }
-        };
+        })
+    }
+
+    pub(super) fn resolve(
+        &mut self,
+        objects: &mut Objects,
+        sources: &Sources,
+        contexts: &[&Node],
+        packages: &HashMap<u32, Node>,
+        name: &str,
+    ) -> io::Result<ResolvedValue> {
+        let owner = contexts[0];
+        let view = objects.view(owner.unit)?;
+        let declarations = self.scope(&view, owner)?;
         let (key, header, indices) = if let Some(&(key, header)) = declarations.get(name) {
             (key, header, Vec::new())
         } else {
@@ -154,7 +171,13 @@ impl Declarations {
                 5 => ("npiRealVar", 64),
                 8 => ("npiBitVar", 1),
                 12 => ("npiIntVar", 32),
-                _ => return Err(invalid("Unrecognized KDB variable data type")),
+                13 => ("npiLongIntVar", 64),
+                32 => ("npiStringVar", 1),
+                _ => {
+                    return Err(invalid(format!(
+                        "Unrecognized KDB variable data type {dtype} for {name} (declaration tag {tag})"
+                    )))
+                }
             }
         } else {
             return Err(invalid(format!(
@@ -196,6 +219,21 @@ impl Declarations {
         let aggregate = matches!(kind, "npiEnumVar" | "npiStructVar" | "npiUnionVar");
         let boundary = unpacked.len() + packed.len() + type_dimensions.len();
         packed.extend(type_dimensions);
+        let packed_shape = if indices.is_empty()
+            && unpacked.is_empty()
+            && !aggregate
+            && matches!(
+                kind,
+                "npiNet" | "npiReg" | "npiBitVar" | "npiIntegerVar" | "npiIntVar"
+            ) {
+            match packed.as_slice() {
+                [] => Some((width as i64 - 1, 0)),
+                [range] => Some(*range),
+                _ => None,
+            }
+        } else {
+            None
+        };
         if aggregate && indices.len() > boundary {
             packed.push((width as i64 - 1, 0));
         } else if aggregate && !packed.is_empty() && indices.is_empty() && unpacked.is_empty() {
@@ -235,7 +273,64 @@ impl Declarations {
         let position = objects
             .declaration_position(owner.unit, key, header, sources)?
             .ok_or_else(|| invalid("KDB declaration source is unavailable"))?;
-        Ok((kind, position, scope))
+        Ok(ResolvedValue {
+            kind,
+            position,
+            scope,
+            packed: packed_shape,
+            two_state: kind == "npiBitVar",
+            // Simple packed net and logic declarations carry signedness in the header.
+            packed_signed: (packed_shape.is_some()
+                && matches!(tag, 51..=53 | 55 | 56)
+                && matches!(dtype, 2 | 7 | 8))
+                .then_some(header & 0x1000_0000 != 0),
+        })
+    }
+}
+
+impl super::Session {
+    pub(super) fn port_struct_member(
+        &mut self, owner: usize, view: &View, declaration: u64, reference: u64, name: &str,
+    ) -> io::Result<Option<(u64, bool)>> {
+        let node = &self.nodes[owner];
+        let tag = view.uint(declaration, 1)?;
+        let dtype = view.uint(declaration + 2, 1)?;
+        let flags = view.uint(declaration + 28, 4)?;
+        if !matches!(tag, 55 | 56) || dtype != 15 || flags & 0x7000 != 0x1000 {
+            return Ok(None);
+        }
+        let slot = if tag == 56 { 72 }
+            else if flags & 0x8000 != 0 && matches!(node.kind, "npiGenScope" | "npiNamedBegin") { 64 }
+            else { 56 };
+        let mut contexts = Vec::new();
+        let mut current = Some(owner);
+        while let Some(index) = current {
+            let node = &self.nodes[index];
+            contexts.push(node);
+            current = node.parent;
+        }
+        let mut env = Environment {
+            objects: &mut self.objects,
+            contexts: &contexts,
+            unit: node.unit,
+            packages: &self.packages,
+            defaults: false,
+            frames: Vec::new(),
+        };
+        let ty = view.pointer_required(declaration + slot)?;
+        let (type_view, ty, unit) = definition(view, ty, node.unit, &mut env)?;
+        env.unit = unit;
+        let Some(field_key) = view.pointer_into(reference + 48, &type_view)? else {
+            return Ok(None);
+        };
+        let fields = aggregates::layout(&type_view, ty, &mut env, false)?;
+        let Some(field) = fields.iter().find(|field| field.key == field_key) else {
+            return Ok(None);
+        };
+        if type_view.string(type_view.pointer_required(field.key + 32)?)? != name {
+            return Ok(None);
+        }
+        Ok(Some((field.width as u64, false)))
     }
 }
 
@@ -271,11 +366,11 @@ fn expression_tag(view: &View, key: u64) -> io::Result<u64> {
     })
 }
 
-fn operands(view: &View, key: u64, count: usize) -> io::Result<Vec<u64>> {
+pub(super) fn operands(view: &View, key: u64, count: usize) -> io::Result<Vec<u64>> {
     operand_list(view, key + 24, Some(count))
 }
 
-fn operand_list(view: &View, slot: u64, count: Option<usize>) -> io::Result<Vec<u64>> {
+pub(super) fn operand_list(view: &View, slot: u64, count: Option<usize>) -> io::Result<Vec<u64>> {
     let wrappers = lexical::chain(view, view.pointer(slot)?)?;
     if wrappers.len() > 65 || count.is_some_and(|count| wrappers.len() != count) {
         return Err(invalid("KDB expression arity mismatch"));
@@ -696,12 +791,148 @@ fn cast_width(value: i64, signed: bool, width: usize) -> i64 {
     }
 }
 
+impl super::Session {
+    pub(super) fn integer_parameter(
+        &mut self,
+        scope: usize,
+        name: &str,
+    ) -> Option<super::IntegerParameter> {
+        let owner = &self.nodes[scope];
+        let unit = owner.unit;
+        let view = self.objects.view(unit).ok()?;
+        let &(key, _) = self.declarations.scope(&view, owner).ok()?.get(name)?;
+        let (value, signed, width) = self.port_integer_parameter(scope, &view, unit, key)?;
+        let bits = format!("{:0width$b}", value as u64 & ((1u64 << width) - 1));
+        Some(super::IntegerParameter { bits, signed })
+    }
+
+    pub(super) fn port_index(
+        &mut self,
+        scope: usize,
+        view: &View,
+        unit: u32,
+        expression: u64,
+    ) -> Option<i64> {
+        self.in_port_context(scope, unit, |env| integer(view, expression, 0, env))
+            .ok()
+            .map(|(value, _)| value)
+    }
+
+    pub(super) fn port_integer_parameter(
+        &mut self,
+        scope: usize,
+        view: &View,
+        unit: u32,
+        key: u64,
+    ) -> Option<(i64, bool, usize)> {
+        let tag = expression_tag(view, key).ok()?;
+        if !matches!(tag & 255, 57 | 58) {
+            return None;
+        }
+        self.in_port_context(scope, unit, |env| parameter_integer(view, key, tag, 0, env))
+            .ok()
+    }
+
+    fn in_port_context<T>(
+        &mut self,
+        scope: usize,
+        unit: u32,
+        evaluate: impl FnOnce(&mut Environment<'_, '_>) -> T,
+    ) -> T {
+        let contexts = super::scope_contexts(&self.nodes, scope);
+        let mut environment = Environment {
+            objects: &mut self.objects,
+            contexts: &contexts,
+            unit,
+            packages: &self.packages,
+            defaults: false,
+            frames: Vec::new(),
+        };
+        evaluate(&mut environment)
+    }
+}
+
 fn cast(value: u32, signed: bool) -> i64 {
     if signed {
         i64::from(value as i32)
     } else {
         i64::from(value)
     }
+}
+
+fn parameter_integer(
+    view: &View,
+    key: u64,
+    tag: u64,
+    depth: usize,
+    env: &mut Environment,
+) -> io::Result<(i64, bool, usize)> {
+    let dtype = tag >> 16 & 255;
+    let name = view.string(view.pointer_required(key + 32)?)?;
+    let entry = env.entry(view, key, name)?;
+    let is_untyped_bits = tag & TYPE_HEADER_MASK == 0x40010039
+        && entry
+            .as_ref()
+            .is_some_and(|entry| matches!(entry.kind, 5 | 0x1000005));
+    let (width, signed) = if is_untyped_bits {
+        let entry = entry.as_ref().unwrap();
+        let ParameterValue::Text(bits) = &entry.value else {
+            return Err(invalid("Invalid untyped KDB bit parameter"));
+        };
+        (bits.len(), entry.kind >> 24 != 0)
+    } else if tag & TYPE_HEADER_MASK == 0x0107003a || tag & TYPE_HEADER_MASK == 0x4107003a {
+        (
+            width(&[bounds(view, view.pointer_required(key + 56)?, env)?])?,
+            tag >> 28 & 1 != 0,
+        )
+    } else if matches!(tag & TYPE_HEADER_MASK, 0x410f003a | 0x010f003a | 0x020f003a) {
+        let slot = if tag & TYPE_HEADER_MASK == 0x020f003a {
+            64
+        } else {
+            56
+        };
+        let target = view.pointer_required(key + slot)?;
+        let (category, size, shape) = packed_type(view, target, 0, env)?;
+        let length = size * width(&shape)?;
+        let signed = if category == "enum" {
+            let (view, ty, _) = definition(view, target, env.unit, env)?;
+            enum_signed(&view, ty)?
+        } else {
+            false
+        };
+        (length, signed)
+    } else {
+        let width = match dtype {
+            1 | 3 | 12 => 32,
+            7 | 8 => 1,
+            _ => return Err(invalid("Unsupported KDB integer parameter type")),
+        };
+        (width, width == 32 && tag & 0x20000000 == 0)
+    };
+    if !(1..=32).contains(&width) {
+        return Err(invalid("KDB integer parameter width exceeds bounds"));
+    }
+    let payload = match entry {
+        Some(entry) => {
+            if entry.flags != 1 || entry.aux != 0 || entry.trailer != 0 {
+                return Err(invalid("Invalid KDB integer parameter flags"));
+            }
+            match entry.value {
+                ParameterValue::Integer(number) if matches!(entry.kind, 1 | 0x1000001) => {
+                    number as i64
+                }
+                ParameterValue::Text(bits)
+                    if matches!(entry.kind, 5 | 0x1000005) && bits.len() == width =>
+                {
+                    i64::from_str_radix(&bits, 2)
+                        .map_err(|_| invalid("Unknown bits in KDB integer parameter"))?
+                }
+                _ => return Err(invalid("Unsupported KDB integer parameter entry")),
+            }
+        }
+        None => integer(view, view.pointer_required(key + 48)?, depth + 1, env)?.0,
+    };
+    Ok((cast_width(payload, signed, width), signed, width))
 }
 
 fn integer(view: &View, key: u64, depth: usize, env: &mut Environment) -> io::Result<(i64, bool)> {
@@ -713,72 +944,8 @@ fn integer(view: &View, key: u64, depth: usize, env: &mut Environment) -> io::Re
         return Ok(value);
     }
     if matches!(tag & 255, 57 | 58) {
-        let dtype = tag >> 16 & 255;
-        let name = view.string(view.pointer_required(key + 32)?)?;
-        let entry = env.entry(view, key, name)?;
-        let is_untyped_bits = tag & TYPE_HEADER_MASK == 0x40010039
-            && entry
-                .as_ref()
-                .is_some_and(|entry| matches!(entry.kind, 5 | 0x1000005));
-        let (width, signed) = if is_untyped_bits {
-            let entry = entry.as_ref().unwrap();
-            let ParameterValue::Text(bits) = &entry.value else {
-                return Err(invalid("Invalid untyped KDB bit parameter"));
-            };
-            (bits.len(), entry.kind >> 24 != 0)
-        } else if tag & TYPE_HEADER_MASK == 0x0107003a || tag & TYPE_HEADER_MASK == 0x4107003a {
-            (
-                width(&[bounds(view, view.pointer_required(key + 56)?, env)?])?,
-                tag >> 28 & 1 != 0,
-            )
-        } else if matches!(tag & TYPE_HEADER_MASK, 0x410f003a | 0x010f003a | 0x020f003a) {
-            let slot = if tag & TYPE_HEADER_MASK == 0x020f003a {
-                64
-            } else {
-                56
-            };
-            let target = view.pointer_required(key + slot)?;
-            let (category, size, shape) = packed_type(view, target, 0, env)?;
-            let length = size * width(&shape)?;
-            let signed = if category == "enum" {
-                let (view, ty, _) = definition(view, target, env.unit, env)?;
-                enum_signed(&view, ty)?
-            } else {
-                false
-            };
-            (length, signed)
-        } else {
-            let width = match dtype {
-                1 | 12 => 32,
-                7 | 8 => 1,
-                _ => return Err(invalid("Unsupported KDB integer parameter type")),
-            };
-            (width, width == 32 && tag & 0x20000000 == 0)
-        };
-        if !(1..=32).contains(&width) {
-            return Err(invalid("KDB integer parameter width exceeds bounds"));
-        }
-        let payload = match entry {
-            Some(entry) => {
-                if entry.flags != 1 || entry.aux != 0 || entry.trailer != 0 {
-                    return Err(invalid("Invalid KDB integer parameter flags"));
-                }
-                match entry.value {
-                    ParameterValue::Integer(number) if matches!(entry.kind, 1 | 0x1000001) => {
-                        number as i64
-                    }
-                    ParameterValue::Text(bits)
-                        if matches!(entry.kind, 5 | 0x1000005) && bits.len() == width =>
-                    {
-                        i64::from_str_radix(&bits, 2)
-                            .map_err(|_| invalid("Unknown bits in KDB integer parameter"))?
-                    }
-                    _ => return Err(invalid("Unsupported KDB integer parameter entry")),
-                }
-            }
-            None => integer(view, view.pointer_required(key + 48)?, depth + 1, env)?.0,
-        };
-        return Ok((cast_width(payload, signed, width), signed));
+        return parameter_integer(view, key, tag, depth, env)
+            .map(|(value, signed, _)| (value, signed));
     }
     if let Some(radix) = match tag & !0x10010000 {
         0x020228 => Some(2),

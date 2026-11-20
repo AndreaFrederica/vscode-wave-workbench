@@ -13,7 +13,7 @@ use super::{
 use crate::fsdb_container::Container;
 pub use declarations::Declaration;
 pub use events::Events;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom},
@@ -67,6 +67,7 @@ pub struct Session {
     file: FileReader,
     pub declarations: Vec<Declaration>,
     widths: HashMap<u32, (usize, bool)>,
+    real_signals: HashSet<u32>,
     events: events::EventReader,
     connections: Option<connections::Connections>,
 }
@@ -86,24 +87,34 @@ impl Session {
         } else {
             declarations::declarations(&mut file)?
         };
+        let real_signals: HashSet<_> = declarations.iter().chain(&hidden)
+            .filter(|row| row.real)
+            .map(|row| row.native_id)
+            .collect();
         let mut widths = HashMap::new();
         for row in declarations.iter().chain(&hidden) {
             let entry = widths
                 .entry(row.native_id)
-                .or_insert((row.width as usize, row.supported));
+                .or_insert((row.width as usize, row.supported && !row.real));
             if entry.0 != row.width as usize {
                 return Err(invalid("FSDB aliases of the same ID have different widths"));
             }
-            entry.1 &= row.supported;
+            if row.real != real_signals.contains(&row.native_id) {
+                return Err(invalid("FSDB aliases of the same ID have different encodings"));
+            }
+            entry.1 &= row.supported && !row.real;
         }
         for row in &mut declarations {
-            row.supported = widths[&row.native_id].1;
+            if !row.real {
+                row.supported = widths[&row.native_id].1;
+            }
         }
         let events = events::EventReader::open(&mut file)?;
         Ok(Self {
             file,
             declarations,
             widths,
+            real_signals,
             events,
             connections: None,
         })
@@ -127,11 +138,15 @@ impl Session {
             .widths
             .get(&id)
             .ok_or_else(|| invalid("Unknown FSDB signal ID"))?;
-        if !supported {
+        let real = self.real_signals.contains(&id);
+        if !supported && !real {
             return Err(invalid("Unsupported FSDB signal encoding"));
         }
         let events = if self.events.indexed(id) {
-            std::sync::Arc::new(self.events.events(&mut self.file, id, width, start, end)?)
+            let encoding = if real { events::Encoding::Real } else { events::Encoding::Digital(width) };
+            std::sync::Arc::new(self.events.events(&mut self.file, id, encoding, start, end)?)
+        } else if real {
+            return Err(invalid("FSDB real signal has no indexed samples"));
         } else {
             if self.connections.is_none() {
                 self.connections = Some(connections::Connections::open(&mut self.file)?);

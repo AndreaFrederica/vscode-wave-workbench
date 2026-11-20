@@ -38,6 +38,12 @@ impl Field {
 }
 
 pub(super) fn fields(view: &View, ty: u64, env: &mut Environment) -> io::Result<Vec<Field>> {
+    layout(view, ty, env, true)
+}
+
+pub(super) fn layout(
+    view: &View, ty: u64, env: &mut Environment, integers_only: bool,
+) -> io::Result<Vec<Field>> {
     if view.uint(ty, 4)? & TYPE_HEADER_MASK != 0x20000048 {
         return Err(invalid("KDB aggregate type is not a packed structure"));
     }
@@ -69,7 +75,7 @@ pub(super) fn fields(view: &View, ty: u64, env: &mut Environment) -> io::Result<
                 let signed = if kind == "enum" {
                     let (target, key, _) = definition(view, ty, env.unit, env)?;
                     enum_signed(&target, key)?
-                } else if kind.is_empty() && !shape.is_empty() {
+                } else if !integers_only || kind.is_empty() && !shape.is_empty() {
                     false
                 } else {
                     return Err(invalid("Unsupported KDB integer structure field type"));
@@ -78,7 +84,7 @@ pub(super) fn fields(view: &View, ty: u64, env: &mut Environment) -> io::Result<
             }
             _ => return Err(invalid("Unsupported KDB integer structure field type")),
         };
-        if !(1..=32).contains(&size) {
+        if !(1..=if integers_only { 32 } else { 4096 }).contains(&size) {
             return Err(invalid("KDB integer structure field width exceeds bounds"));
         }
         fields.push(Field {

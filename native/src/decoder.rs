@@ -8,7 +8,7 @@ use std::io::{self, BufRead, Read, Write};
 use std::rc::Rc;
 use std::time::Instant;
 
-const EVENT_BATCH_VERSION: u32 = 1;
+const EVENT_BATCH_VERSION: u32 = 2;
 const MAX_EVENTS: usize = 4096;
 const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -26,6 +26,7 @@ struct BatchHeader {
     start: String,
     end: String,
     initial: Vec<Option<String>>,
+    real_inputs: Option<Vec<bool>>,
     count: usize,
     time_encoding: TimeEncoding,
     time_bytes: usize,
@@ -37,6 +38,10 @@ impl BatchHeader {
         if self.version != EVENT_BATCH_VERSION
             || self.count > MAX_EVENTS
             || self.initial.len() > 64
+            || self
+                .real_inputs
+                .as_ref()
+                .is_some_and(|values| values.len() != self.initial.len())
             || self.start.len() > 80
             || self.end.len() > 80
             || self.value_bytes > MAX_VALUE_BYTES
@@ -234,10 +239,33 @@ impl Runtime {
             let event = self.lua.create_table()?;
             event.set("tick", tick.as_ref())?;
             event.set("input", input)?;
-            event.set(
-                "value",
-                std::str::from_utf8(value).map_err(mlua::Error::external)?,
-            )?;
+            if header
+                .real_inputs
+                .as_ref()
+                .is_some_and(|inputs| inputs[input as usize])
+            {
+                let number = f64::from_le_bytes(
+                    value
+                        .try_into()
+                        .map_err(|_| mlua::Error::runtime("Invalid real decoder sample size"))?,
+                );
+                event.set(
+                    "value",
+                    if number.is_finite() {
+                        number.to_string()
+                    } else {
+                        "NaN".into()
+                    },
+                )?;
+                if number.is_finite() {
+                    event.set("real", number)?;
+                }
+            } else {
+                event.set(
+                    "value",
+                    std::str::from_utf8(value).map_err(mlua::Error::external)?,
+                )?;
+            }
             events.set(index + 1, event)?;
         }
         if !times.is_empty() {
@@ -247,6 +275,24 @@ impl Runtime {
         batch.set("start", header.start)?;
         batch.set("end", header.end)?;
         batch.set("initial", self.lua.to_value(&header.initial)?)?;
+        if let Some(inputs) = header.real_inputs {
+            let initial_real: Vec<_> = header
+                .initial
+                .iter()
+                .zip(inputs)
+                .map(|(value, real)| {
+                    if real {
+                        value
+                            .as_deref()
+                            .and_then(|value| value.parse::<f64>().ok())
+                            .filter(|value| value.is_finite())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            batch.set("initialReal", self.lua.to_value(&initial_real)?)?;
+        }
         batch.set("events", events)?;
         let started = self.measure.then(Instant::now);
         self.module.get::<Function>("decode")?.call::<()>((

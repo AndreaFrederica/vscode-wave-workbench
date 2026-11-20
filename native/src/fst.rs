@@ -9,7 +9,7 @@ use std::{collections::HashMap, fs::File, io::BufReader, path::Path};
 
 pub struct Fst {
     reader: FstReader<BufReader<File>>,
-    widths: HashMap<usize, usize>,
+    widths: HashMap<usize, Option<usize>>,
     pub signals: Vec<Signal>,
     pub start: u64,
     pub end: u64,
@@ -59,11 +59,12 @@ impl Fst {
                     tpe,
                     ..
                 } => {
-                    let supported = !tpe.is_real()
-                        && !matches!(tpe, FstVarType::GenericString | FstVarType::Port)
-                        && (1..=65536).contains(&length);
+                    let real = tpe.is_real();
+                    let supported = real
+                        || (!matches!(tpe, FstVarType::GenericString | FstVarType::Port)
+                            && (1..=65536).contains(&length));
                     if supported {
-                        widths.insert(handle.get_index(), length as usize);
+                        widths.insert(handle.get_index(), (!real).then_some(length as usize));
                     }
                     signals.push(Signal {
                         id: handle.get_index().to_string(),
@@ -75,6 +76,7 @@ impl Fst {
                         },
                         width: length.max(1),
                         supported,
+                        real,
                     });
                 }
                 _ => {}
@@ -128,7 +130,7 @@ impl Fst {
             if !positions.contains_key(&handle.get_index()) {
                 positions.insert(handle.get_index(), (output.len(), width));
                 output.push((Events::new(), false));
-                event_bytes += width + 32;
+                event_bytes += width.unwrap_or(32) + 32;
             }
             handles.push(handle);
         }
@@ -154,12 +156,6 @@ impl Fst {
             if *truncated {
                 return Ok(());
             }
-            let FstSignalValue::String(bits) = value else {
-                return Err("Invalid digital value in FST");
-            };
-            if bits.len() != width {
-                return Err("Digital value width differs from FST signal declaration");
-            }
             let replace = events.last().is_some_and(|(last, _)| {
                 if preserve_same_tick {
                     tick < start
@@ -172,7 +168,7 @@ impl Fst {
                 remaining -= 1;
                 return if remaining == 0 { Err("") } else { Ok(()) };
             }
-            let value = bit_string(bits);
+            let value = sample_string(value, width)?;
             if replace {
                 *events.last_mut().unwrap() = (tick, value);
             } else {
@@ -217,14 +213,13 @@ impl Fst {
             );
             self.reader
                 .read_signals(&filter, |tick, handle, value| {
-                    if let FstSignalValue::String(bits) = value {
-                        seeds.insert(handle.get_index(), (tick, bit_string(bits)));
-                    }
-                    Ok::<_, ()>(())
+                    let sample = sample_string(value, positions[&handle.get_index()].1)?;
+                    seeds.insert(handle.get_index(), (tick, sample));
+                    Ok::<_, &str>(())
                 })
                 .map_err(|error| match error {
                     ReadSignalsError::ReadError(error) => error.to_string(),
-                    ReadSignalsError::CallbackError(()) => unreachable!(),
+                    ReadSignalsError::CallbackError(error) => error.into(),
                 })?;
             missing.retain(|handle| !seeds.contains_key(handle));
             if previous == self.start {
@@ -249,6 +244,14 @@ impl Fst {
                 .map(|id| output[positions[&id.get_index()].0].clone())
                 .collect())
         }
+    }
+}
+
+fn sample_string(value: FstSignalValue, width: Option<usize>) -> Result<String, &'static str> {
+    match (value, width) {
+        (FstSignalValue::Real(value), None) => Ok(format!("{value:e}")),
+        (FstSignalValue::String(bits), Some(width)) if bits.len() == width => Ok(bit_string(bits)),
+        _ => Err("FST sample does not match its signal declaration"),
     }
 }
 

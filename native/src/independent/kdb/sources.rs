@@ -4,7 +4,7 @@ use super::archive::{file_bytes, libraries, word};
 use crate::independent::bytes::{invalid, Cursor, Input};
 use std::{collections::HashMap, io, path::Path};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub(super) struct Position {
     pub file: String,
     pub line: u32,

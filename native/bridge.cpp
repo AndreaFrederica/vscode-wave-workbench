@@ -11,6 +11,11 @@
 #include <cstdlib>
 #include <exception>
 #include <cmath>
+#include <cstring>
+#include <iomanip>
+#include <limits>
+#include <locale>
+#include <sstream>
 using SigCB = void (*)(void*, uint32_t, const char*, const char*, uint32_t, int);
 using EventCB = int (*)(void*, uint64_t, const char*);
 struct Reader {
@@ -28,8 +33,10 @@ static bool_T tree(fsdbTreeCBType type, void* user, void* data) {
         std::string scope;
         for (auto& s : r->scopes) { if (!scope.empty()) scope += "."; scope += s; }
         uint32_t width = std::abs(v->lbitnum - v->rbitnum) + 1;
-        bool supported = v->bytes_per_bit == FSDB_BYTES_PER_BIT_1B && width <= 65536;
-        r->cb(r->user, v->u.idcode, scope.c_str(), v->name, width, supported);
+        const bool real = v->type == FSDB_VT_VCD_REAL &&
+            (v->bytes_per_bit == FSDB_BYTES_PER_BIT_4B || v->bytes_per_bit == FSDB_BYTES_PER_BIT_8B);
+        const bool digital = v->bytes_per_bit == FSDB_BYTES_PER_BIT_1B && width <= 65536;
+        r->cb(r->user, v->u.idcode, scope.c_str(), v->name, width, real ? 2 : digital ? 1 : 0);
     }
     return 1;
 }
@@ -68,7 +75,12 @@ int wave_query(void* ptr, uint32_t id, uint64_t start, uint64_t end, EventCB cb,
         if (o->ffrLoadSignals() != FSDB_RC_SUCCESS) return -1;
         auto h = o->ffrCreateVCTraverseHandle(id);
         if (!h) return -1;
-        if (h->ffrGetBytesPerBit() != FSDB_BYTES_PER_BIT_1B || h->ffrGetBitSize() > 65536) { h->ffrFree(); return -2; }
+        const auto bytes = h->ffrGetBytesPerBit();
+        const bool real = h->ffrGetVarType() == FSDB_VT_VCD_REAL &&
+            (bytes == FSDB_BYTES_PER_BIT_4B || bytes == FSDB_BYTES_PER_BIT_8B);
+        if (!real && (bytes != FSDB_BYTES_PER_BIT_1B || h->ffrGetBitSize() > 65536)) {
+            h->ffrFree(); o->ffrUnloadSignals(); return -2;
+        }
         fsdbTag64 t = {}; t.H = start >> 32; t.L = start;
         if (h->ffrHasIncoreVC() && h->ffrGotoXTag(&t) == FSDB_RC_SUCCESS) {
             do {
@@ -76,6 +88,21 @@ int wave_query(void* ptr, uint32_t id, uint64_t start, uint64_t end, EventCB cb,
                 if (h->ffrGetXTag(&t) != FSDB_RC_SUCCESS || h->ffrGetVC(&raw) != FSDB_RC_SUCCESS || !raw) { result = -1; break; }
                 uint64_t time = (uint64_t(t.H) << 32) | t.L;
                 if (time > end) break;
+                if (real) {
+                    double number;
+                    if (bytes == FSDB_BYTES_PER_BIT_4B) {
+                        float sample;
+                        std::memcpy(&sample, raw, sizeof(sample));
+                        number = sample;
+                    } else {
+                        std::memcpy(&number, raw, sizeof(number));
+                    }
+                    std::ostringstream text;
+                    text.imbue(std::locale::classic());
+                    text << std::setprecision(std::numeric_limits<double>::max_digits10) << number;
+                    if (!cb(user, time, text.str().c_str())) { result = 1; break; }
+                    continue;
+                }
                 std::string value(h->ffrGetBitSize(), 'x');
                 for (size_t i = 0; i < value.size(); ++i) {
                     switch(raw[i]) { case FSDB_BT_VCD_0: value[i]='0'; break; case FSDB_BT_VCD_1: value[i]='1'; break; case FSDB_BT_VCD_Z: value[i]='z'; break; default: break; }

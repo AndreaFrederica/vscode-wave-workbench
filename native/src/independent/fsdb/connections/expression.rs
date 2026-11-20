@@ -94,7 +94,7 @@ impl Node {
         *budget -= 1;
         let opcode = input.byte()?;
         let (operation, count) = match opcode {
-            0..=3 => return Ok(Self::Literal(vec![b"01xz"[opcode as usize]])),
+            0..=3 => return Ok(Self::Literal(vec![BITS[opcode as usize]])),
             0xc0..=0xff => {
                 let mut slot = usize::from(opcode - 0xc0);
                 if opcode >= 0xe0 {
@@ -619,6 +619,7 @@ impl Text {
                     matches!(operands.as_slice(), [arg, 0] if *arg >= 2 && (*arg - 2) < arguments as i64)
                 }
                 "OPT_CONST" | "CONCATENATE" => operands.len() == 1,
+                "OPT_CONST_4ST" => operands.len() == 2,
                 "CONST" => operands.len() >= 2,
                 "MULTI_CONCATENATE" => operands.len() == 2,
                 "SLICE" => operands == [1],
@@ -626,7 +627,7 @@ impl Text {
                 "M_EQU" | "M_NEQU" | "EQU" | "M_LT" | "M_GT" | "M_LE" | "M_GE" | "SM_GT"
                 | "SHIFT_L" | "SHIFT_R" | "SASHIFT_R" | "ADD" | "SUBTRACT" | "SMULTIPLY"
                 | "RET" | "AND" | "OR" | "LOGAND" | "LOGOR" | "XOR" | "XNOR" | "NOT"
-                | "XOR_REDUCE" | "PAD" => operands.is_empty(),
+                | "XOR_REDUCE" | "PAD" | "FOURTOTWOSTATE" => operands.is_empty(),
                 _ => false,
             };
             if !valid || instructions.len() >= 100_000 {
@@ -668,7 +669,12 @@ impl Text {
             let value = match op {
                 "CALL_ARG_VAL" => fit(args[args_for_op[0] as usize - 2].to_vec(), width, b'0'),
                 "OPT_CONST" => encode(BigInt::from(args_for_op[0]), width),
+                "OPT_CONST_4ST" => literal_words(args_for_op, width)?,
                 "CONST" => literal(args_for_op, width)?,
+                "FOURTOTWOSTATE" => fit(pop()?, width, b'0')
+                    .into_iter()
+                    .map(|bit| if bit == b'1' { b'1' } else { b'0' })
+                    .collect(),
                 "NOT" => invert(fit(pop()?, width, b'0')),
                 "XOR_REDUCE" => vec![parity(&pop()?)],
                 "PAD" => fit(pop()?, width, b'0'),
@@ -769,7 +775,10 @@ fn literal(fields: &[i64], width: usize) -> io::Result<Vec<u8>> {
     if fields[1] != 0 || fields[0] != fields.len() as i64 - 2 || fields.len() % 2 != 0 {
         return Err(invalid("Invalid FSDB text constant layout"));
     }
-    let words = &fields[2..];
+    literal_words(&fields[2..], width)
+}
+
+fn literal_words(words: &[i64], width: usize) -> io::Result<Vec<u8>> {
     if words
         .iter()
         .any(|&word| !(i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(&word))

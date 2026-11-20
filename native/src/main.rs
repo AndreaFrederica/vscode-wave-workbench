@@ -57,6 +57,7 @@ mod native {
                 name: CStr::from_ptr(name).to_string_lossy().into_owned(),
                 width,
                 supported: supported != 0,
+                real: supported == 2,
             });
         }
     }
@@ -158,6 +159,7 @@ impl IndependentFsdb {
                 name: row.name.clone(),
                 width: row.width,
                 supported: row.supported,
+                real: row.real,
             })
             .collect();
         Ok(Self {
@@ -219,7 +221,15 @@ impl Database {
             #[cfg(fsdb)]
             Self::Fsdb(v) => (v.start, v.end, v.scale.clone(), "native-fsdb"),
         };
-        json!({"signals":self.signals().iter().take(1500).collect::<Vec<_>>(),"total":self.signals().len(),"start":start.to_string(),"end":end.to_string(),"scale":scale,"backend":backend})
+        json!({
+            "signals": self.signals().iter().take(1500).collect::<Vec<_>>(),
+            "total": self.signals().len(),
+            "start": start.to_string(),
+            "end": end.to_string(),
+            "scale": scale,
+            "backend": backend,
+            "supportsOrderedHistory": matches!(self, Self::Vcd(_) | Self::Fst(_, _)),
+        })
     }
     fn read(&self, id: &str, start: u64, end: u64, limit: usize) -> Result<(Events, bool), String> {
         match self {
@@ -385,7 +395,7 @@ impl Store {
             if !identity_ok {
                 return Err("Virtual source identity mismatch".into());
             }
-            if !s.supported {
+            if !s.supported || s.real {
                 return Err("Unsupported virtual operand".into());
             }
             if let Some(bit) = input.bit_offset {
@@ -429,6 +439,7 @@ impl Store {
             },
             width,
             supported: true,
+            real: false,
         };
         let v = Virtual {
             signal,
@@ -551,6 +562,9 @@ impl Store {
             }
             for name in keys {
                 let rows = matches.entry(name).or_default();
+                if rows.contains(&s) {
+                    continue;
+                }
                 if rows.len() >= 200 || count >= 100000 {
                     truncated = true;
                     continue;
@@ -637,6 +651,7 @@ fn run(
     r: Request,
     db: &mut Option<Store>,
     independent_kdb: Option<&mut Option<wavebench_reader::independent::kdb::Session>>,
+    #[cfg(fsdb)] native_kdb: &mut kdb::NativeKdb,
 ) -> Result<Value, String> {
     let independent = independent_kdb.is_some();
     match r.method.as_str() {
@@ -650,7 +665,7 @@ fn run(
                 let opened = wavebench_reader::independent::kdb::Session::open(&path)
                     .map_err(|err| err.to_string())?;
                 *session = Some(opened);
-                return Ok(json!({"attached":true, "backend":"rust-independent-kdb"}));
+                return Ok(json!({"attached":true, "backend":"rust-independent-kdb", "portLinks":true, "interfaceMembers":true, "genericInterfaceTypes":true}));
             }
             let query = if method == "kdbResolve" {
                 r.query.ok_or("Missing KDB hierarchy")?
@@ -664,17 +679,25 @@ fn run(
                 .map_err(|err| err.to_string())
         }
         #[cfg(fsdb)]
-        "kdbOpen" => kdb::open(&r.path.ok_or("Missing KDB directory")?),
+        "kdbOpen" => native_kdb.open(&r.path.ok_or("Missing KDB directory")?),
         #[cfg(fsdb)]
         "kdbInstances" => kdb::lookup(&r.query.unwrap_or_default(), "instances"),
         #[cfg(fsdb)]
+        "kdbModuleSources" => kdb::module_sources(),
+        #[cfg(fsdb)]
         "kdbResolve" => kdb::lookup(&r.query.ok_or("Missing hierarchy")?, "resolve"),
+        #[cfg(fsdb)]
+        "kdbInterfaceMember" => kdb::lookup(&r.query.ok_or("Missing interface member")?, "interfaceMember"),
+        #[cfg(fsdb)]
+        "kdbInterfaceUsers" => kdb::lookup(&r.query.ok_or("Missing interface member")?, "interfaceUsers"),
         #[cfg(fsdb)]
         "kdbParent" => kdb::lookup(&r.query.unwrap_or_default(), "parent"),
         #[cfg(fsdb)]
         "kdbScopes" => kdb::lookup(&r.query.unwrap_or_default(), "scopes"),
         #[cfg(fsdb)]
         "kdbChildren" => kdb::lookup(&r.query.unwrap_or_default(), "children"),
+        #[cfg(fsdb)]
+        "kdbPortLinks" => native_kdb.ports(&r.query.ok_or("Missing module instance")?),
         "open" => {
             let new = Database::open(&r.path.ok_or("Missing path")?, independent)?;
             let result = new.meta();
@@ -807,6 +830,8 @@ fn main() {
         .is_some_and(|arg| arg == "--independent");
     let mut db = None;
     let mut kdb = None;
+    #[cfg(fsdb)]
+    let mut native_kdb = kdb::NativeKdb::default();
     let stdin = io::stdin();
     let mut stdout = io::BufWriter::new(io::stdout().lock());
     for line in stdin.lock().lines() {
@@ -814,7 +839,13 @@ fn main() {
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(r) => {
                 let id = r.id.clone();
-                match run(r, &mut db, independent.then_some(&mut kdb)) {
+                match run(
+                    r,
+                    &mut db,
+                    independent.then_some(&mut kdb),
+                    #[cfg(fsdb)]
+                    &mut native_kdb,
+                ) {
                     Ok(result) => json!({"id":id,"result":result}),
                     Err(e) => json!({"id":id,"error":e}),
                 }

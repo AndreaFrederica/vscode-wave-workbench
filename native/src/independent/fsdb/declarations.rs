@@ -23,6 +23,8 @@ pub struct Declaration {
     pub name: String,
     pub width: u32,
     pub supported: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub real: bool,
 }
 
 struct Scope {
@@ -40,7 +42,7 @@ pub(super) fn declarations(
     file: &mut FileReader,
 ) -> io::Result<(Vec<Declaration>, Vec<Declaration>)> {
     let templates = Templates::open(file)?;
-    let variables = variable_groups(file)?;
+    let variables = variable_groups(file, &templates)?;
     let mut declarations = Vec::new();
     let mut hidden_declarations = Vec::new();
     let mut referenced = HashSet::new();
@@ -91,6 +93,7 @@ pub(super) fn declarations(
                     width: u32::try_from(atom.width)
                         .map_err(|_| invalid("FSDB declared width exceeds u32"))?,
                     supported: atom.supported && (1..=65536).contains(&atom.width),
+                    real: atom.real,
                 };
                 if hidden {
                     hidden_declarations.push(declaration);
@@ -127,14 +130,30 @@ fn scope_snapshot(
         let start = cursor.pos as u64;
         let code = cursor.byte()?;
         match code {
-            0 | 0x80 | 0xfa | 0xfb => {
+            0 | 0x1f | 0x21 | 0x22 | 0x80 | 0xfa | 0xfb => {
                 let parent = stack.last().map(|&index| &rows[index]);
-                let (name, template) = if matches!(code, 0 | 0x80) {
+                let (name, template) = if matches!(code, 0 | 0x1f | 0x21 | 0x22 | 0x80) {
                     if code == 0x80 {
                         cursor.expect(0)?;
                     }
                     let name = cursor.string()?;
-                    cursor.string()?; // Definition name.
+                    let definition = cursor.string()?;
+                    if code == 0x1f
+                        && (parent.is_none()
+                            || !name
+                                .strip_suffix(']')
+                                .and_then(|name| name.rsplit_once('['))
+                                .is_some_and(|(base, index)| {
+                                    !base.is_empty() && index.parse::<i32>().is_ok()
+                                }))
+                    {
+                        return Err(invalid("Invalid FSDB interface array element scope"));
+                    }
+                    if matches!(code, 0x21 | 0x22)
+                        && (parent.is_none() || !definition.contains("/."))
+                    {
+                        return Err(invalid("Invalid FSDB interface reference scope"));
+                    }
                     cursor.byte()?; // Scope kind.
                     (name, None)
                 } else {
@@ -310,7 +329,10 @@ fn read_id(input: &mut impl Input, descriptor: u8, previous: u32) -> io::Result<
     }
 }
 
-fn variable_groups(file: &mut FileReader) -> io::Result<HashMap<u32, Vec<Variable>>> {
+fn variable_groups(
+    file: &mut FileReader,
+    templates: &Templates,
+) -> io::Result<HashMap<u32, Vec<Variable>>> {
     let blocks: Vec<_> = file
         .container
         .snapshots
@@ -362,9 +384,28 @@ fn variable_groups(file: &mut FileReader) -> io::Result<HashMap<u32, Vec<Variabl
                 let tag = input.byte()?;
                 let (id, variable) = match tag {
                     0xff => break,
+                    0xd8 => {
+                        let name = input.string()?;
+                        input.expect(0x10)?;
+                        let id = input.uint(2)? as u32;
+                        let template = input.uint(2)? as u32;
+                        if input.uint(2)? != 0 {
+                            return Err(invalid("Unsupported flags in FSDB selected variable"));
+                        }
+                        let atom = templates.selected_atom(name, template)?;
+                        (
+                            id,
+                            Variable::Literal {
+                                id,
+                                atom,
+                                hidden: false,
+                            },
+                        )
+                    }
                     0xd5 => {
                         let descriptor = input.byte()?;
-                        if descriptor & 15 != 0 {
+                        // Flag 0x02 preserves the ID and template index layout.
+                        if descriptor & 0x0d != 0 {
                             return Err(invalid("Unrecognized FSDB variable index descriptor"));
                         }
                         let id = read_id(&mut input, descriptor, previous)?;
@@ -400,7 +441,8 @@ fn variable_groups(file: &mut FileReader) -> io::Result<HashMap<u32, Vec<Variabl
                         let atom = Atom {
                             name,
                             width: left.abs_diff(right) as usize + 1,
-                            supported: !matches!(tag, 3 | 63),
+                            supported: tag != 63,
+                            real: tag == 3,
                         };
                         (
                             id,

@@ -40,6 +40,7 @@ pub(super) struct Atom {
     pub(super) name: String,
     pub(super) width: usize,
     pub(super) supported: bool,
+    pub(super) real: bool,
 }
 
 pub(super) struct Templates(HashMap<u32, Template>);
@@ -47,6 +48,9 @@ pub(super) struct Templates(HashMap<u32, Template>);
 impl Templates {
     pub(super) fn open(file: &mut FileReader) -> io::Result<Self> {
         let range = file.container.dictionary_extensions.clone();
+        if range.is_empty() {
+            return Ok(Self(HashMap::new()));
+        }
         let ext = file.read(range.start, (range.end - range.start) as usize)?;
         let mut input = Cursor::new(&ext);
         if input.uint(4)? as usize != input.remaining().len() {
@@ -264,6 +268,25 @@ impl Templates {
         Ok(atoms)
     }
 
+    pub(super) fn selected_atom(&self, name: String, key: u32) -> io::Result<Atom> {
+        if key == 0 {
+            return Ok(Atom {
+                name,
+                width: 1,
+                supported: true,
+                real: false,
+            });
+        }
+        if !matches!(self.get(key)?, Template::Packed(_)) {
+            return Err(invalid("Unsupported type in FSDB selected variable"));
+        }
+        let mut atoms = Vec::new();
+        self.expand(&name, ValueType::Template(key), &mut Vec::new(), &mut atoms)?;
+        atoms
+            .pop()
+            .ok_or_else(|| invalid("Missing FSDB selected variable type"))
+    }
+
     fn expand(
         &self,
         name: &str,
@@ -291,7 +314,8 @@ impl Templates {
                 atoms.push(Atom {
                     name,
                     width,
-                    supported,
+                    supported: supported || dtype == 16,
+                    real: dtype == 16,
                 });
                 return Ok(());
             }
@@ -310,6 +334,7 @@ impl Templates {
                     name,
                     width: range_width(ranges, 1)?,
                     supported: true,
+                real: false,
                 });
             }
             Template::Enum(value) => self.expand(name, *value, active, atoms)?,

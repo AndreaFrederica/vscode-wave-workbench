@@ -5,6 +5,7 @@ mod interfaces;
 mod lexical;
 mod objects;
 mod parameters;
+mod ports;
 mod sdb;
 mod sources;
 mod values;
@@ -15,6 +16,7 @@ use sdb::{Instance, Master, Sdb};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sources::{Position, Sources};
+pub use ports::{InputPortSite, InputPortSource};
 use std::{
     collections::{HashMap, HashSet},
     io,
@@ -34,6 +36,22 @@ struct Location {
     definition_file: String,
     definition_line: u32,
     instance: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parameter_value: Option<IntegerParameter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interface_range: Option<[i32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interface_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interface_two_state: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interface_declaration: Option<Position>,
+}
+
+#[derive(Clone, Serialize)]
+struct IntegerParameter {
+    bits: String,
+    signed: bool,
 }
 
 #[derive(Clone)]
@@ -46,8 +64,16 @@ struct Node {
     source: u64,
     variant: (u32, u64),
     instance: Option<u32>,
+    array_element: Option<ArrayElement>,
     position: Option<Position>,
     children: Vec<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct ArrayElement {
+    index: i32,
+    ordinal: u64,
+    count: u64,
 }
 
 impl Node {
@@ -65,6 +91,11 @@ impl Node {
             definition_file: String::new(),
             definition_line: 0,
             instance: self.fullname.clone(),
+            parameter_value: None,
+            interface_range: None,
+            interface_width: None,
+            interface_two_state: None,
+            interface_declaration: None,
         }
     }
 }
@@ -130,6 +161,21 @@ impl Session {
             "kdbChildren" => Ok(json!(self.children(query, false)?)),
             "kdbScopes" => Ok(json!(self.children(query, true)?)),
             "kdbResolve" => Ok(json!([self.resolve(query)?])),
+            "kdbInterfaceMember" => Ok(json!(self.interface_member(query)?)),
+            "kdbInterfaceUsers" => Ok(json!(self.interface_users(query)?)),
+            "kdbGenericInterfaceTypes" => Ok(json!(self.generic_interface_types(query)?)),
+            "kdbPortLinks" => Ok(json!(self.port_links(query)?)),
+            "kdbModuleSources" => {
+                let mut files: Vec<_> = self
+                    .definitions
+                    .keys()
+                    .filter_map(|module| self.sources.lookup(module))
+                    .map(|source| &source.file)
+                    .collect();
+                files.sort_unstable();
+                files.dedup();
+                Ok(json!(files))
+            }
             "kdbParent" => {
                 if let Ok(index) = self.node(query) {
                     return Ok(match self.nodes[index].parent {
@@ -212,6 +258,7 @@ impl Session {
                 source: child.key,
                 variant: (0, 0),
                 instance: None,
+                array_element: None,
                 position: Some(child.position),
                 children: Vec::new(),
             })?;
@@ -315,7 +362,7 @@ impl Session {
     fn context(&self, mut index: usize) -> Option<&Node> {
         loop {
             let node = &self.nodes[index];
-            if node.kind == "npiModule" {
+            if matches!(node.kind, "npiModule" | "npiInterface") {
                 return Some(node);
             }
             index = node.parent?;
@@ -339,6 +386,11 @@ impl Session {
             definition_file: definition.map_or(String::new(), |position| position.file.clone()),
             definition_line: definition.map_or(0, |position| position.line),
             instance: context.map_or(String::new(), |row| row.fullname.clone()),
+            parameter_value: None,
+            interface_range: None,
+            interface_width: None,
+            interface_two_state: None,
+            interface_declaration: None,
         }
     }
 
@@ -378,29 +430,46 @@ impl Session {
             .rsplit_once('.')
             .ok_or_else(|| invalid("KDB value requires a scope"))?;
         let index = self.node(owner)?;
-        let mut contexts = Vec::new();
-        let mut current = Some(index);
-        while let Some(index) = current {
-            contexts.push(&self.nodes[index]);
-            current = self.nodes[index].parent;
+        let values::ResolvedValue {
+            kind,
+            position,
+            scope,
+            ..
+        } = self.resolve_value(index, leaf)?;
+        let mut location = self.location(
+            query,
+            kind,
+            position,
+            if scope { self.context(index) } else { None },
+        );
+        if scope && self.nodes[index].kind == "npiGenScope" {
+            location.instance = self.nodes[index].fullname.clone();
         }
-        let (kind, position, scope) = self.declarations.resolve(
+        if kind == "npiParameter" {
+            location.parameter_value = self.integer_parameter(index, leaf);
+        }
+        Ok((location, scope.then_some(index)))
+    }
+
+    fn resolve_value(&mut self, index: usize, name: &str) -> io::Result<values::ResolvedValue> {
+        self.declarations.resolve(
             &mut self.objects,
             &self.sources,
-            &contexts,
+            &scope_contexts(&self.nodes, index),
             &self.packages,
-            leaf,
-        )?;
-        Ok((
-            self.location(
-                query,
-                kind,
-                position,
-                if scope { self.context(index) } else { None },
-            ),
-            scope.then_some(index),
-        ))
+            name,
+        )
     }
+}
+
+fn scope_contexts(nodes: &[Node], index: usize) -> Vec<&Node> {
+    let mut contexts = Vec::new();
+    let mut current = Some(index);
+    while let Some(index) = current {
+        contexts.push(&nodes[index]);
+        current = nodes[index].parent;
+    }
+    contexts
 }
 
 struct Hierarchy<'a> {
@@ -492,6 +561,19 @@ impl Hierarchy<'_> {
                     )))
                 }
             };
+            let array_element = if kind == "npiModule" {
+                self.sdb.array_shapes.get(&link.target).and_then(|shape| {
+                    let suffix = instance.name.strip_prefix(&shape.name)?;
+                    let element = suffix.strip_prefix('[')?.strip_suffix(']')?.parse().ok()?;
+                    Some(ArrayElement {
+                        index: element,
+                        ordinal: u64::from(shape.ordinal(element)?),
+                        count: u64::from(shape.left.abs_diff(shape.right)) + 1,
+                    })
+                })
+            } else {
+                None
+            };
             let index = session.insert(Node {
                 fullname,
                 parent,
@@ -506,6 +588,7 @@ impl Hierarchy<'_> {
                     .copied()
                     .unwrap_or_default(),
                 instance: Some(link.instance),
+                array_element,
                 position: None,
                 children: Vec::new(),
             })?;

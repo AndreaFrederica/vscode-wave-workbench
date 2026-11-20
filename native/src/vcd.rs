@@ -3,13 +3,15 @@
 use serde::Serialize;
 use std::{collections::HashMap, io::Read};
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct Signal {
     pub id: String,
     pub scope: String,
     pub name: String,
     pub width: u32,
     pub supported: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub real: bool,
 }
 pub type Events = Vec<(u64, String)>;
 #[derive(Default)]
@@ -65,7 +67,8 @@ pub fn parse_vcd(text: &str) -> Result<Vcd, String> {
                         scope: scopes.join("."),
                         name: args[3..].join(""),
                         width,
-                        supported: args[0] != "real" && args[0] != "string",
+                        supported: args[0] != "string",
+                        real: matches!(args[0], "real" | "realtime" | "shortreal" | "wreal"),
                     });
                     v.data.entry(id).or_default();
                     if v.signals.len() > 200_000 {
