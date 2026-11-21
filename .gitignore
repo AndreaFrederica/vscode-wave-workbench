@@ -19,3 +19,5 @@ dist/
 bin/verdi-sdk
 bin/tcl/
 bin/.tcl-*/
+
+__pycache__/

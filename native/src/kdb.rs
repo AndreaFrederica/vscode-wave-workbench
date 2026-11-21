@@ -28,6 +28,7 @@ type LocationCallback = extern "C" fn(
     *const c_char,
     *const i32,
     *const AliasSource,
+    *const ParameterValue,
 );
 #[repr(C)]
 struct AliasSource {
@@ -35,6 +36,18 @@ struct AliasSource {
     line: i32,
     width: i32,
     two_state: i32,
+}
+
+#[repr(C)]
+struct ParameterValue {
+    bits: *const c_char,
+    is_signed: bool,
+}
+
+#[derive(Serialize)]
+struct IntegerParameter {
+    bits: String,
+    signed: bool,
 }
 
 #[derive(Serialize)]
@@ -61,6 +74,10 @@ pub struct Location {
     interface_two_state: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     interface_declaration: Option<SourceLocation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parameter_value: Option<IntegerParameter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    packed_range: Option<[i32; 2]>,
 }
 
 #[derive(Serialize)]
@@ -217,6 +234,7 @@ extern "C" fn location(
     instance: *const c_char,
     interface_range: *const i32,
     alias: *const AliasSource,
+    parameter: *const ParameterValue,
 ) {
     unsafe {
         let alias = alias.as_ref();
@@ -236,6 +254,11 @@ extern "C" fn location(
             interface_declaration: alias.filter(|source| source.line > 0).map(|source| {
                 SourceLocation { file: string(source.file), line: source.line }
             }),
+            parameter_value: parameter.as_ref().map(|value| IntegerParameter {
+                bits: string(value.bits),
+                signed: value.is_signed,
+            }),
+            packed_range: None,
         });
     }
 }
@@ -394,6 +417,27 @@ fn scan_ports(instance: &str) -> Result<(PortScan, bool), String> {
     Ok((scan, status == 2))
 }
 impl NativeKdb {
+    pub fn resolve(&mut self, name: &str) -> Result<serde_json::Value, String> {
+        let mut results = lookup_locations(name, "resolve")?;
+        for location in &mut results {
+            if location.fullname != name
+                || location.line <= 0
+                || !matches!(location.kind.as_str(), "npiNet" | "npiReg" | "npiBitVar")
+            {
+                continue;
+            }
+            location.packed_range = self.expression_reader().and_then(|reader| {
+                reader.checked_packed_range(
+                    name,
+                    &location.instance,
+                    &location.file,
+                    location.line as u32,
+                )
+            });
+        }
+        Ok(serde_json::json!(results))
+    }
+
     pub fn ports(&mut self, instance: &str) -> Result<serde_json::Value, String> {
         let (mut scan, truncated) = scan_ports(instance)?;
         let mut links = scan.links;
@@ -496,6 +540,10 @@ pub fn module_sources() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!(files))
 }
 pub fn lookup(name: &str, mode: &str) -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!(lookup_locations(name, mode)?))
+}
+
+fn lookup_locations(name: &str, mode: &str) -> Result<Vec<Location>, String> {
     let name = CString::new(name).map_err(|_| "Invalid hierarchy name")?;
     let mut results: Vec<Location> = vec![];
     let result = unsafe {
@@ -541,5 +589,5 @@ pub fn lookup(name: &str, mode: &str) -> Result<serde_json::Value, String> {
     if result == 0 {
         return Err(error());
     }
-    Ok(serde_json::json!(results))
+    Ok(results)
 }

@@ -5,6 +5,13 @@
 
 mod cache;
 mod derived;
+mod overview;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod shm_psfxl;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod psfxl_samples;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod psfxl_srr;
 mod spice_raw;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod vendor_wave;
@@ -178,6 +185,7 @@ impl IndependentFsdb {
 }
 
 enum Database {
+    Shm(wavebench_reader::independent::shm::Shm),
     Raw(spice_raw::SpiceRaw),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     Vendor(vendor_wave::VendorWave),
@@ -190,6 +198,7 @@ enum Database {
 impl Database {
     fn signals(&self) -> &Vec<Signal> {
         match self {
+            Self::Shm(v) => &v.signals,
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::Vendor(v) => &v.signals,
             Self::Raw(v) => &v.signals,
@@ -221,17 +230,42 @@ impl Database {
             }
             return Vcd::open(vcd).map(Self::Vcd);
         }
-        if matches!(kind.as_str(), "psfascii" | "tran") {
-            return spice_raw::SpiceRaw::open_psf(path).map(Self::Raw);
+        let is_psfxl_stub = kind == "tran" && [".psfxl", ".dat"].iter()
+            .any(|extension| std::path::Path::new(&format!("{path}{extension}")).is_file());
+        let raw_psfxl = kind == "dat" && path.to_ascii_lowercase().ends_with(".tran.dat");
+        if matches!(kind.as_str(), "shm" | "dsn" | "trn" | "psfxl") || is_psfxl_stub || raw_psfxl {
+            let result = wavebench_reader::independent::shm::Shm::open(path);
+            match result {
+                Ok(wave) => return Ok(Self::Shm(wave)),
+                Err(error) => {
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if !independent && matches!(kind.as_str(), "shm" | "dsn" | "trn") {
+                        return vendor_wave::VendorWave::open(path, &kind).map(Self::Vendor)
+                            .map_err(|fallback| format!("SST2/PSFXL: {error}; Cadence SDK: {fallback}"));
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        if kind == "sweep" {
+            return spice_raw::SpiceRaw::open_psf_sweep(path).map(Self::Raw);
+        }
+        if matches!(kind.as_str(), "psfascii" | "tran" | "psfbin" | "psf" | "ac" | "dc" | "noise" | "info" | "pz" | "xf" | "stb" | "sparam" | "sp") {
+            if matches!(kind.as_str(), "psfascii" | "tran") {
+                if let Ok(raw) = spice_raw::SpiceRaw::open_psf(path) {
+                    return Ok(Self::Raw(raw));
+                }
+            }
+            return spice_raw::SpiceRaw::open_psf_analysis(path).map(Self::Raw);
         }
         if kind == "raw" {
             return spice_raw::SpiceRaw::open(path).map(Self::Raw);
         }
-        if matches!(kind.as_str(), "shm" | "dsn" | "wdb") {
+        if kind == "wdb" {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             return vendor_wave::VendorWave::open(path, &kind).map(Self::Vendor);
             #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
-            return Err("SHM and WDB require the Linux x64 SDK reader".into());
+            return Err("WDB requires the Linux x64 SDK reader".into());
         }
         if path.to_lowercase().ends_with(".fst") {
             let mut reader = Fst::open(path)?;
@@ -255,6 +289,7 @@ impl Database {
     }
     fn meta(&self) -> Value {
         let (start, end, scale, backend) = match self {
+            Self::Shm(v) => (v.start, v.end, v.scale.clone(), "rust-independent-shm"),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::Vendor(v) => (v.start, v.end, v.scale.clone(), v.backend),
             Self::Raw(v) => (v.start, v.end, v.scale.clone(), v.backend),
@@ -267,7 +302,7 @@ impl Database {
             #[cfg(fsdb)]
             Self::Fsdb(v) => (v.start, v.end, v.scale.clone(), "native-fsdb"),
         };
-        json!({
+        let mut result = json!({
             "signals": self.signals().iter().take(1500).collect::<Vec<_>>(),
             "total": self.signals().len(),
             "start": start.to_string(),
@@ -275,11 +310,24 @@ impl Database {
             "scale": scale,
             "axis": if scale.ends_with("Hz") { "frequency" } else { "time" },
             "backend": backend,
-            "supportsOrderedHistory": matches!(self, Self::Vcd(_) | Self::Fst(_, _)),
-        })
+            "supportsOrderedHistory": matches!(self, Self::Vcd(_) | Self::Fst(_, _) | Self::Shm(_)),
+        });
+        if let Self::Raw(raw) = self {
+            if let Some(axis) = &raw.sweep_axis {
+                result["axis"] = json!("sweep");
+                result["sweep"] = json!(axis);
+            }
+        }
+        if let Self::Shm(wave) = self {
+            if !wave.warnings.is_empty() {
+                result["warnings"] = json!(wave.warnings);
+            }
+        }
+        result
     }
     fn read(&self, id: &str, start: u64, end: u64, limit: usize) -> Result<(Events, bool), String> {
         match self {
+            Self::Shm(v) => v.query(id, start, end, limit),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Self::Vendor(v) => v.query(id, start, end, limit),
             Self::Raw(v) => v.query(id, start, end, limit),
@@ -331,6 +379,22 @@ impl Store {
             scope_search: None,
         }
     }
+    fn cache_stats(&self) -> Value {
+        #[allow(unused_mut)]
+        let mut stats = json!(&self.cache.stats);
+        if let Database::Shm(reader) = &self.database {
+            if let Some(psfxl) = reader.cache_stats() {
+                stats["psfxl"] = psfxl;
+            }
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Database::Vendor(reader) = &self.database {
+            if let Some(psfxl) = reader.psfxl_cache_stats() {
+                stats["psfxl"] = psfxl;
+            }
+        }
+        stats
+    }
     fn query(
         &mut self,
         ids: &[String],
@@ -353,7 +417,8 @@ impl Store {
                 {
                     continue;
                 }
-                if !self.signal(id).ok_or("Unknown signal")?.supported {
+                let signal = self.signal(id).ok_or("Unknown signal")?;
+                if !signal.supported {
                     return Err("Unsupported signal encoding".into());
                 }
                 let key = cache::Key {
@@ -362,6 +427,7 @@ impl Store {
                     end,
                     limit,
                     ordered: preserve_same_tick,
+                    real: signal.real,
                 };
                 if let Some(block) = self.cache.get(&key) {
                     physical_blocks.insert(id.clone(), block);
@@ -391,25 +457,28 @@ impl Store {
                 Some(block) => block.clone(),
                 None if preserve_same_tick
                     && !self.virtuals.contains_key(id)
-                    && matches!(self.database, Database::Vcd(_)) =>
+                    && matches!(self.database, Database::Vcd(_) | Database::Shm(_)) =>
                 {
-                    if !self.signal(id).ok_or("Unknown signal")?.supported {
+                    let signal = self.signal(id).ok_or("Unknown signal")?;
+                    if !signal.supported {
                         return Err("Unsupported signal encoding".into());
                     }
-                    let Database::Vcd(vcd) = &self.database else {
-                        unreachable!()
-                    };
                     let key = cache::Key {
                         signal: id.clone(),
                         start,
                         end,
                         limit,
                         ordered: true,
+                        real: signal.real,
                     };
                     if let Some(block) = self.cache.get(&key) {
                         block
                     } else {
-                        let (events, truncated) = vcd.query_with_order(id, start, end, limit, true)?;
+                        let (events, truncated) = match &self.database {
+                            Database::Vcd(wave) => wave.query_with_order(id, start, end, limit, true)?,
+                            Database::Shm(wave) => wave.query_with_order(id, start, end, limit, true)?,
+                            _ => unreachable!(),
+                        };
                         self.cache.stats.reads += 1;
                         let block = Arc::new(cache::Block { events, truncated });
                         self.cache.insert(key, block.clone());
@@ -422,6 +491,57 @@ impl Store {
         }
         Ok(Value::Object(output))
     }
+    fn overview(&mut self, id: &str, start: u64, end: u64, bins: usize) -> Result<Value, String> {
+        if start > end || !(1..=4096).contains(&bins) {
+            return Err("Invalid waveform overview bounds".into());
+        }
+        let signal = self.signal(id).ok_or("Unknown signal")?;
+        if !signal.supported {
+            return Err("Unsupported signal encoding".into());
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Database::Vendor(reader) = &self.database {
+            if id.starts_with("psfxl:") {
+                return reader.psfxl_overview(id, start, end, bins);
+            }
+        }
+        if let Database::Shm(reader) = &self.database {
+            if reader.has_analog(id) {
+                let mut summary = if bins > 1 {
+                    overview::Overview::with_real_samples(start, end, bins)
+                } else {
+                    overview::Overview::new(start, end, bins, true)
+                };
+                reader.scan_analog(id, start, end, |tick, value| {
+                    summary.real(tick, value);
+                    true
+                })?;
+                return Ok(summary.finish());
+            }
+        }
+        let mut overview = overview::Overview::new(start, end, bins, signal.real);
+        let mut cursor = start;
+        loop {
+            let (events, truncated) = if self.virtuals.contains_key(id) {
+                let block = self.read_block(id, cursor, end, 100_000)?;
+                (block.events.clone(), block.truncated)
+            } else {
+                self.database.read(id, cursor, end, 100_000)?
+            };
+            let last = events.last().map(|event| event.0);
+            for (tick, value) in events {
+                if tick >= cursor || cursor == start {
+                    overview.value(tick, value);
+                }
+            }
+            if !truncated {
+                return Ok(overview.finish());
+            }
+            cursor = last.filter(|&tick| tick >= cursor && tick < end)
+                .ok_or("Waveform overview could not advance")? + 1;
+        }
+    }
+
     fn signal(&self, id: &str) -> Option<&Signal> {
         self.ids
             .get(id)
@@ -523,7 +643,8 @@ impl Store {
         end: u64,
         limit: usize,
     ) -> Result<std::sync::Arc<cache::Block>, String> {
-        if !self.signal(id).ok_or("Unknown signal")?.supported {
+        let signal = self.signal(id).ok_or("Unknown signal")?;
+        if !signal.supported {
             return Err("Unsupported signal encoding".into());
         }
         let key = cache::Key {
@@ -532,6 +653,7 @@ impl Store {
             end,
             limit,
             ordered: false,
+            real: signal.real,
         };
         let virtual_signal = self.virtuals.get(id);
         let cached = if virtual_signal.is_some_and(|v| v.definition.linear == Some(true)) {
@@ -599,7 +721,8 @@ impl Store {
                     }
                 }
             }
-            if !requested.contains(base) && !tails.contains(base) {
+            let leaf = base.rsplit_once('.').map_or(base, |(_, leaf)| leaf);
+            if !requested.contains(base) && !tails.contains(leaf) {
                 continue;
             }
             let plain_allowed = scope.is_empty() || s.scope == scope;
@@ -704,12 +827,15 @@ struct Request {
     start: Option<String>,
     end: Option<String>,
     limit: Option<usize>,
+    bins: Option<usize>,
     #[serde(rename = "preserveSameTick")]
     preserve_same_tick: Option<bool>,
     query: Option<String>,
     offset: Option<usize>,
     descriptors: Option<Vec<Descriptor>>,
-    bytes: Option<usize>,
+    bytes: Option<u64>,
+    psfxl_bytes: Option<u64>,
+    psfxl_memory_bytes: Option<u64>,
     definition: Option<derived::Definition>,
     name: Option<String>,
     names: Option<Vec<String>>,
@@ -752,7 +878,7 @@ fn run(
         #[cfg(fsdb)]
         "kdbModuleSources" => kdb::module_sources(),
         #[cfg(fsdb)]
-        "kdbResolve" => kdb::lookup(&r.query.ok_or("Missing hierarchy")?, "resolve"),
+        "kdbResolve" => native_kdb.resolve(&r.query.ok_or("Missing hierarchy")?),
         #[cfg(fsdb)]
         "kdbInterfaceMember" => kdb::lookup(&r.query.ok_or("Missing interface member")?, "interfaceMember"),
         #[cfg(fsdb)]
@@ -771,12 +897,13 @@ fn run(
             let budget = db
                 .as_ref()
                 .map(|s| s.cache.stats.budget)
-                .unwrap_or(64 * 1024 * 1024);
+                .unwrap_or(cache::DEFAULT_BUDGET);
             *db = Some(Store::new(new, budget));
             Ok(result)
         }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         "hdlLocations" => match &db.as_ref().ok_or("No open database")?.database {
+            Database::Shm(wave) => wave.hdl_locations(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             Database::Vendor(wave) => wave.hdl_locations(),
             _ => Ok(json!([])),
         },
@@ -793,13 +920,22 @@ fn run(
                 r.limit.unwrap_or(1500).clamp(1, 1500),
             ))
         }
-        "cacheStats" => Ok(json!(&db.as_ref().ok_or("No open database")?.cache.stats)),
+        "cacheStats" => Ok(db.as_ref().ok_or("No open database")?.cache_stats()),
         "cacheConfigure" => {
             let store = db.as_mut().ok_or("No open database")?;
-            store
-                .cache
-                .configure(r.bytes.unwrap_or(64 * 1024 * 1024).min(512 * 1024 * 1024));
-            Ok(json!(&store.cache.stats))
+            let budget = r.bytes.unwrap_or(cache::DEFAULT_BUDGET as u64)
+                .min(cache::MAX_BUDGET).min(isize::MAX as u64);
+            store.cache.configure(budget as usize);
+            let disk = r.psfxl_bytes.map(|bytes| bytes.min(cache::MAX_BUDGET));
+            let memory = r.psfxl_memory_bytes.map(|bytes| bytes.min(cache::MAX_BUDGET));
+            if let Database::Shm(reader) = &store.database {
+                reader.configure_cache(disk, memory);
+            }
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Database::Vendor(reader) = &store.database {
+                reader.configure_psfxl_cache(disk, memory);
+            }
+            Ok(store.cache_stats())
         }
         "describe" => {
             let store = db.as_ref().ok_or("No open database")?;
@@ -850,6 +986,23 @@ fn run(
                                             .unwrap_or(true)
                                 })
                         })
+                        .or_else(|| {
+                            // Legacy PSFXL projects stored a catalogue ordinal.
+                            // Resolve against the saved path after catalogue changes.
+                            if !d.id.starts_with("psfxl:") && !matches!(store.database, Database::Shm(_)) {
+                                return None;
+                            }
+                            let scope = d.scope.as_ref()?;
+                            let name = d.name.as_ref()?;
+                            store.database.signals().iter().find(|signal| {
+                                signal.id.starts_with("psfxl:") == d.id.starts_with("psfxl:")
+                                    && &signal.scope == scope
+                                    && &signal.name == name
+                                    && r.query.as_ref().is_none_or(|query| {
+                                        format!("{scope}.{name}") == *query
+                                    })
+                            })
+                        })
                         .map(|s| json!(s))
                 })
                 .collect();
@@ -871,6 +1024,12 @@ fn run(
                 json!({"signal":signal,"definitions":definitions.iter().map(|v|store.virtual_description(v)).collect::<Vec<_>>()}),
             )
         }
+        "overview" => db.as_mut().ok_or("No open database")?.overview(
+            &r.name.ok_or("Missing signal ID")?,
+            r.start.ok_or("Missing start")?.parse().map_err(|_| "Invalid start")?,
+            r.end.ok_or("Missing end")?.parse().map_err(|_| "Invalid end")?,
+            r.bins.unwrap_or(1),
+        ),
         "query" => db.as_mut().ok_or("No open database")?.query(
             &r.signals.ok_or("Missing signals")?,
             r.start

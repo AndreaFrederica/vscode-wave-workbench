@@ -83,10 +83,16 @@ int wave_query(void* ptr, uint32_t id, uint64_t start, uint64_t end, EventCB cb,
         }
         fsdbTag64 t = {}; t.H = start >> 32; t.L = start;
         if (h->ffrHasIncoreVC() && h->ffrGotoXTag(&t) == FSDB_RC_SUCCESS) {
+            // On a view-window boundary, GetXTag can expose a carry-in
+            // sample at the window start. GotoXTag returns its original tag.
+            const uint64_t seek_time = (uint64_t(t.H) << 32) | t.L;
+            bool first = true;
             do {
                 byte_T* raw = nullptr;
                 if (h->ffrGetXTag(&t) != FSDB_RC_SUCCESS || h->ffrGetVC(&raw) != FSDB_RC_SUCCESS || !raw) { result = -1; break; }
                 uint64_t time = (uint64_t(t.H) << 32) | t.L;
+                if (first && time == start && seek_time < start) time = seek_time;
+                first = false;
                 if (time > end) break;
                 if (real) {
                     double number;

@@ -1,0 +1,6 @@
+// SPDX-License-Identifier: MPL-2.0
+simulator lang=spectre
+P1 (vin 0) port num=1 r=50
+P2 (vout 0) port num=2 r=50
+R1 (vin vout) resistor r=100
+sp1 sp start=1k stop=1M dec=3 ports=[P1 P2]

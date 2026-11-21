@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: MPL-2.0
+simulator lang=spectre
+Vstep (step 0) vsource type=pwl wave=[0 0 1n 0 2n 1 4n 1 5n 0 20n 0]
+R1 (step filtered) resistor r=1k
+C1 (filtered 0) capacitor c=1p
+Vconstant (constant 0) vsource dc=0.25
+Vzero (zero 0) vsource dc=0
+Rzero (zero 0) resistor r=1k
+save step filtered constant zero Vstep:p
+tran1 tran stop=20n maxstep=100p

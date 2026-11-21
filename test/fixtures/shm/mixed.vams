@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: MPL-2.0
+`timescale 1ps/1ps
+`include "disciplines.vams"
+module mixed_tb;
+  electrical step, filtered;
+  reg tick = 0;
+  analog begin
+    V(step) <+ sin(2.0 * 3.141592653589793 * 1.0e8 * $abstime);
+    I(filtered,step) <+ V(filtered,step) / 1000.0;
+    I(filtered) <+ 1.0e-12 * ddt(V(filtered));
+  end
+  always #125 tick = ~tick;
+  initial #20000 $finish;
+endmodule

@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: MPL-2.0
+simulator lang=spectre
+V1 (vin 0) vsource dc=0 mag=1
+E1 (drv 0 vin fb) vcvs gain=100
+R1 (drv out) resistor r=1k
+C1 (out 0) capacitor c=1n
+IP (out fb) iprobe
+R2 (fb 0) resistor r=1M
+save vin out
+ac1 ac start=1k stop=1G dec=9
+stb1 stb probe=IP start=1k stop=1G dec=9

@@ -39,6 +39,8 @@ struct Location {
     #[serde(skip_serializing_if = "Option::is_none")]
     parameter_value: Option<IntegerParameter>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    packed_range: Option<[i32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     interface_range: Option<[i32; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     interface_width: Option<u32>,
@@ -92,6 +94,7 @@ impl Node {
             definition_line: 0,
             instance: self.fullname.clone(),
             parameter_value: None,
+            packed_range: None,
             interface_range: None,
             interface_width: None,
             interface_two_state: None,
@@ -387,10 +390,30 @@ impl Session {
             definition_line: definition.map_or(0, |position| position.line),
             instance: context.map_or(String::new(), |row| row.fullname.clone()),
             parameter_value: None,
+            packed_range: None,
             interface_range: None,
             interface_width: None,
             interface_two_state: None,
             interface_declaration: None,
+        }
+    }
+
+    pub fn checked_packed_range(
+        &mut self,
+        query: &str,
+        instance: &str,
+        file: &str,
+        line: u32,
+    ) -> Option<[i32; 2]> {
+        let location = self.resolve(query).ok()?;
+        if location.fullname == query
+            && location.instance == instance
+            && location.file == file
+            && location.line == line
+        {
+            location.packed_range
+        } else {
+            None
         }
     }
 
@@ -434,6 +457,7 @@ impl Session {
             kind,
             position,
             scope,
+            packed,
             ..
         } = self.resolve_value(index, leaf)?;
         let mut location = self.location(
@@ -447,6 +471,11 @@ impl Session {
         }
         if kind == "npiParameter" {
             location.parameter_value = self.integer_parameter(index, leaf);
+        }
+        if !leaf.contains('[') && matches!(kind, "npiNet" | "npiReg" | "npiBitVar") {
+            location.packed_range = packed.and_then(|(left, right)| {
+                Some([i32::try_from(left).ok()?, i32::try_from(right).ok()?])
+            });
         }
         Ok((location, scope.then_some(index)))
     }

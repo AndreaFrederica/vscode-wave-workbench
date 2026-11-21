@@ -23,3 +23,12 @@ https://github.com/kieler/elkjs/tree/v0.12.1.
 Linux x64 packages include Ondas under Apache-2.0, with runtime SDK loading
 changes in https://github.com/AndreaFrederica/ondas/tree/wave-workbench-sdk.
 The license is in licenses/Ondas-Apache-2.0.txt.
+
+The Rust PSFXL reader includes C-Blosc 1.21.6 through blosc-src.
+The C-Blosc license is in licenses/C-Blosc-BSD-3-Clause.txt.
+The LZ4, Snappy, zlib and Zstandard licenses are in licenses/PSFXL-Compression.txt.
+The Rust LZ4 block decoder includes lz4_flex under the MIT license.
+The license is in licenses/Lz4-flex-MIT.txt.
+
+The Rust PSF reader includes psfkit under the MIT license.
+The license is in licenses/Psfkit-MIT.txt. Source: https://github.com/henjo/polars-psf.

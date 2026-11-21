@@ -6,12 +6,24 @@ use std::{
 };
 use wavebench_reader::vcd::{window, Events, Signal};
 
+#[path = "psf_wave.rs"]
+mod psf_wave;
+
+#[derive(serde::Serialize, PartialEq)]
+pub struct SweepAxis {
+    origin: f64,
+    step: f64,
+    name: String,
+    unit: Option<String>,
+}
+
 pub struct SpiceRaw {
     pub signals: Vec<Signal>,
     pub start: u64,
     pub end: u64,
     pub scale: String,
     pub backend: &'static str,
+    pub sweep_axis: Option<SweepAxis>,
     data: Vec<Events>,
 }
 
@@ -235,6 +247,7 @@ impl SpiceRaw {
             end,
             scale: frequency_tick.map_or_else(|| scale.into(), |tick| format!("{tick:e}Hz")),
             backend: "rust-ngspice-raw",
+            sweep_axis: None,
             data,
         })
     }
@@ -356,6 +369,7 @@ impl SpiceRaw {
             end: last.unwrap(),
             scale: "1fs".into(),
             backend: "rust-psfascii",
+            sweep_axis: None,
             data,
         })
     }

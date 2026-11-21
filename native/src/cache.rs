@@ -6,6 +6,11 @@
 use serde::Serialize;
 use std::{collections::HashMap, sync::Arc};
 use wavebench_reader::vcd::{window, Events};
+
+const MIB: usize = 1024 * 1024;
+pub const DEFAULT_BUDGET: usize = 128 * MIB;
+pub const MAX_BUDGET: u64 = 1 << 40;
+
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct Key {
     pub signal: String,
@@ -13,6 +18,7 @@ pub struct Key {
     pub end: u64,
     pub limit: usize,
     pub ordered: bool,
+    pub real: bool,
 }
 pub struct Block {
     pub events: Events,
@@ -34,6 +40,24 @@ pub struct Stats {
     pub entries: usize,
     pub budget: usize,
     pub reads: u64,
+    pub digital: EncodingStats,
+    pub real: EncodingStats,
+}
+#[derive(Default, Serialize)]
+pub struct EncodingStats {
+    pub bytes: usize,
+    pub entries: usize,
+    pub hits: u64,
+    pub misses: u64,
+}
+impl Stats {
+    fn encoding(&mut self, real: bool) -> &mut EncodingStats {
+        if real {
+            &mut self.real
+        } else {
+            &mut self.digital
+        }
+    }
 }
 pub struct Cache {
     entries: HashMap<Key, Entry>,
@@ -66,6 +90,7 @@ impl Cache {
         if let Some(entry) = self.entries.get_mut(key) {
             entry.used = self.clock;
             self.stats.hits += 1;
+            self.stats.encoding(key.real).hits += 1;
             return Some(entry.block.clone());
         }
         // A truncated block cannot answer a different query: its missing tail is unknown.
@@ -86,11 +111,13 @@ impl Cache {
             let entry = self.entries.get_mut(&k).unwrap();
             entry.used = self.clock;
             self.stats.hits += 1;
+            self.stats.encoding(key.real).hits += 1;
             self.stats.containing_hits += 1;
             let (events, truncated) = clip(&entry.block.events, key.start, key.end, key.limit);
             return Some(Arc::new(Block { events, truncated }));
         }
         self.stats.misses += 1;
+        self.stats.encoding(key.real).misses += 1;
         None
     }
     pub fn insert(&mut self, key: Key, block: Arc<Block>) {
@@ -109,15 +136,17 @@ impl Cache {
         if bytes > self.stats.budget {
             return;
         }
-        if let Some(old) = self.entries.remove(&key) {
-            self.stats.bytes -= old.bytes;
-        }
+        self.remove(&key);
+        let entry_limit = (self.stats.budget / (256 * 1024)).max(4096);
         while !self.entries.is_empty()
-            && (self.stats.bytes + bytes > self.stats.budget || self.entries.len() >= 4096)
+            && (self.stats.bytes + bytes > self.stats.budget || self.entries.len() >= entry_limit)
         {
             self.evict();
         }
         self.clock += 1;
+        let encoding = self.stats.encoding(key.real);
+        encoding.bytes += bytes;
+        encoding.entries += 1;
         self.entries.insert(
             key,
             Entry {
@@ -136,10 +165,17 @@ impl Cache {
             .min_by_key(|(_, v)| v.used)
             .map(|(k, _)| k.clone())
         {
-            let entry = self.entries.remove(&key).unwrap();
-            self.stats.bytes -= entry.bytes;
+            self.remove(&key);
             self.stats.evictions += 1;
+        }
+    }
+    fn remove(&mut self, key: &Key) {
+        if let Some(entry) = self.entries.remove(key) {
+            self.stats.bytes -= entry.bytes;
             self.stats.entries = self.entries.len();
+            let encoding = self.stats.encoding(key.real);
+            encoding.bytes -= entry.bytes;
+            encoding.entries -= 1;
         }
     }
     pub fn configure(&mut self, budget: usize) {
@@ -159,6 +195,7 @@ mod tests {
             end,
             limit,
             ordered: false,
+            real: false,
         }
     }
     fn block(truncated: bool) -> Arc<Block> {

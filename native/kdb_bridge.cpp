@@ -44,7 +44,13 @@ struct AliasSource {
     int width;
     int two_state;
 };
-using LocationCB = void (*)(void*, const char*, const char*, const char*, int, const char*, const char*, int, const char*, const int*, const AliasSource*);
+struct ParameterValue {
+    const char* bits;
+    bool is_signed;
+};
+using LocationCB = void (*)(void*, const char*, const char*, const char*, int,
+                            const char*, const char*, int, const char*, const int*,
+                            const AliasSource*, const ParameterValue*);
 using PortLinkCB = void (*)(void*, const char*, const char*, const int*, const char*, const char*, const int*, const char*, int, int, int);
 using PortDeclarationCB = void (*)(void*, const char*, const char*, const char*);
 using PortGapCB = void (*)(void*, const char*, const char*, bool);
@@ -64,7 +70,7 @@ static void emit_summary(npiHandle h, LocationCB cb, void* user) {
     auto fullname=property(npiFullName,h),kind=property(npiType,h);
     int type=get_int(npiType,h);
     auto module=(design_type(type)||type==npiInterface||type==npiInterfaceArray)?property(npiDefName,h):"";
-    cb(user,fullname.c_str(),kind.c_str(),"",0,module.c_str(),"",0,fullname.c_str(),nullptr,nullptr);
+    cb(user,fullname.c_str(),kind.c_str(),"",0,module.c_str(),"",0,fullname.c_str(),nullptr,nullptr,nullptr);
 }
 static bool contains_design(npiHandle scope,int depth=0) {
     if(depth>128)return false;
@@ -76,19 +82,62 @@ static bool contains_design(npiHandle scope,int depth=0) {
     }
     return false;
 }
+static std::string integral_parameter_bits(npiHandle handle, bool& is_signed) {
+    if (!get_value || get_int(npiType, handle) != npiParameter) return {};
+    switch (get_int(npiConstType, handle)) {
+    case npiDecConst:
+    case npiBinaryConst:
+    case npiOctConst:
+    case npiHexConst:
+    case npiIntConst:
+    case npiTimeConst:
+        break;
+    default:
+        return {};
+    }
+    const int width = get_int(npiSize, handle);
+    const int signedness = get_int(npiSigned, handle);
+    if (width < 1 || width > 4096 || (signedness != 0 && signedness != 1)) return {};
+
+    npiValue value = {};
+    value.format = npiBinStrVal;
+    // false reads the elaborated value, including instance overrides.
+    if (get_value(handle, value, false) != 1 ||
+        value.format != npiBinStrVal || !value.value.str) return {};
+    std::string bits(value.value.str);
+    if (bits.size() != static_cast<size_t>(width) ||
+        bits.find_first_not_of("01xzXZ") != std::string::npos) return {};
+    std::replace(bits.begin(), bits.end(), 'X', 'x');
+    std::replace(bits.begin(), bits.end(), 'Z', 'z');
+    is_signed = signedness == 1;
+    return bits;
+}
+
 static void emit(npiHandle h, LocationCB cb, void* user, const int* range = nullptr,
                  const AliasSource* alias = nullptr) {
     std::string fullname=property(npiFullName,h),kind=property(npiType,h),file=property(npiFile,h);
     int line=get_int(npiLineNo,h);
     npiHandle scope=definition_owner(h)?h:handle_api(npiScope,h);
+    std::string generated_instance;
+    if (scope && scope != h && generated_type(get_int(npiType, scope)) &&
+        !generated_type(get_int(npiType, h))) {
+        auto owner = property(npiFullName, scope);
+        if (!owner.empty() && fullname.compare(0, owner.size() + 1, owner + ".") == 0)
+            generated_instance = owner;
+    }
     for(int depth=0;scope && !definition_owner(scope) && depth<64;++depth){
         auto parent=handle_api(npiScope,scope);release_api(scope);scope=parent;
     }
     std::string module=scope?property(npiDefName,scope):"";
     std::string definition=scope?property(npiDefFile,scope):"";
     int defline=scope?get_int(npiDefLineNo,scope):0;
-    std::string instance=scope?property(npiFullName,scope):"";
-    cb(user,fullname.c_str(),kind.c_str(),file.c_str(),line,module.c_str(),definition.c_str(),defline,instance.c_str(),range,alias);
+    std::string instance=generated_instance.empty()
+        ? (scope ? property(npiFullName,scope) : "") : generated_instance;
+    bool is_signed = false;
+    const auto bits = integral_parameter_bits(h, is_signed);
+    const ParameterValue parameter = {bits.c_str(), is_signed};
+    cb(user,fullname.c_str(),kind.c_str(),file.c_str(),line,module.c_str(),definition.c_str(),defline,instance.c_str(),range,alias,
+       bits.empty() ? nullptr : &parameter);
     if(scope && scope!=h)release_api(scope);
 }
 static bool fixed_index(npiHandle expression, int relation, int& index) {
@@ -772,7 +821,7 @@ int wave_kdb_instances(const char* module, LocationCB cb, void* user) {
     {
         auto h=by_name(row.fullname.c_str(),nullptr);if(!h)continue;
         auto file=property(npiDefFile,h);int line=get_int(npiDefLineNo,h);
-        cb(user,row.fullname.c_str(),row.kind.c_str(),"",0,row.module.c_str(),file.c_str(),line,row.fullname.c_str(),nullptr,nullptr);release_api(h);
+        cb(user,row.fullname.c_str(),row.kind.c_str(),"",0,row.module.c_str(),file.c_str(),line,row.fullname.c_str(),nullptr,nullptr,nullptr);release_api(h);
     }
     fflush(stdout);return 1;
 }

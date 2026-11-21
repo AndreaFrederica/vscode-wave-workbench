@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: MPL-2.0
+simulator lang=spectre
+parameters R=1000 C=1n
+V1 (vin 0) vsource dc=1 mag=1
+R1 (vin vout) resistor r=R
+C1 (vout 0) capacitor c=C
+save vin vout
+nested sweep param=R values=[1000 2000] {
+  inner sweep param=C values=[1n 2n] {
+    ac1 ac start=1k stop=1M dec=3
+  }
+}
