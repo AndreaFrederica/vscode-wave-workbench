@@ -33,7 +33,7 @@ body.vscode-light {color-scheme:light;--wave-0:var(--vscode-charts-green,#187a38
 body.vscode-dark,body.vscode-high-contrast {color-scheme:dark}
 body.vscode-high-contrast-light {color-scheme:light}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:var(--vscode-font-size,12px) var(--vscode-font-family,Arial,sans-serif);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+body{margin:0;padding:0;background:var(--bg);color:var(--text);font:var(--vscode-font-size,12px) var(--vscode-font-family,Arial,sans-serif);height:100vh;display:flex;flex-direction:column;overflow:hidden}
 header{height:44px;display:flex;align-items:center;gap:22px;padding:0 15px;background:var(--header);border-bottom:1px solid var(--line)}
 strong{color:var(--text);font-size:15px}#file{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#backend{margin-left:auto;color:var(--muted)}
 nav{min-height:42px;display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:6px 9px;border-bottom:1px solid var(--line);background:var(--panel)}

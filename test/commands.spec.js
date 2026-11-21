@@ -81,6 +81,15 @@ test('wave toolbar fits two rows in a narrow editor and remembers the layout', a
   await page.setViewportSize({width: 560, height: 700});
   const env = await setup(page, path.resolve(__dirname, '../examples/demo.vcd'));
   try {
+    // VS Code injects this rule before the webview's own stylesheet.
+    await page.evaluate(() => {
+      document.styleSheets[0].insertRule('body { margin: 0; padding: 0 20px; }', 0);
+    });
+    for (const selector of ['#compactToolbar', 'main']) {
+      const bounds = await page.locator(selector).boundingBox();
+      expect(bounds.x).toBe(0);
+      expect(bounds.width).toBe(560);
+    }
     const toolbar = page.locator('#compactToolbar');
     const toggle = page.getByRole('button', {name: '双行工具栏'});
     const fit = page.locator('[data-action="fit"]');
