@@ -45,7 +45,7 @@ main{display:flex;flex:1;min-height:0}aside{width:260px;min-width:150px;max-widt
 .section{padding:11px;color:var(--vscode-sideBarSectionHeader-foreground,var(--text));font-weight:bold;border-bottom:1px solid var(--line)}
 #search{margin:8px;width:calc(100% - 16px)}#count{padding:8px;color:var(--muted)}
 summary{cursor:pointer;color:var(--text);white-space:nowrap;padding:4px 0}
-#viewer{flex:1;min-width:0;display:flex;flex-direction:column}#readout{min-height:32px;display:flex;justify-content:space-between;gap:10px;align-items:center;padding:5px 12px;color:var(--muted);border-bottom:1px solid var(--line);flex-wrap:wrap}
+#viewer{position:relative;flex:1;min-width:0;display:flex;flex-direction:column}#readout{min-height:32px;display:flex;justify-content:space-between;gap:10px;align-items:center;padding:5px 12px;color:var(--muted);border-bottom:1px solid var(--line);flex-wrap:wrap}
 /* Only visible rows exist; the content height provides the virtual scroll extent. */
 #tracks{display:block;flex:1;position:relative;overflow:auto;overflow-anchor:none;min-height:0}
 #trackContent{display:flex;position:relative;min-height:100%;width:100%}
@@ -84,10 +84,68 @@ body.sidebar-connected main>aside{display:none}
 
 
 
-/* Two compact control rows; menus/forms never consume waveform height. */
-#compactToolbar{height:32px;min-height:32px;flex:0 0 32px;flex-wrap:nowrap;gap:3px;padding:2px 6px;overflow-x:auto;overflow-y:hidden;background:var(--panel)}
-#compactToolbar>button,#compactToolbar>select,.toolMenu>summary{height:25px;padding:2px 6px;font-size:12px;white-space:nowrap;flex-shrink:0}
-#compactToolbar>button,.toolMenu>summary{border-color:transparent;background:transparent;border-radius:4px}#compactToolbar>button:hover,.toolMenu>summary:hover,.toolMenu[open]>summary{background:var(--hover)}
+#compactToolbar {
+  --toolbar-gap: 3px;
+  --toolbar-button-padding: 6px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  flex: 0 0 auto;
+  min-height: 32px;
+  gap: var(--toolbar-gap);
+  padding: 2px 6px;
+}
+#toolbarControls,
+#compactToolbar[data-rows="2"] .toolbarRow {
+  display: flex;
+  align-items: center;
+  gap: var(--toolbar-gap);
+  min-height: 27px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+.toolbarRow { display: contents; }
+#compactToolbar[data-rows="2"] #toolbarControls {
+  display: contents;
+}
+#compactToolbar[data-rows="2"] .toolbarRow:first-child { grid-area: 1 / 1; }
+#compactToolbar[data-rows="2"] .toolbarRow:last-child {
+  grid-area: 2 / 1 / 3 / -1;
+}
+#compactToolbar[data-rows="2"] .toolbarRow { min-width: 0; }
+#toggleToolbarRows { align-self: start; grid-area: 1 / 2; }
+#toggleToolbarRows,
+.toolbarRow > button,
+.toolbarRow > select,
+.toolMenu > summary {
+  height: 25px;
+  padding: 2px var(--toolbar-button-padding);
+  font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+#toggleToolbarRows, .toolbarRow > button, .toolMenu > summary {
+  border-color: transparent;
+  background: transparent;
+  border-radius: 4px;
+}
+#toggleToolbarRows:hover, .toolbarRow > button:hover, .toolMenu > summary:hover,
+.toolMenu[open] > summary { background: var(--hover); }
+#toggleToolbarRows[aria-pressed="true"] {
+  background: var(--selection);
+  color: var(--selection-fg);
+}
+@media (max-width: 660px) {
+  #toggleToolbarRows { width: 28px; display: grid; place-items: center; }
+  #toggleToolbarRows span { display: none; }
+  #toggleToolbarRows::before {
+    content: "";
+    width: 12px;
+    height: 9px;
+    border-block: 2px solid currentColor;
+  }
+}
 #compactToolbar i{height:16px;margin:0 3px}#compactToolbar #radix{width:76px}#findSignal{width:128px;min-width:64px;height:24px;padding:2px 6px;flex-shrink:1;font-size:11px}
 .tooltipToggle {
   flex-shrink: 0;
@@ -106,21 +164,21 @@ body.sidebar-connected main>aside{display:none}
   cursor: pointer;
 }
 #toggleTooltip:focus-visible { outline-offset: 2px; }
-#measurementDialog{width:min(540px,calc(100% - 32px));max-height:calc(100% - 30px);overflow:auto;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:14px}
-#measurementDialog::backdrop{background:#0006}
-#measurementDialog header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
-#measurementDialog table{width:100%;border-collapse:collapse;table-layout:auto}
-#measurementDialog th,#measurementDialog td{padding:6px 3px;border-top:1px solid var(--grid);text-align:left;overflow-wrap:anywhere}
-#measurementDialog th{font-weight:normal;color:var(--muted);width:54%}
-#measurementDialog td{font-family:monospace;font-variant-numeric:tabular-nums}
-#measurementStatus:empty{display:none}
+#analogScaleDialog{width:min(360px,calc(100% - 32px));background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:16px}
+#analogScaleDialog::backdrop{background:#0006}
+#analogScaleForm,#analogScaleForm fieldset{display:grid;gap:8px}
+#analogScaleForm fieldset{min-width:0;margin:0;padding:8px;border:1px solid var(--line)}
+#analogScaleForm fieldset[hidden]{display:none}
+#analogScaleForm input,#analogScaleForm select{width:100%;max-width:none}
+#analogScaleForm .editActions{display:flex;gap:8px;justify-content:flex-end}
+#analogScaleError{color:var(--warning)}
 .toolMenu{flex:0 0 auto}.toolMenu>summary{list-style:none;display:flex;gap:4px;align-items:center;cursor:pointer}.toolMenu>summary::after{content:'⌄';font-size:10px;color:var(--muted)}.toolMenu>summary::-webkit-details-marker{display:none}
 .menuPanel{position:fixed;z-index:101;min-width:190px;max-width:280px;max-height:70vh;overflow:auto;padding:5px;background:var(--vscode-menu-background,var(--panel));color:var(--text);border:1px solid var(--line);border-radius:5px;box-shadow:0 4px 15px #0005;display:flex;flex-direction:column;gap:2px}
 .toolMenu:not([open])>.menuPanel{display:none}.menuPanel button{display:block;text-align:left;padding:5px 9px;border:0;background:transparent;font-size:12px}.menuPanel button:hover{background:var(--selection);color:var(--selection-fg)}.menuPanel label{padding:5px 8px;font-size:12px}.menuPanel select{min-width:95px;max-width:140px}.menuPanel #file{display:block;font-size:12px;padding:5px 9px}.menuPanel #backend{display:block;margin:0;padding:0 9px 7px;font-size:10px;white-space:normal;color:var(--muted)}
 #readout{height:30px;min-height:30px;flex:0 0 30px;flex-wrap:nowrap;justify-content:flex-start;gap:10px;padding:2px 8px;font-size:11px;overflow:hidden}#readout input{height:23px;width:112px;max-width:20vw;padding:2px 4px;font-size:11px}#readout label{flex:0 0 auto;gap:4px}#readout button{height:24px;padding:2px 6px;font-size:11px;flex-shrink:0}#cursors{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}#range{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;max-width:42%}#readout #filterSignals{width:125px;flex-shrink:1}#filterSignals[hidden]{display:none}
 #editPopover{position:fixed;right:12px;top:67px;z-index:102;width:280px;max-width:calc(100vw - 24px);padding:12px;border:1px solid var(--line);border-radius:6px;background:var(--vscode-menu-background,var(--panel));box-shadow:0 5px 20px #0005}#editPopover[hidden]{display:none}#editPopover form{display:flex;flex-direction:column;gap:10px;width:auto}#editPopover form[hidden]{display:none}#editPopover label{font-size:12px;color:var(--muted)}#editPopover input,#editPopover select{width:100%;max-width:none;font-size:12px}#editPopover .editActions{display:flex;justify-content:flex-end;gap:6px}#editPopover button{font-size:12px;padding:4px 9px}
 #console:not([open]){position:fixed;bottom:0;right:0;z-index:4;border:0;background:transparent}#console:not([open]) summary{padding:3px 8px;font-size:10px;color:var(--muted)}footer{min-height:21px;height:21px;flex-shrink:0;padding:3px 80px 3px 8px;font-size:10px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-@media(max-width:850px){#range{max-width:34%}#readout{gap:6px}#findSignal{width:100px}#compactToolbar{gap:1px}#compactToolbar>button,.toolMenu>summary{padding-inline:4px}}
+@media(max-width:850px){#range{max-width:34%}#readout{gap:6px}#findSignal{width:100px}#compactToolbar{--toolbar-gap:1px;--toolbar-button-padding:4px}}
 
 #markerLayer{position:absolute;top:30px;left:0;right:0;height:24px;z-index:5;pointer-events:none;overflow:hidden}.timeMarker{position:absolute;top:0;height:22px;padding:1px 3px;font:10px var(--vscode-editor-font-family,monospace);background:transparent;border:0;text-align:left;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;pointer-events:auto;cursor:ew-resize}.timeMarker:hover{background:var(--hover)}#markerManager{position:fixed;z-index:100;top:66px;right:12px;width:min(560px,calc(100vw - 24px));max-height:65vh;overflow:auto;border:1px solid var(--line);border-radius:6px;padding:10px;background:var(--vscode-menu-background,var(--panel));box-shadow:0 4px 18px #0005}#markerManager[hidden]{display:none}.markerManagerHeader{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}.markerManagerHeader strong{font-size:12px}.markerItem{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);padding:5px 0;font-size:11px}.markerItem>span:first-child{flex:1;min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.markerItem>span:nth-child(2){font-family:monospace;white-space:nowrap}.markerItem button{padding:3px 6px;font-size:11px}#markerError{font-size:11px;color:var(--error)}#editPopover input[type=color]{height:26px;padding:2px}.ruler{align-items:center}
 
@@ -310,3 +368,227 @@ button.signalAnnotation:hover, button.signalAnnotation:focus-visible {
 .decoderTransaction.warning{border-color:var(--vscode-editorWarning-foreground)}
 .decoderTransaction.error{border-color:var(--vscode-editorError-foreground)}
 .decoderTrackStatus{position:absolute;pointer-events:none;inset-inline:8px;top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+
+#measurementPanel {
+  flex: 0 0 auto;
+  min-width: 0;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+}
+#measurementPanel[data-layout="floating"]:not([hidden]) {
+  position: absolute;
+  z-index: 8;
+  right: 8px;
+  bottom: 24px;
+  display: flex;
+  flex-direction: column;
+  width: min(680px, calc(100% - 16px));
+  max-height: calc(100% - 16px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px #0006;
+}
+#measurementPanel[data-layout="floating"][data-moved] {
+  left: var(--measurement-x);
+  top: var(--measurement-y);
+  right: auto;
+  bottom: auto;
+}
+#moveMeasurements { cursor: grab; touch-action: none; font-size: 14px; }
+#moveMeasurements:active { cursor: grabbing; }
+#addMeasurement { max-width: min(190px, 45%); }
+.measurement-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 8px;
+}
+.measurement-toolbar strong { margin-right: auto; font-size: 12px; }
+.measurement-toolbar label { color: var(--muted); }
+.measurement-toolbar button, .measurement-toolbar select, .measurement-remove {
+  padding: 2px 6px;
+}
+#measurementCards {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  overflow: auto;
+  max-height: min(190px, 28vh);
+  padding: 0 8px 6px;
+}
+#measurementCards[hidden] { display: none; }
+.measurement-card {
+  flex: 1 0 min(290px, 100%);
+  min-width: 0;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.measurement-card-heading {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.measurement-card-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 2px;
+}
+.measurement-card-title strong { font-size: 11px; margin-right: auto; }
+.measurement-card-source {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px 5px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.measurement-source-button {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 5px;
+}
+.measurement-card-source[data-pair] .measurement-source-button {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.measurement-source-role { color: var(--muted); white-space: nowrap; }
+.measurement-source-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#measurementSourceDialog {
+  width: min(480px, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 14px;
+}
+#measurementSourceDialog::backdrop { background: #0006; }
+#measurementSourceForm { display: grid; gap: 8px; }
+#measurementSourceOptions { width: 100%; min-width: 0; }
+#measurementSourceStatus { color: var(--muted); margin: 0; }
+#measurementSourceStatus:empty { display: none; }
+#measurementSourceForm .editActions { display: flex; justify-content: flex-end; gap: 6px; }
+.measurement-card-status {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  margin: 3px 7px;
+}
+.measurement-card-status:empty { display: none; }
+.measurement-card table { width: 100%; border-collapse: collapse; text-align: left; }
+.measurement-card th, .measurement-card td {
+  padding: 2px 6px;
+  border-top: 1px solid var(--grid);
+  overflow-wrap: anywhere;
+}
+.measurement-card th { font-weight: normal; color: var(--muted); }
+.measurement-card td { font-family: monospace; font-variant-numeric: tabular-nums; }
+
+#cursorToolbar, #amplitudeCursorToolbar {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+}
+#readout #cursorToolbar { flex: 1 0 auto; }
+#readout #cursors { flex: 0 1 auto; }
+.cursor-toolbar-title { color: var(--text); font-weight: 600; white-space: nowrap; }
+#cursorToolbar .time-cursor-a { color: var(--cursor-a); }
+#cursorToolbar .time-cursor-b { color: var(--cursor-b); }
+#toggleAmplitudeCursors[aria-pressed="true"] {
+  color: var(--selection-fg);
+  background: var(--selection);
+}
+#amplitudeCursorToolbar {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+#amplitudeCursorToolbar[hidden] { display: none; }
+#amplitudeCursorToolbar input {
+  width: 100px;
+  max-width: 23vw;
+  padding: 2px 4px;
+  font-family: monospace;
+}
+#amplitudeCursorToolbar label { color: var(--amplitude-color); }
+#amplitudeCursorToolbar button { padding: 2px 6px; }
+#amplitudeCursorDelta { white-space: nowrap; font-family: monospace; }
+#amplitudeCursorSource {
+  flex: 1 1 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.amplitude-first { --amplitude-color: var(--vscode-charts-orange, #d18655); }
+.amplitude-second { --amplitude-color: var(--vscode-charts-blue, #4ba4e3); }
+#amplitudeCursorLayer {
+  position: absolute;
+  inset: 0 0 0 0;
+  z-index: 4;
+  overflow: hidden;
+  pointer-events: none;
+}
+.amplitude-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px dashed var(--amplitude-color);
+}
+.amplitude-line [role="slider"] {
+  position: absolute;
+  right: 4px;
+  top: 0;
+  transform: translateY(-50%);
+  padding: 1px 4px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  color: var(--amplitude-color);
+  background: var(--bg);
+  font: 10px monospace;
+  line-height: 12px;
+  cursor: ns-resize;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+}
+.amplitude-second [role="slider"] { right: 36px; }
+.amplitude-line [role="slider"]:focus-visible { outline: 2px solid var(--accent); }
+@media (max-width: 880px) {
+  #readout #cursorToolbar { flex-shrink: 1; }
+  #readout #cursorToolbar input { width: clamp(48px, 12vw, 112px); }
+}
+
+.undock-action, body[data-dock] .dock-action { display: none; }
+body[data-dock] .undock-action { display: inline-block; }
+#dockedNotice[hidden] { display: none; }
+#dockedNotice {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  background: var(--vscode-editor-background);
+}
+#dockedNotice p { margin: 0; }
+body.wave-docked > :not(#dockedNotice) { visibility: hidden; }

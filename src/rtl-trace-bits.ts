@@ -28,6 +28,45 @@ function indexFromRight([left, right]: Range, slot: number) {
   return right + (left >= right ? slot : -slot);
 }
 
+export function directPortValue(
+  assignment: Pick<
+    Assignment,
+    "kind" | "port" | "inputs" | "targets" | "hasUnresolvedOperands"
+  >,
+) {
+  const { port, inputs } = assignment;
+  if (
+    assignment.kind !== "port" ||
+    !port ||
+    assignment.hasUnresolvedOperands ||
+    inputs.length !== 1 ||
+    inputs[0].kind !== "data" ||
+    assignment.targets.length !== 1 ||
+    port.fromField ||
+    port.toField ||
+    port.expression ||
+    port.indexSignal !== undefined ||
+    port.indexSignals?.length ||
+    port.indexedPart
+  )
+    return;
+  const { signal } = inputs[0];
+  const range =
+    port.fromBit === undefined
+      ? port.fromRange
+      : ([port.fromBit, port.fromBit] as const);
+  const value: AssignmentValue = range
+    ? { op: "select", args: [signal, ...range] }
+    : { op: "signal", args: signal };
+  const conversion = port.conversion;
+  return conversion?.twoState
+    ? ({
+        op: "cast",
+        args: [conversion.toWidth, false, true, value],
+      } satisfies AssignmentValue)
+    : value;
+}
+
 export function hasPackedSelection(
   value: AssignmentValue | undefined,
 ): boolean {
@@ -44,8 +83,14 @@ export function hasPackedSelection(
       return hasPackedSelection(value.args[1]);
     case "binary":
       return (
-        hasPackedSelection(value.args[1]) || hasPackedSelection(value.args[2])
+        value.args[0] === "shiftLeft" ||
+        value.args[0] === "shiftRight" ||
+        value.args[0] === "arithmeticShiftRight" ||
+        hasPackedSelection(value.args[1]) ||
+        hasPackedSelection(value.args[2])
       );
+    case "conditional":
+      return true;
     case "cast":
       return hasPackedSelection(value.args[3]);
     default:
@@ -66,17 +111,30 @@ export function packedDependencies(
       }
     );
   });
+  const constants = new Map<
+    AssignmentValue,
+    ReturnType<typeof evaluateTraceValue>
+  >();
+  function constantValue(value: AssignmentValue) {
+    if (!constants.has(value))
+      constants.set(
+        value,
+        evaluateTraceValue(value, undefined, () => undefined),
+      );
+    return constants.get(value);
+  }
 
   return function dependencies(
-    assignment: Assignment,
+    assignment: Parameters<typeof directPortValue>[0] &
+      Pick<Assignment, "value" | "unresolvedControlOnly" | "targetIndex">,
     ordinal: number,
-    resolveIndex?: (index: AssignmentValue) => bigint | undefined,
+    resolveSelector?: (
+      selector: AssignmentValue,
+      use: "index" | "shift" | "condition",
+    ) => ReturnType<typeof evaluateTraceValue>,
+    targetWidth?: number,
   ) {
-    const value =
-      assignment.value ??
-      (assignment.kind === "port" && assignment.inputs.length === 1
-        ? ({ op: "signal", args: assignment.inputs[0].signal } as const)
-        : undefined);
+    const value = assignment.value ?? directPortValue(assignment);
     if (
       !value ||
       (assignment.hasUnresolvedOperands && !assignment.unresolvedControlOnly) ||
@@ -90,15 +148,28 @@ export function packedDependencies(
       indices.add(index);
       reads.set(signal, indices);
     }
+    function visitTruth(operand: AssignmentValue): boolean {
+      const type = shape(operand);
+      if (!type) return false;
+      for (let bit = 0; bit < type.width; bit++)
+        if (!visit(operand, bit, type.signed, type.width)) return false;
+      return true;
+    }
     function visit(
       node: AssignmentValue,
       slot: number,
-      signed?: boolean,
+      signed: boolean | undefined,
+      width: number,
     ): boolean {
       const type = shape(node);
       if (!type) return false;
-      if (slot >= type.width && !type.fill) {
+      const contextSized =
+        node.op === "binary" ||
+        node.op === "conditional" ||
+        (node.op === "unary" && node.args[0] === "bitNot");
+      if (slot >= type.width && !type.fill && !contextSized) {
         if (signed === false) return true;
+        if (signed === undefined) return false;
         slot = type.width - 1;
       }
       switch (node.op) {
@@ -113,19 +184,22 @@ export function packedDependencies(
           record(id, indexFromRight([left, right], slot));
           return true;
         }
-        case "slice":
-          return visit(node.args[0], slot + node.args[2], false);
+        case "slice": {
+          const input = shape(node.args[0]);
+          return (
+            !!input &&
+            visit(node.args[0], slot + node.args[2], input.signed, input.width)
+          );
+        }
         case "bitSelect":
         case "indexedPartSelect": {
           const [id, index] = node.args;
           const range = rangeOf(id);
           if (!range) return false;
-          const constant = !resolveIndex
-            ? evaluateTraceValue(index, undefined, () => undefined)
-            : undefined;
-          const start = resolveIndex
-            ? resolveIndex(index)
-            : constant && traceInteger(constant.bits, constant.signed);
+          const resolved =
+            constantValue(index) ?? resolveSelector?.(index, "index");
+          const start =
+            resolved && traceInteger(resolved.bits, resolved.signed);
           if (start === undefined) return false;
           const up = node.op === "bitSelect" || node.args[2].ascendingIndices;
           const leftToRight = range[0] <= range[1];
@@ -146,27 +220,80 @@ export function packedDependencies(
             const part = node.args[index];
             const member = shape(part);
             if (!member) return false;
-            if (slot < member.width) return visit(part, slot, member.signed);
+            if (slot < member.width)
+              return visit(part, slot, member.signed, member.width);
             slot -= member.width;
           }
           return false;
         case "repeat": {
           const member = shape(node.args[1]);
           return (
-            !!member && visit(node.args[1], slot % member.width, member.signed)
+            !!member &&
+            visit(
+              node.args[1],
+              slot % member.width,
+              member.signed,
+              member.width,
+            )
           );
         }
         case "unary":
-          return node.args[0] === "bitNot" && visit(node.args[1], slot, signed);
-        case "binary":
           return (
-            ["bitAnd", "bitOr", "bitXor"].includes(node.args[0]) &&
-            visit(node.args[1], slot, signed) &&
-            visit(node.args[2], slot, signed)
+            node.args[0] === "bitNot" &&
+            visit(node.args[1], slot, signed, width)
           );
+        case "binary": {
+          const [op, left, right] = node.args;
+          if (op === "and" || op === "or")
+            return slot > 0 || (visitTruth(left) && visitTruth(right));
+          if (
+            op === "shiftLeft" ||
+            op === "shiftRight" ||
+            op === "arithmeticShiftRight"
+          ) {
+            const amount = (
+              constantValue(right) ?? resolveSelector?.(right, "shift")
+            )?.bits;
+            if (amount === undefined) return false;
+            if (/[xz]/.test(amount)) return true;
+            const shift = BigInt("0b" + amount);
+            const offset = shift >= BigInt(width) ? width : Number(shift);
+            const source = op === "shiftLeft" ? slot - offset : slot + offset;
+            if (source < 0) return true;
+            if (source < width) return visit(left, source, signed, width);
+            if (op !== "arithmeticShiftRight" || signed === false) return true;
+            return signed === true && visit(left, width - 1, signed, width);
+          }
+          return (
+            ["bitAnd", "bitOr", "bitXor"].includes(op) &&
+            visit(left, slot, signed, width) &&
+            visit(right, slot, signed, width)
+          );
+        }
+        case "conditional": {
+          const [condition, yes, no] = node.args;
+          const test = (
+            constantValue(condition) ??
+            resolveSelector?.(condition, "condition")
+          )?.bits;
+          if (test === undefined) return false;
+          if (test.includes("1")) return visit(yes, slot, signed, width);
+          return (
+            visit(no, slot, signed, width) &&
+            (!/[xz]/.test(test) || visit(yes, slot, signed, width))
+          );
+        }
         case "cast": {
           const member = shape(node.args[3]);
-          return !!member && visit(node.args[3], slot, member.signed);
+          return (
+            !!member &&
+            visit(
+              node.args[3],
+              slot,
+              member.signed,
+              Math.max(type.width, member.width),
+            )
+          );
         }
         case "literal":
         case "unsignedBit":
@@ -177,7 +304,17 @@ export function packedDependencies(
           return false;
       }
     }
-    if (!visit(value, ordinal, shape(value)?.signed)) return;
+    const result = shape(value);
+    if (
+      !result ||
+      !visit(
+        value,
+        ordinal,
+        result.signed,
+        Math.max(targetWidth ?? result.width, result.width),
+      )
+    )
+      return;
     const dataInputs = new Set(
       assignment.inputs
         .filter(({ kind }) => kind === "data")
@@ -209,6 +346,10 @@ export function focusPackedTrace(
       ranges.set(id, [0, 0]);
       if (selection === undefined) implicitScalars.add(id);
     }
+  }
+  for (const { id, packedRange } of trace.signals) {
+    if (packedRange?.length === 2 && packedRange.every(Number.isSafeInteger))
+      ranges.set(id, packedRange);
   }
   const selectedRange =
     typeof selection === "number"
@@ -290,7 +431,12 @@ export function focusPackedTrace(
     if (!values.has(bit))
       values.set(
         bit,
-        dependencies(trace.assignments[id], Math.abs(bit - range[1])),
+        dependencies(
+          trace.assignments[id],
+          Math.abs(bit - range[1]),
+          undefined,
+          Math.abs(range[0] - range[1]) + 1,
+        ),
       );
     return values.get(bit);
   }

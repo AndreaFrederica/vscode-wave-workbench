@@ -36,6 +36,25 @@ test('VCS KDB returns the elaborated library source for a module', {
   assert.equal(session.backend.sequence, requests);
 });
 
+test('KDB packed ranges use each elaborated instance override', {
+  skip: !process.env.WAVE_TEST_PACKED_PARAMETER_KDB,
+}, async (t) => {
+  const session = new KdbSession(
+    process.env.WAVE_TEST_PACKED_PARAMETER_BACKEND || binary,
+    independent ? undefined : process.env.VERDI_HOME,
+    undefined,
+    options,
+  );
+  t.after(() => session.dispose());
+  await session.open(process.env.WAVE_TEST_PACKED_PARAMETER_KDB);
+  const short = await session.resolve('tb.short_lane.middle');
+  const long = await session.resolve('tb.long_lane.middle');
+  assert.equal(short.file, long.file);
+  assert.equal(short.line, long.line);
+  assert.deepEqual(short.packedRange, [2, 0]);
+  assert.deepEqual(long.packedRange, [5, 0]);
+});
+
 test('real KDB: hierarchy, signal declaration, instance, definition and FSDB correlation',{skip:!process.env.WAVE_TEST_KDB},async t=>{
   const session=createSession();
   const wave=new Backend(binary,options);t.after(()=>{session.dispose();wave.dispose();});
@@ -635,6 +654,33 @@ test('Verdi NPI KDB: generate port selections retain instance indices and runtim
   const uses = await session.portLinks(top, 'shift');
   assert.equal(uses.length, 3);
   assert.equal(await session.unresolvedPortExpression(top, 'input_bus', 'loads'), false);
+});
+
+test('Verdi NPI KDB: integral parameters preserve instance overrides, width and four states', {
+  skip: independent || !process.env.WAVE_TEST_NPI_PARAMETER_KDB,
+}, async t => {
+  const session = new KdbSession(process.env.WAVE_WORKBENCH_VERDI_BACKEND || binary, process.env.VERDI_HOME);
+  t.after(() => session.dispose());
+  await session.open(process.env.WAVE_TEST_NPI_PARAMETER_KDB);
+  for (const [instance, delta, wide, four] of [
+    ['a', '111111110', 0xdecaf0123456789abn, '10xz'],
+    ['b', '000010001', 0x123456789abcdefffn, '01zx'],
+  ]) {
+    const scope = 'parameter_tb.' + instance;
+    const signed = await session.resolve(scope + '.DELTA');
+    assert.equal(signed.kind, 'npiParameter');
+    assert.equal(signed.instance, scope);
+    assert.equal(signed.line, 4);
+    assert.deepEqual(signed.parameterValue, { bits: delta, signed: true });
+    assert.deepEqual((await session.resolve(scope + '.WIDE')).parameterValue, {
+      bits: wide.toString(2).padStart(68, '0'), signed: false,
+    });
+    assert.deepEqual((await session.resolve(scope + '.FOUR')).parameterValue, {
+      bits: four, signed: false,
+    });
+    assert.equal((await session.resolve(scope + '.GAIN')).parameterValue, undefined);
+    assert.equal((await session.resolve(scope + '.LABEL')).parameterValue, undefined);
+  }
 });
 
 test('Verdi NPI KDB: dynamic part-select inputs preserve width and index direction', {

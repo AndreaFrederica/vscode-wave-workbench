@@ -15,19 +15,29 @@ type DocumentMethods = Omit<
   "resolveCustomEditor"
 >;
 
-export function createWaveDocuments(
-  api: typeof vscode,
-  viewers: Set<Viewer>,
+export interface WaveDocumentActions {
+  viewers: Set<Viewer>;
   projectChanges: vscode.EventEmitter<
     vscode.CustomDocumentContentChangeEvent<WaveDocument>
-  >,
-  saveProject: (
+  >;
+  saveProject(
     viewer: Viewer,
     filename?: string,
     cancellation?: vscode.CancellationToken,
-  ) => Promise<string>,
-  refreshSidebar: () => void,
-  onTraceProjectChanged: (viewer: Viewer) => void,
+  ): Promise<string>;
+  refreshSidebar(): void;
+  dropTraceProject(viewer: Viewer): void;
+}
+
+export function createWaveDocuments(
+  api: typeof vscode,
+  {
+    viewers,
+    projectChanges,
+    saveProject,
+    refreshSidebar,
+    dropTraceProject,
+  }: WaveDocumentActions,
 ): DocumentMethods {
   return {
     onDidChangeCustomDocument: projectChanges.event,
@@ -112,7 +122,7 @@ export function createWaveDocuments(
       }
       await viewer.restoreDesignView?.(document.savedDesignView);
       document.traceProject = document.savedTraceProject;
-      onTraceProjectChanged(viewer);
+      dropTraceProject(viewer);
       await viewer.ui("restoreView", { ...restored, projectBaseline: true });
       document.dirty = false;
     },

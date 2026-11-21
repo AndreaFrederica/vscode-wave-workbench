@@ -16,7 +16,12 @@ const {
   traceCursorWriters,
 } = require("../dist/rtl-trace-candidates");
 const { evaluateTraceValue } = require("../dist/rtl-trace-values");
+const { packedDependencies } = require("../dist/rtl-trace-bits");
 const { staticGraphSnapshot, temporalGraphSnapshot, traceGraphPage } = require("../dist/rtl-trace-graph-page");
+const { selectTracePathNodes, traceGraphPaths, tracePathReport } = require("../dist/rtl-trace-path");
+const { temporalFeedback } = require("../dist/rtl-trace-feedback");
+const { staticTracePaths, staticPathReport } = require("../dist/rtl-static-path");
+const { staticBitPaths, staticBitReport } = require("../dist/rtl-static-bit-path");
 const {
   followStaticFrontier,
   mergeStaticContinuationGraph,
@@ -27,6 +32,7 @@ const {
   followTemporalFrontier,
   mergeTemporalContinuationGraph,
   combinedTemporalMermaid,
+  continuationReport,
   TraceContextChanged,
   staticTraceCoverage,
   observationReport,
@@ -40,6 +46,43 @@ const {
   traceMermaidPages,
   traceReport,
 } = require("../dist/rtl-trace");
+
+test("inside comparisons use the full case type and wildcard only label bits", () => {
+  const literal = (bits, signed = false) => ({ op: "literal", args: [bits, signed] });
+  const compare = (selector, labels, span = [0, 1], operand = () => undefined) =>
+    evaluateTraceValue({ op: "membership", args: [selector, labels, span] },
+      undefined, operand)?.bits;
+  assert.equal(compare(literal("10z1"), [[literal("10x1")]]), "1");
+  assert.equal(compare(literal("1x01"), [[literal("10x1")]]), "x");
+  assert.equal(compare(literal("x001"), [[literal("0111")]]), "0");
+  assert.equal(compare(literal("011"), [[literal("011"), literal("100")]]), "1");
+  assert.equal(compare(literal("100"), [[literal("011"), literal("100")]]), "1");
+  const range = [literal("1110", true), literal("0010", true)];
+  assert.equal(compare(literal("0001", true), [range]), "1");
+  assert.equal(compare(literal("0001", true), [range, [literal("11111111")]]), "0");
+  const laterLabel = { op: "signal", args: 1 };
+  assert.equal(compare(literal("0001", true), [range, [laterLabel]], [0, 1],
+    () => ({ width: 8, signed: false })), "0");
+  assert.equal(compare(literal("0001", true), [range, [laterLabel]]), undefined);
+});
+
+test("case guards use later declarations for type and share the correct four-state rules", () => {
+  const literal = (bits, signed = false) => ({ op: "literal", args: [bits, signed] });
+  const late = { op: "typeShape", args: [8, false] };
+  const compare = (kind, selector, first, later = late) =>
+    evaluateTraceValue({
+      op: "caseMatch", args: [selector, [[first], [later]], [0, 1], kind],
+    }, undefined, () => undefined)?.bits;
+  assert.equal(compare("equal", literal("1111", true), literal("11111111", true)), "0");
+  assert.equal(compare("equal", literal("1111", true), literal("11111111", true),
+    { op: "typeShape", args: [8, true] }), "1");
+  assert.equal(compare("equal", literal("1x01", true), literal("1x01", true)), "1");
+  const label = literal("000010z1");
+  assert.equal(compare("wildcardZ", literal("10z1"), label), "1");
+  assert.equal(compare("wildcardZ", literal("1x01"), label), "0");
+  assert.equal(compare("wildcardX", literal("1x01"), label), "1");
+  assert.equal(compare("inside", literal("1x01"), label), "x");
+});
 
 test("automatic temporal continuations reuse shared targets and preserve unfinished work", async () => {
   const root = { signal: "tb.q", tick: "5" };
@@ -89,6 +132,23 @@ test("automatic temporal continuations reuse shared targets and preserve unfinis
   assert.deepEqual(interrupted.remaining, [clock]);
   assert.deepEqual(interrupted.stopReasons, ["timeBudget", "queryFailed"]);
 
+  const cancellation = new AbortController();
+  const cancelled = await followTemporalFrontier(
+    root,
+    frontier(input, clock),
+    2,
+    cancellation.signal,
+    new AbortController().signal,
+    async (request, signal) => {
+      if (request === clock) cancellation.abort();
+      signal.throwIfAborted();
+      return { context: { temporalTrace: frontier() } };
+    },
+  );
+  assert.deepEqual(cancelled.segments.map(({ request }) => request), [input]);
+  assert.deepEqual(cancelled.remaining, [clock]);
+  assert.deepEqual(cancelled.stopReasons, ["cancelled"]);
+
   let generation = 0;
   const invalidated = await followTemporalFrontier(
     root, frontier(input, clock), 2, new AbortController().signal, new AbortController().signal,
@@ -96,9 +156,9 @@ test("automatic temporal continuations reuse shared targets and preserve unfinis
       if (request === clock) generation++;
       return { context: { temporalTrace: frontier() } };
     },
-    async () => {
+    { assertCurrent: async () => {
       if (generation) throw new TraceContextChanged("The reference changed.");
-    },
+    } },
   );
   assert.deepEqual(invalidated.segments.map(({ request }) => request), [input]);
   assert.deepEqual(invalidated.remaining, [clock]);
@@ -129,7 +189,7 @@ test("automatic temporal continuations reuse shared targets and preserve unfinis
       assert.equal(request, clock);
       return { context: { temporalTrace: staticBoundary(child) } };
     },
-    undefined, deeper.segments,
+    { previous: deeper.segments },
   );
   assert.equal(deeper.segments.length, 2);
   assert.deepEqual(nextBatch.segments.map(({ request }) => request), [input, child, clock]);
@@ -139,6 +199,422 @@ test("automatic temporal continuations reuse shared targets and preserve unfinis
   ]);
   assert.deepEqual(nextBatch.remaining, []);
   assert.deepEqual(nextBatch.stopReasons, []);
+  const query = async (request) => ({
+    context: {
+      temporalTrace: request === input
+        ? staticBoundary(child)
+        : request === clock ? staticBoundary(child) : staticBoundary(),
+    },
+  });
+  const boundary = staticBoundary(input, clock);
+  const first = await followTemporalFrontier(
+    root, boundary, 1, new AbortController().signal, new AbortController().signal, query,
+  );
+  const split = await followTemporalFrontier(
+    root, boundary, 2, new AbortController().signal, new AbortController().signal, query,
+    { previous: first.segments },
+  );
+  assert.deepEqual(split, nextBatch);
+});
+
+test("temporal continuations share an effective history query across batches", async () => {
+  const root = { signal: "tb.q", tick: "20" };
+  const direct = { signal: "tb.d", tick: "8" };
+  const history = { ...direct, historyStart: "auto" };
+  const ordered = { ...direct, changeOrder: 1 };
+  const graph = { gaps: [history, direct, ordered].map(continuation => ({ continuation })) };
+  const requests = [];
+  const query = async request => {
+    requests.push(request);
+    return { context: {} };
+  };
+  const signal = new AbortController().signal;
+  const first = await followTemporalFrontier(root, graph, 1, signal, signal, query, {
+    defaultHistoryStart: "12",
+  });
+  assert.deepEqual(requests, [direct]);
+  assert.deepEqual(first.remaining, [ordered]);
+  assert.deepEqual(first.links, [
+    { segment: 0, gap: 1, nextSegment: 1 },
+    { segment: 0, gap: 2, nextSegment: 2 },
+    { segment: 0, gap: 0, nextSegment: 1 },
+  ]);
+  const resumed = await followTemporalFrontier(root, graph, 1, signal, signal, query, {
+    defaultHistoryStart: "12",
+    previous: first.segments,
+  });
+  assert.deepEqual(requests, [direct, ordered]);
+  assert.deepEqual(resumed.links, first.links);
+  assert.deepEqual(resumed.remaining, []);
+
+  const bounded = await followTemporalFrontier(root, graph, 0, signal, signal, query, {
+    defaultHistoryStart: "4",
+  });
+  assert.deepEqual(bounded.remaining, [direct, ordered, history]);
+
+  const selected = await followTemporalFrontier(root, graph, 2, signal, signal, query, {
+    defaultHistoryStart: "4",
+    selected: [ordered, history],
+  });
+  assert.deepEqual(selected.segments.map(({ request }) => request), [ordered, history]);
+  assert.deepEqual(selected.remaining, [direct]);
+  assert.deepEqual(selected.links.map(({ nextSegment }) => nextSegment), [3, 1, 2]);
+  const afterSelection = await followTemporalFrontier(root, graph, 1, signal, signal, query, {
+    defaultHistoryStart: "4",
+    previous: selected.segments,
+  });
+  assert.deepEqual(afterSelection.segments.map(({ request }) => request), [ordered, history, direct]);
+  assert.deepEqual(afterSelection.remaining, []);
+});
+
+test("static path export preserves declaration IDs, source operands, and trace direction", () => {
+  const location = { uri: "file:///sample.sv", range: { start: { line: 5, character: 2 } } };
+  const assignment = (id, read, target) => ({ id, kind: "continuous", location,
+    targets: [target], targetRange: [3, 2],
+    inputs: [{ signal: read, kind: "data", readBits: [1, 0], location }],
+  });
+  const graph = { root: 7, status: "partial", signals: [2, 5, 7, 10].map((id) => ({
+    id, instance: "tb", name: "n" + id,
+  })), assignments: [assignment(20, 2, 5), assignment(32, 5, 7), assignment(60, 10, 7)],
+  feedbackEdges: [], gaps: [{ signal: 5, reason: "depth" }, { signal: 10, reason: "depth" }] };
+  const drivers = staticTracePaths(graph, "drivers", [], [{ signal: "tb.n2" }], "shortest");
+  assert.deepEqual(drivers.paths, [{ node: 2, status: "found", root: 7, hops: 2 }]);
+  assert.deepEqual(drivers.graph.signals.map(({ id }) => id), [2, 5, 7]);
+  assert.deepEqual(drivers.graph.assignments.map(({ id }) => id), [20, 32]);
+  assert.deepEqual(drivers.graph.gaps, [graph.gaps[0]]);
+  const report = staticPathReport(drivers, "drivers", []);
+  assert.match(report, /Writes `tb.n7\[3:2\]`/);
+  assert.match(report, /data · `tb.n5\[1, 0\]` · `file:\/\/\/sample.sv` L6:3/);
+  assert.deepEqual(staticTracePaths({ ...graph, root: 2 }, "loads", [7], [], "all").paths,
+    [{ node: 7, status: "found", root: 2, hops: 2 }]);
+  assert.equal(staticTracePaths({ ...graph, root: 2 }, "drivers", [7], [], "all").paths[0].status, "unreachable");
+});
+
+test("static bit paths follow elaborated direct ports by packed position", () => {
+  const location = { uri: "file:///port.sv", range: { start: { line: 0, character: 0 } } };
+  const graph = { root: 1, bitSelection: { bit: 4 }, status: "partial", feedbackEdges: [], gaps: [],
+    signals: [{ id: 0, name: "data", instance: "tb", packedRange: [7, 0] },
+      { id: 1, name: "in", instance: "tb.dut", packedRange: [4, 7] }],
+    assignments: [{ id: 2, kind: "port", location, targets: [1],
+      inputs: [{ signal: 0, kind: "data" }], port: { fromRange: [6, 3] } }],
+  };
+  const find = (parent) => staticBitPaths(parent, "drivers", [
+    { signal: "tb.data", bit: 6 }, { signal: "tb.data", bit: 3 },
+  ], "all");
+  const mapped = find(graph);
+  assert.deepEqual(mapped.paths.map(({ status }) => status), ["found", "unreachable"]);
+  assert.deepEqual(mapped.edges, [{ input: { signal: 0, bit: 6 }, output: { signal: 1, bit: 4 }, assignment: 2, fromPort: true }]);
+  assert.match(staticBitReport(mapped, []), /elaborated port mapping/);
+  for (const port of [{ fromRange: [5, 3] }, { fromRange: [6, 3], fromField: "data" },
+    { fromRange: [6, 3], indexSignal: 0 }, { fromRange: [6, 3], conversion: { fromWidth: 3, toWidth: 4, twoState: false } }]) {
+    assert.equal(find({ ...graph, assignments: [{ ...graph.assignments[0], port }] }).assignmentsWithoutBitMappings, 1);
+  }
+
+  const snapshot = (sourceRange, fromWidth, signed, rootBit, port = {}) => ({
+    ...graph, bitSelection: { bit: rootBit },
+    signals: [{ ...graph.signals[0], packedRange: sourceRange, signed }, graph.signals[1]],
+    assignments: [{ ...graph.assignments[0], value: { op: "signal", args: 0 },
+      port: { conversion: { fromWidth, toWidth: 4, twoState: false }, ...port } }],
+  });
+  for (const [signed, status, missing] of [
+    [true, "found", 0], [false, "unreachable", 0], [undefined, "unreachable", 1],
+  ]) {
+    const result = staticBitPaths(snapshot([6, 5], 2, signed, 4), "drivers",
+      [{ signal: "tb.data", bit: 6 }, { signal: "tb.data", bit: 5 }], "all");
+    assert.deepEqual(result.paths.map(({ status }) => status), [status, "unreachable"]);
+    assert.equal(result.assignmentsWithoutBitMappings, missing);
+    assert.deepEqual(result.edges.map(({ input, output }) => [input.bit, output.bit]),
+      signed ? [[6, 4]] : []);
+    const low = find(snapshot([6, 3], 4, signed, 7));
+    assert.equal(low.paths[1].status, "found");
+  }
+  const narrowed = snapshot([7, 2], 6, true, 4);
+  assert.equal(find(narrowed).paths[0].status, "unreachable");
+  const loaded = staticBitPaths({ ...narrowed, root: 0, bitSelection: { bit: 5 } },
+    "loads", [{ signal: "tb.dut.in", bit: 4 }], "all");
+  assert.equal(loaded.paths[0].status, "found");
+  const twoState = find(snapshot([7, 0], 4, false, 4, {
+    fromRange: [6, 3], conversion: { fromWidth: 4, toWidth: 4, twoState: true },
+  }));
+  assert.equal(twoState.paths[0].status, "found");
+});
+
+test("whole-bus static bit paths recover RTL expressions across merged segments", () => {
+  const location = (line) => ({ uri: "file:///lanes.sv", range: { start: { line, character: 0 } } });
+  const a = { id: 9, name: "a", instance: "tb", declaration: location(0), packedRange: [3, 0] };
+  const mid = { id: 3, name: "mid", instance: "tb", declaration: location(1), packedRange: [5, 4] };
+  const q = { id: 12, name: "q", instance: "tb", declaration: location(2), packedRange: [0, 1] };
+  const assignment = (read, target, value, line) => ({
+    kind: "continuous", location: location(line), targets: [target], value,
+    inputs: [{ signal: read, kind: "data", edge: null, location: location(line) }],
+  });
+  const initial = { root: q.id, signals: [q, mid], frontier: [], diagnostics: [],
+    assignments: [assignment(mid.id, q.id, { op: "signal", args: mid.id }, 4)],
+  };
+  const segment = (high) => {
+    const trace = { root: 7, signals: [{ ...mid, id: 7 }, a], frontier: [], diagnostics: [],
+      assignments: [assignment(a.id, 7, { op: "concat", args: [
+        { op: "select", args: [a.id, high, high] }, { op: "select", args: [a.id, 2, 2] },
+      ] }, 3)],
+    };
+    return { signal: "tb.mid", trace, coverage: staticTraceCoverage(trace) };
+  };
+  const find = (segments) => {
+    const expressions = new Map();
+    const graph = mergeStaticContinuationGraph(initial, {
+      status: "resolvedWithinScope", segments, links: [],
+    }, expressions);
+    assert.equal(JSON.stringify(staticGraphSnapshot(graph)).includes('"op":"concat"'), false);
+    return staticBitPaths(graph, "drivers", [
+      { signal: "tb.a", bit: 3 }, { signal: "tb.a", bit: 0 },
+    ], "all", undefined, expressions);
+  };
+  const result = find([segment(3), segment(3)]);
+  assert.deepEqual(result.paths.map(({ status }) => status), ["found", "unreachable"]);
+  assert.deepEqual(result.edges.map(({ input, output, fromExpression }) =>
+    [input.bit, output.bit, fromExpression]), [[3, 5, true], [5, 0, true]]);
+  assert.match(staticBitReport(result, []), /RTL expression/);
+  const conflicting = find([segment(3), segment(0)]);
+  assert.ok(conflicting.paths.every(({ status }) => status === "unreachable"));
+  assert.equal(conflicting.assignmentsWithoutBitMappings, 1);
+});
+
+test("packed shifts use the assignment width and retain the arithmetic sign bit", () => {
+  const readsAt = packedDependencies((id) => id === 1 ? [3, 0] : [4, 7],
+    (id) => id === 1);
+  const signal = (args) => ({ op: "signal", args });
+  const literal = (bits) => ({ op: "literal", args: [bits, false] });
+  const shift = (op, lhs, rhs) => ({ op: "binary", args: [op, lhs, rhs] });
+  const reads = (value, slot, width = 8, selector) => {
+    const result = readsAt({ kind: "continuous", value, targets: [0],
+      inputs: [1, 2].map((signal) => ({ signal, kind: "data" })) }, slot, selector, width);
+    return result && [...result].map(([id, bits]) => [id, [...bits]]);
+  };
+  assert.deepEqual(reads(shift("shiftLeft", signal(2), literal("10")), 5), [[2, [4]]]);
+  assert.deepEqual(reads(shift("shiftLeft", signal(2), literal("10")), 1), []);
+  assert.deepEqual(reads(shift("arithmeticShiftRight", signal(1), literal("11")), 7), [[1, [3]]]);
+  assert.deepEqual(reads(shift("shiftRight", signal(1), literal("11")), 7), []);
+  assert.equal(reads(shift("shiftLeft", signal(1), signal(2)), 5), undefined);
+  assert.deepEqual(reads(shift("shiftLeft", signal(2), signal(1)), 5, 8,
+    () => ({ bits: "0010", signed: true })), [[2, [4]]]);
+  assert.deepEqual(reads(shift("shiftRight", signal(1), signal(2)), 0, 8,
+    () => ({ bits: "11", signed: true })), [[1, [3]]]);
+  assert.deepEqual(reads(shift("shiftLeft", signal(1), signal(2)), 5, 8,
+    () => ({ bits: "0x", signed: false })), []);
+  assert.deepEqual(reads(shift("shiftRight", signal(1), literal("x")), 0), []);
+  const select = (test) => ({ op: "conditional", args: [literal(test), signal(1), signal(2)] });
+  assert.deepEqual(reads(select("1x"), 1), [[1, [1]]]);
+  assert.deepEqual(reads(select("x"), 1), [[2, [6]], [1, [1]]]);
+  const enable = shift("and", {
+    op: "bitSelect", args: [1, signal(2)],
+  }, signal(2));
+  assert.equal(reads(enable, 0), undefined);
+  assert.deepEqual(reads(enable, 0, 8, () => ({ bits: "10", signed: false })),
+    [[1, [2]], [2, [7, 6, 5, 4]]]);
+  assert.deepEqual(reads(enable, 1), []);
+});
+
+test("static bit paths keep separate lanes of the same packed declaration", () => {
+  const location = { uri: "file:///lanes.sv", range: { start: { line: 0, character: 0 } } };
+  const assignment = (id, signal, bit, target, targetBit) => ({ id, location,
+    targets: [target], inputs: [{ signal, kind: "data" }],
+    bitDependencies: [{ targetBit, reads: [{ signal, bits: [bit] }] }],
+  });
+  const graph = { root: 2, bitSelection: { bit: 3 }, status: "partial",
+    signals: [0, 1, 2].map((id) => ({ id, name: "n" + id, instance: "tb", packedRange: [3, 0] })),
+    assignments: [assignment(0, 0, 0, 1, 0), assignment(1, 0, 1, 1, 1),
+      assignment(2, 1, 0, 2, 3), assignment(3, 1, 1, 2, 2)],
+    feedbackEdges: [], gaps: [],
+  };
+  const drivers = staticBitPaths(graph, "drivers", [{ signal: "tb.n0", bit: 0 }, { signal: "tb.n0", bit: 1 }], "all");
+  assert.deepEqual(drivers.paths, [
+    { node: { signal: 0, bit: 0 }, status: "found", root: { signal: 2, bit: 3 }, hops: 2 },
+    { node: { signal: 0, bit: 1 }, status: "unreachable" },
+  ]);
+  assert.deepEqual(drivers.edges.map(({ assignment }) => assignment), [0, 2]);
+  assert.match(staticBitReport(drivers, []), /\x60tb.n1\[0\]\x60 → \x60tb.n2\[3\]\x60/);
+  const loads = staticBitPaths({ ...graph, root: 0, bitSelection: { bit: 0 } }, "loads",
+    [{ signal: "tb.n2", bit: 3 }, { signal: "tb.n2", bit: 2 }], "shortest");
+  assert.deepEqual(loads.paths.map(({ status }) => status), ["found", "unreachable"]);
+  assert.deepEqual(loads.edges.map(({ input, output }) => [input.signal, output.signal]), [[1, 2], [0, 1]]);
+  const incomplete = staticBitPaths({ ...graph, assignments: [{ ...graph.assignments[2], bitDependencies: undefined }] },
+    "drivers", [{ signal: "tb.n1", bit: 0 }], "shortest");
+  assert.equal(incomplete.assignmentsWithoutBitMappings, 1);
+  assert.equal(incomplete.edges.length, 0);
+});
+
+test("temporal feedback marks a cycle completed by a joined continuation", () => {
+  const edges = [{ source: 0, target: 1 }, { source: 1, target: 2 },
+    { source: 0, target: 2 }];
+  const pending = { status: "pending", source: 2, target: 0 };
+  const merged = { status: "joined", source: 1, anchor: 1 };
+  assert.equal(temporalFeedback(3, edges, [pending, merged]), undefined);
+  assert.deepEqual(
+    temporalFeedback(3, edges, [{ ...pending, status: "joined" }, merged]),
+    [{ source: 2, target: 0, gap: 0 }],
+  );
+  assert.deepEqual(
+    temporalFeedback(3, [...edges, { source: 2, target: 2 }]),
+    [{ source: 2, target: 2, edge: 3 }],
+  );
+});
+
+test("path export follows joined gaps and retains original evidence through cycles", () => {
+  const assignment = { kind: "blocking", location: {
+    uri: "file:///fixture.sv", range: { start: { line: 2, character: 1 } },
+  } };
+  const source = { file: "/fixture.c", line: 7, column: 3, identity: "matched" };
+  const recordedWriter = { assignment: 1, commitOrdinal: 19, evaluation: {
+    tick: "0", ordinal: 17, operandValues: { ready: "1" },
+    externalSteps: [{ operation: "tf_getp(2)", value: "1", source }],
+  } };
+  const recordedTaskTransfer = {
+    input: { ordinal: 11, tick: "0", source },
+    write: { ordinal: 13, tick: "0", source },
+    reads: [{ ordinal: 10, tick: "0", source, operation: "firmware byte offset 16", value: "00010010" }],
+  };
+  const graph = {
+    roots: [0], scale: "1ps", coverage: { status: "partial", reasons: ["requestBudget"] },
+    nodes: Array.from({ length: 7 }, (_, id) => ({
+      signal: "tb.n" + id, point: { tick: "0", value: "0", ...(id === 3 ? { recordedWriter, recordedTaskTransfer, orderAtTick: 2, valueChangeOrdinal: 18 } : {}), ...(id === 0 ? { initializationAssignments: [3] } : {}) },
+      sources: [{ segment: 0, node: id }],
+      ...(id === 2 ? { recordedWordEvidence: [{ segment: 0, node: id, writers: [{
+        assignment: 1, commitOrdinal: 9, targetRange: [2, 0], evaluation: { tick: "0", ordinal: 8, operandValues: { mask: "001" }, guardEntryValues: { w3_6_mask: "101" }, guardEntryTicks: { w3_6_mask: "0" }, guardEntryNextOrdinals: { w3_6_mask: 7 } },
+      }] }] } : {}),
+    })),
+    edges: [
+      { source: 2, target: 0, segment: 0, assignment: 0, kind: "data", confidence: "possible" },
+      { source: 0, target: 2, segment: 0, assignment: 0, kind: "data", confidence: "possible" },
+      { source: 1, target: 2, segment: 0, assignment: 0, kind: "data", confidence: "possible" },
+    ],
+    gaps: [
+      { source: 3, target: 2, status: "joined", segment: 0, evidence: { reason: "noChangeInWindow" } },
+      { source: 4, target: 0, signal: "tb.unknown", status: "unmatched", segment: 0, evidence: { reason: "staticBudget", tick: "0" } },
+      { target: 2, signal: "tb.input", status: "unresolved", segment: 0, evidence: {
+        reason: "unmapped", bindingIssue: "waveformMissing", tick: "0", use: { assignment: 4, kind: "data" },
+      } },
+      { anchor: 3, signal: "tb.previous", status: "pending", segment: 0, nextSegment: 7, evidence: {
+        reason: "staticBudget", tick: "0", continuation: { signal: "tb.previous", tick: "0", changeOrder: 2 },
+      } },
+      { target: 6, signal: "tb.outside", status: "unresolved", segment: 0, evidence: { reason: "unmapped", tick: "0" } },
+    ],
+    assignmentSources: [{ 0: assignment, 1: assignment, 2: assignment, 3: assignment, 4: assignment }],
+  };
+  const result = traceGraphPaths(graph, [3, 4, 3]);
+  assert.equal(result.graph.feedbackEdges, undefined);
+  assert.deepEqual(result.paths, [
+    { node: 3, status: "found", root: 0, hops: 2 },
+    { node: 4, status: "unreachable" },
+  ]);
+  assert.deepEqual(result.graph.nodes.map(({ sourceNode }) => sourceNode), [0, 2, 3, 4]);
+  assert.deepEqual(result.graph.nodes[2].point.recordedWriter, recordedWriter);
+  assert.deepEqual(result.graph.edges.map(({ source, target, confidence }) =>
+    [source, target, confidence]), [[1, 0, "possible"]]);
+  assert.deepEqual(result.graph.gaps.map(({ status, source, target, anchor }) => [status, source, target, anchor]), [
+    ["joined", 2, 1, undefined], ["unmatched", 3, 0, undefined],
+    ["unresolved", undefined, 1, undefined], ["pending", undefined, undefined, 2],
+  ]);
+  assert.equal(result.graph.gaps[3].nextSegment, 7);
+  assert.deepEqual(result.graph.gapSummary.byBindingIssue, { waveformMissing: 1 });
+  assert.deepEqual(Object.keys(result.graph.assignmentSources[0]), ["0", "1", "3", "4"]);
+  const report = tracePathReport(result, combinedTemporalMermaid(result.graph));
+  assert.match(report, /Commit 19/);
+  assert.match(report, /Change 2 · Value-change callback 18/);
+  assert.match(report, /Recorded operand `ready` = `1`/);
+  assert.match(report, /External step 1 · `tf_getp\(2\)` = `1` · `\/fixture\.c` L7:3 · Source matched/);
+  assert.match(report, /Commit 9 · Write \[2:0\]/);
+  assert.match(report, /Recorded operand `mask` = `001`/);
+  assert.match(report, /Wait resume L3:6 · mask = 101 @ 0 · before event 7/);
+  assert.match(report, /`t2 · tb.n3 @ 0` · input commit 11 .*member write commit 13/);
+  assert.match(report, /firmware byte offset 16 = 00010010/);
+  assert.match(report, /data candidate/);
+  assert.match(report, /requestBudget/);
+  assert.match(report, /Evidence gaps on these paths/);
+  assert.match(report, /`tb.input` @ 0 → t1 · unresolved/);
+  assert.match(report, /Continue from `tb.previous` @ 0 · Change 2/);
+  assert.doesNotMatch(report, /tb.outside/);
+  assert.throws(() => traceGraphPaths(graph, [7]), /outside the trace graph/);
+
+  const narrowed = traceGraphPaths(result.graph, [2]);
+  assert.deepEqual(narrowed.paths, [{ node: 2, status: "found", root: 0, hops: 2 }]);
+  assert.deepEqual(narrowed.graph.nodes.map(({ sourceNode }) => sourceNode), [0, 2, 3]);
+  assert.deepEqual(narrowed.graph.nodes[2].point.recordedWriter, recordedWriter);
+  assert.deepEqual(narrowed.graph.gaps[0], result.graph.gaps[0]);
+  assert.deepEqual(narrowed.graph.assignmentSources, result.graph.assignmentSources);
+
+  const merged = {
+    source: 2, target: undefined, anchor: 2, status: "joined", segment: 0, nextSegment: 1,
+    evidence: { reason: "staticBudget", use: { assignment: 2, kind: "data" } },
+  };
+  const withMerged = traceGraphPaths({ ...graph, gaps: [...graph.gaps, merged] }, [3]);
+  const mergedAgain = traceGraphPaths(withMerged.graph, [2]);
+  assert.deepEqual(mergedAgain.paths, narrowed.paths);
+  assert.deepEqual(mergedAgain.graph.gaps[1], { ...merged, source: 1, anchor: 1 });
+  assert.deepEqual(mergedAgain.graph.assignmentSources[0][2], assignment);
+  assert.match(tracePathReport(mergedAgain, []), /t1 · Joined continuation S0 → S1/);
+
+  const extraEdge = (source, target) => ({
+    ...graph.edges[0], source, target, assignment: 2,
+  });
+  const branched = {
+    ...graph,
+    roots: [0, 5],
+    edges: [
+      ...graph.edges,
+      extraEdge(2, 1),
+      extraEdge(3, 1),
+      extraEdge(1, 5),
+      extraEdge(3, 6),
+    ],
+    gaps: [{ ...graph.gaps[0], anchor: 1 }, ...graph.gaps.slice(1)],
+  };
+  const all = traceGraphPaths(branched, [3, 4], undefined, "all");
+  assert(all.graph.feedbackEdges?.length);
+  assert.match(tracePathReport(all, []), /Feedback in the time graph/);
+  assert.deepEqual(all.paths, result.paths);
+  assert.deepEqual(all.graph.roots, [0, 5]);
+  assert.deepEqual(all.graph.nodes.map(({ sourceNode }) => sourceNode), [0, 1, 2, 3, 4, 5]);
+  const edges = all.graph.edges.map(({ source, target }) => [source, target].join("→"));
+  assert.deepEqual(edges.sort(), ["1→2", "1→5", "2→0", "2→1", "3→1"]);
+  assert.deepEqual(all.graph.gaps[0], branched.gaps[0]);
+  assert.deepEqual(all.graph.gaps.slice(1).map(({ signal }) => signal), ["tb.unknown", "tb.input", "tb.previous"]);
+  const { joined, pending, unmatched, unresolved } = all.graph.gapSummary;
+  assert.deepEqual([joined, pending, unmatched, unresolved], [1, 1, 1, 1]);
+  assert.deepEqual(Object.keys(all.graph.assignmentSources[0]), ["0", "1", "2", "3", "4"]);
+  assert.deepEqual(all.graph.coverage, graph.coverage);
+  assert.match(tracePathReport(all, []), /Every recorded branch/);
+});
+
+test("path selectors distinguish ordered changes from same-tick samples", () => {
+  const graph = { nodes: [
+    { signal: "tb.req[1:0]", waveformSignal: "dump.req[1:0]", point: { tick: "5", orderAtTick: 1, valueChangeOrdinal: 0 } },
+    { signal: "tb.req[1:0]", point: { tick: "5", orderAtTick: 2, valueChangeOrdinal: 7 } },
+    { signal: "tb.req[1:0]", point: { tick: "5", sampleOnly: true } },
+    { signal: "tb.req[0]", point: { tick: "5" } },
+    { signal: "tb.req[1:0]", point: { tick: "6" } },
+  ] };
+  const selection = selectTracePathNodes(graph, [0], [
+    { signal: "tb.req", tick: "0005", changeOrder: 2 },
+    { signal: "tb.req[1:0]", tick: "5", changeOrder: 1 },
+    { signal: "tb.req[0]", tick: "5", changeOrder: 1 },
+    { signal: "tb.req", tick: "10" },
+  ]);
+  assert.deepEqual(selection.nodeIds, [0, 1, 3]);
+  assert.deepEqual(selection.matches.map(row => row.nodeIds), [[1], [0], [3], []]);
+  assert.deepEqual(selectTracePathNodes(graph, [], [
+    { signal: "dump.req[1:0]", tick: "5" },
+    { signal: "dump.req", tick: "5" },
+  ]).matches.map(row => row.nodeIds), [[0], [0]]);
+  assert.deepEqual(selectTracePathNodes(graph, [], [{ signal: "tb.req", tick: "5" }]).nodeIds, [0, 1, 2]);
+  assert.deepEqual(selectTracePathNodes(graph, [], [
+    { signal: "tb.req", tick: "5", callbackOrdinal: 7 },
+    { signal: "dump.req", tick: "5", callbackOrdinal: 0 },
+  ]).nodeIds, [1, 0]);
+  assert.throws(() => selectTracePathNodes(graph, [], [{ signal: "tb.req", tick: "5", callbackOrdinal: -1 }]), /non-negative callbackOrdinal/);
+  assert.throws(() => selectTracePathNodes(graph, [], []), /Provide nodeIds or nodeSelectors/);
+  assert.throws(() => selectTracePathNodes(graph, [], [{ signal: "tb.req", tick: "5ps" }]), /decimal tick/);
+  assert.throws(() => selectTracePathNodes(graph, [], [{ signal: "tb.req", tick: "10" }]), /No time graph nodes/);
+  assert.throws(() => selectTracePathNodes({ nodes: Array(17).fill(graph.nodes[0]) }, [], [{ signal: "tb.req", tick: "5" }]), /exceeds 16 nodes/);
 });
 
 test("combined time graphs join only the same transition and retain both edge sources", () => {
@@ -163,6 +639,12 @@ test("combined time graphs join only the same transition and retain both edge so
   const relation = { source: 1, target: 0, assignment: 0, kind: "data", confidence: "possible" };
   const root = segment("tb.q", [{ signal: 0, tick: "4", value: "1" }, shared], [relation], [gap]);
   const next = segment("tb.a", [{ signal: 0, tick: "3", value: "1", orderAtTick: 2 }, shared], [relation]);
+  const continuedDeclaration = {
+    uri: pathToFileURL(path.resolve("a.sv")).href,
+    range: { start: { line: 4, character: 2 } },
+  };
+  next.signals.push({ id: 0, declaration: continuedDeclaration });
+  next.context.waveformBindings = { "0:": "dump.tb.a" };
   const walk = { segments: [{ request, trace: next }], remaining: [], stopReasons: [],
     links: [{ segment: 0, gap: 0, nextSegment: 1 }] };
   const joined = mergeTemporalContinuationGraph(root, walk);
@@ -183,11 +665,155 @@ test("combined time graphs join only the same transition and retain both edge so
   assert.equal(joined.nodes.length, 3);
   assert.deepEqual(joined.nodes[1].sources, [{ segment: 0, node: 1 }, { segment: 1, node: 1 }]);
   assert.equal(joined.gaps[0].status, "joined");
+  assert.deepEqual(snapshot.metadata.gapSummary, {
+    joined: 1, pending: 0, unmatched: 0, unresolved: 0,
+    byReason: { nodeBudget: { joined: 1, pending: 0, unmatched: 0, unresolved: 0 } },
+    byBindingIssue: {},
+  });
   assert.equal(joined.gaps[0].target, 0);
   assert.equal(joined.gaps[0].source, 2);
+  const waitGap = {
+    ...gap,
+    use: { ...gap.use, evidence: { ...gap.use.evidence,
+      waitResumeCause: "orderedCallbacks", waitResumeCallbackOrdinal: 7,
+    } },
+  };
+  const withWait = segment("tb.q", root.context.temporalTrace.nodes, [relation], [waitGap]);
+  for (const callback of [undefined, 7, 14]) {
+    const continued = segment("tb.a", [
+      { ...next.context.temporalTrace.nodes[0], valueChangeOrdinal: callback }, shared,
+    ], [relation]);
+    const graph = mergeTemporalContinuationGraph(withWait, {
+      ...walk, segments: [{ request, trace: continued }],
+    });
+    assert.equal(graph.gaps[0].status, callback === 7 ? "joined" : "unmatched");
+    if (callback === 7) {
+      const selected = traceGraphPaths(graph, [graph.gaps[0].source]);
+      assert.match(tracePathReport(selected, []), /Joined continuation.*callback 7 enabled wait/);
+    }
+  }
+  assert.equal(joined.nodes[2].waveformSignal, "dump.tb.a");
+  assert.deepEqual(joined.nodes[2].declaration, continuedDeclaration);
+  const { traceTimeSchematic } = require("../dist/rtl-schematic");
+  const continuedSchematic = traceTimeSchematic(root, joined);
+  assert.deepEqual(continuedSchematic.locations.get("event-2"), continuedDeclaration);
+  assert.equal(continuedSchematic.graph.nodes[2].waveformSignal, "dump.tb.a");
+  assert.equal(continuedSchematic.graph.nodes[1].wave, undefined);
   assert.match(combinedTemporalMermaid(joined).join("\n"), /continued index candidate.*matches recorded array index.*commit 8/);
   assert.deepEqual(joined.edges.map(({ segment, source, target }) => [segment, source, target]),
     [[0, 1, 0], [1, 1, 2]]);
+  const captured = {
+    ...joined,
+    nodes: joined.nodes.map((node, index) => index > 1 ? node : {
+      ...node,
+      point: index === 0
+        ? { ...node.point, recordedWriter: { assignment: 0, commitOrdinal: 8, evaluation: { tick: "4", ordinal: 4 } } }
+        : { ...node.point, sampleOnly: true, operandEvaluationOrdinal: 4 },
+    }),
+  };
+  const capturedDiagram = combinedTemporalMermaid(captured).join("\n");
+  assert.match(capturedDiagram, /captured operand .* evaluation 4/);
+  assert.match(capturedDiagram, /commit 8 .* evaluated .* 4 order 4/);
+  assert.match(traceTimeSchematic(root, captured).graph.nodes[1].detail, /求值 4 的操作数/);
+  const sourceAt = (line, instance) => ({
+    kind: "continuous", instance,
+    location: { ...continuedDeclaration, range: { start: { line, character: 2 } } },
+  });
+  const sourceIndex = {
+    ...joined,
+    edges: [
+      { ...joined.edges[0], alsoAssignments: [1, 2, 3, 4, 5, 6, 7] },
+      { ...joined.edges[1], target: 0 },
+    ],
+    assignmentSources: [
+      Object.fromEntries(Array.from({ length: 8 }, (_, id) => [id, sourceAt(10 + id, "tb")])),
+      { 0: sourceAt(30, "tb.child") },
+    ],
+  };
+  const sourcesDiagram = combinedTemporalMermaid(sourceIndex).join("\n");
+  assert.match(sourcesDiagram, /t1 -->\|data candidate.*RTL S0\/A1 S0\/A2 .* S0\/A8\| t0/);
+  assert.match(sourcesDiagram, /t1 -->\|data candidate.*RTL S1\/A1\| t0/);
+  assert.match(sourcesDiagram, /t2 -\.->\|continued index candidate.*RTL S0\/A1\| t0/);
+  const sourceReport = continuationReport(walk, [], sourceIndex);
+  assert.match(sourceReport, /- `S0\/A2` · continuous · `tb` · .* L12:3/);
+  assert.match(sourceReport, /- `S1\/A1` · continuous · `tb.child` · .* L31:3/);
+  const pendingWalk = {
+    ...walk, segments: [], remaining: [request],
+  };
+  const pendingGraph = mergeTemporalContinuationGraph(root, pendingWalk);
+  const pendingDiagram = combinedTemporalMermaid(pendingGraph).join("\n");
+  assert.equal(pendingGraph.gapSummary.pending, 1);
+  assert.match(continuationReport(pendingWalk, [], pendingGraph),
+    /\| Time graph node budget reached \| 0 \| 1 \| 0 \| 0 \|/);
+  assert.match(pendingDiagram, /g0 -\.->\|index candidate.*RTL S0\/A1\| t0/);
+  const liveProvider = { kind: "live", sampling: "endOfSlot", liveSessionId: "session-a" };
+  const liveRoot = { ...root, context: { ...root.context, provider: liveProvider } };
+  const otherSession = {
+    ...next,
+    context: { ...next.context, provider: { ...liveProvider, liveSessionId: "session-b" } },
+  };
+  const separate = mergeTemporalContinuationGraph(liveRoot, {
+    ...walk, segments: [{ request, trace: otherSession }],
+  });
+  assert.equal(separate.nodes.length, 4);
+  assert.equal(separate.gaps[0].status, "unmatched");
+  assert.equal(separate.gapSummary.byReason.nodeBudget.unmatched, 1);
+  assert.equal(temporalGraphSnapshot(separate).metadata.provider.liveSessionId, "session-a");
+  const source = { file: path.resolve("task.sv"), line: 9, column: 3, identity: "matched" };
+  const task = {
+    index: 1,
+    input: { tick: "1", ordinal: 3, source },
+    write: { tick: "2", ordinal: 6, source },
+    reads: [{ operation: "$fgetc at byte 0", value: "00000001", tick: "1", ordinal: 2, source }],
+  };
+  next.context.temporalTrace.nodes[1] = { ...shared, recordedTaskTransfer: task };
+  const withTask = mergeTemporalContinuationGraph(root, walk);
+  assert.equal(withTask.nodes.length, joined.nodes.length);
+  assert.equal(withTask.nodes[1].point.recordedTaskTransfer, task);
+  assert.equal(shared.recordedTaskTransfer, undefined);
+  const diagram = combinedTemporalMermaid(withTask).join("\n");
+  assert.match(diagram, /task1 -->\|recorded member write .* commit 6\| t1/);
+  assert.match(diagram, /task1_0 -->\|recorded input byte\| task1/);
+  assert.match(continuationReport(walk, [], withTask), /input commit 3 @ 1 .* member write commit 6 @ 2/);
+  const schematic = traceTimeSchematic(root, withTask);
+  assert.deepEqual(schematic.locations.get("event-1-task-input-0"), {
+    uri: pathToFileURL(source.file).href,
+    range: { start: { line: 8, character: 2 } },
+  });
+  assert(schematic.graph.edges.some(({ from, to }) =>
+    from === "event-1-task-input-0" && to === "event-1-task-input"));
+  assert(schematic.graph.edges.some(({ from, to }) =>
+    from === "event-1-member-write" && to === "event-1"));
+  const firstWordLocation = sourceAt(20, "tb");
+  const nextWordLocation = sourceAt(25, "tb");
+  const firstWrite = { assignment: 1, commitOrdinal: 4, targetRange: [7, 4] };
+  const nextWrite = { assignment: 0, commitOrdinal: 6, targetRange: [3, 0],
+    contributingRanges: [[3, 0]], evaluation: { ordinal: 5, tick: "2", value: "0011" } };
+  root.assignmentSources[1] = firstWordLocation;
+  next.assignmentSources[0] = nextWordLocation;
+  root.context.temporalTrace.nodes[1] = { ...shared, recordedWordWriters: [firstWrite],
+    recordedWordUnresolved: [[3, 0]] };
+  next.context.temporalTrace.nodes[1] = { ...shared, recordedWordWriters: [nextWrite],
+    recordedWordChanges: [{ ordinal: 7, value: "10100011" }] };
+  const withWords = mergeTemporalContinuationGraph(root, walk);
+  assert.deepEqual(temporalGraphSnapshot(withWords).sections.nodes[1].recordedWordEvidence, [
+    { segment: 0, node: 1, writers: [firstWrite], unresolved: [[3, 0]], callbacks: undefined },
+    { segment: 1, node: 1, writers: [nextWrite], unresolved: undefined,
+      callbacks: [{ ordinal: 7, value: "10100011" }] },
+  ]);
+  const wordDiagram = combinedTemporalMermaid(withWords).join("\n");
+  assert.match(wordDiagram, /word1_1_1_write0\["Commit 6.*Write .*Contributes .*Evaluation 5 #64;/);
+  assert.match(wordDiagram, /word1_1_1_write0 -->\|RTL S1\/A1\| t1/);
+  assert.match(wordDiagram, /word1_0_1_unresolved -\.->\|unverified bits\| t1/);
+  const wordReport = continuationReport(walk, [], withWords);
+  assert.match(wordReport.split("### Continuation 1")[1], /t0\["tb\.a #64; 3 #183; change 2 #61; 1/);
+  assert.match(wordReport, /S1\/A1.*Commit 6.*Contributes \[3:0\].*Evaluation 5/);
+  assert.match(wordReport, /Callback 7 · `10100011`/);
+  const wordSchematic = traceTimeSchematic(root, withWords);
+  assert.deepEqual(wordSchematic.locations.get("write-0-1-0"), firstWordLocation.location);
+  assert.deepEqual(wordSchematic.locations.get("write-1-1-0"), nextWordLocation.location);
+  root.context.temporalTrace.nodes[1] = shared;
+  next.context.temporalTrace.nodes[1] = shared;
   for (const patch of [{ tick: "2" }, { orderAtTick: 1 }, { value: "0" }, { sampleOnly: true }]) {
     const timeline = next.context.temporalTrace;
     const original = timeline.nodes[0];
@@ -300,6 +926,21 @@ test("automatic static continuations share targets, close cycles, and retain par
   assert.deepEqual(queried, ["tb.b", "tb.shared"]);
   assert.equal(partial.segments.length, 1);
   assert.deepEqual(resumed, walk);
+
+  const selected = await followStaticFrontier(
+    "tb.q", initial, 1, cancellation.signal, deadline.signal,
+    traverse, async () => {}, [], ["tb.b"],
+  );
+  assert.deepEqual(selected.segments.map(({ signal }) => signal), ["tb.b"]);
+  assert.deepEqual(selected.remaining, ["tb.a", "tb.shared"]);
+  assert.deepEqual(selected.links.map(({ nextSegment }) => nextSegment), [2, 1, 3]);
+  const completed = await followStaticFrontier(
+    "tb.q", initial, 2, cancellation.signal, deadline.signal,
+    traverse, async () => {}, selected.segments,
+  );
+  assert.deepEqual(completed.segments.map(({ signal }) => signal), ["tb.b", "tb.a", "tb.shared"]);
+  assert.deepEqual(completed.links.map(({ nextSegment }) => nextSegment), [2, 1, 3, 3, 0]);
+  assert.equal(completed.status, "resolvedWithinScope");
 
   const stalled = await followStaticFrontier(
     "tb.q", graph("tb.q"), 3, cancellation.signal, deadline.signal, traverse, async () => {},
@@ -480,12 +1121,14 @@ test("KDB selects the elaborated generate branch and specializes an array index 
   const other = { uri, name: "one", line: 8, byteColumn: 10 };
   const trace = {
     schemaVersion: 1, revision: "1", scope: "file", root: 0, diagnostics: [], frontier: [],
-    signals: ["out", "mem", "ptr", "Top"].map((name, id) => ({ id, name, declaration: location })),
+    signals: ["out", "mem", "ptr", "Top", "Enabled", "Other"].map((name, id) => ({
+      id, name, declaration: location, ...(id >= 3 ? { instanceParameter: true } : {}),
+    })),
     assignments: [
       {
         kind: "continuous", targets: [0], location, hasUnresolvedOperands: false,
         generateBranches: [{ selected, alternatives: [other] }],
-        inputs: [1, 2, 3].map(signal => ({ kind: "data", signal, location })),
+        inputs: [1, 2, 3, 4, 5].map(signal => ({ kind: "data", signal, location })),
         wordRead: { signal: 1, index: {
           op: "boundSelect", args: [2, { op: "signal", args: 3 }, { op: "unsignedBit", args: false }],
         } },
@@ -507,6 +1150,11 @@ test("KDB selects the elaborated generate branch and specializes an array index 
         fullname, instance: "dut", kind: "npiParameter", file, line: 3,
         parameterValue: { bits: "01", signed: false },
       };
+      if (fullname === "dut.Enabled" || fullname === "dut.Other") return {
+        fullname, instance: "dut", kind: "npiParameter", file,
+        line: fullname === "dut.Enabled" ? 3 : 4,
+        parameterValue: { bits: "1", signed: false },
+      };
     },
   };
   const result = await expandInstanceTrace(
@@ -516,6 +1164,10 @@ test("KDB selects the elaborated generate branch and specializes an array index 
   assert.equal(result.assignments.length, 1);
   const pointer = result.signals.find(({ name }) => name === "ptr");
   assert.deepEqual(result.assignments[0].wordRead.index, { op: "select", args: [pointer.id, 1, 0] });
+  assert.deepEqual(result.signals.find(({ name }) => name === "Enabled").instanceParameterValue, {
+    bits: "1", signed: false,
+  });
+  assert.equal(result.signals.find(({ name }) => name === "Other").instanceParameterValue, undefined);
   assert(!result.frontier.some(({ reason }) => reason === "unresolvedGenerateBranch"));
 });
 
@@ -596,6 +1248,26 @@ test(
         ),
       );
     }
+    const anonymous = (line, column, end, uniqueLine = true) => ({
+      uri, name: "", line: line - 1, byteColumn: column,
+      blockEnd: [line - 1, end], uniqueLine,
+    });
+    const first = anonymous(23, 16, 34);
+    const second = anonymous(24, 9, 27);
+    const anonymousTrace = {
+      ...trace,
+      signals: [{ ...trace.signals[0], name: "probe" }, ...trace.signals.slice(1)],
+      assignments: [
+        assignment(1, [{ selected: first, alternatives: [second] }]),
+        assignment(2, [{ selected: second, alternatives: [first] }]),
+      ],
+    };
+    for (const [instance, input] of [["p", "a"], ["n", "b"]]) {
+      const result = await expand(instance, anonymousTrace);
+      assert.deepEqual(result.assignments.filter(({ kind }) => kind === "continuous")
+        .map(({ inputs }) => result.signals.find(({ id }) => id === inputs[0].signal).name), [input]);
+      assert(!result.frontier.some(({ reason }) => reason === "unresolvedGenerateBranch"));
+    }
     const ambiguous = await expand("p", {
       ...trace,
       assignments: trace.assignments.map((item) => ({
@@ -616,6 +1288,102 @@ test(
     );
   },
 );
+
+test("KDB identifies a unique anonymous generate line and preserves same-line candidates", async () => {
+  const file = "/anonymous_generate.sv";
+  const uri = pathToFileURL(file).href;
+  const location = { uri, range: { start: { line: 1, character: 0 } } };
+  const scope = { kind: "npiGenScope", fullname: "dut.genblk1", file, line: 5 };
+  const design = {
+    kind: "kdb",
+    async children() { return [scope]; },
+    async portLinks() { return []; },
+    async resolve(fullname) { return fullname === scope.fullname ? scope : undefined; },
+  };
+  async function traceBranches(secondLine, uniqueLine) {
+    const branches = [
+      { name: "", uri, line: 4, byteColumn: 10, blockEnd: [4, 26], uniqueLine },
+      { name: "", uri, line: secondLine, byteColumn: 28, blockEnd: [secondLine, 44], uniqueLine },
+    ];
+    return expandInstanceTrace({
+      schemaVersion: 1, revision: "1", scope: "file", root: 0, diagnostics: [], frontier: [],
+      signals: ["q", "a", "b"].map((name, id) => ({id, name, declaration: location})),
+      assignments: branches.map((selected, index) => ({
+        kind: "continuous", location, targets: [0], hasUnresolvedOperands: false,
+        inputs: [{ kind: "data", signal: index + 1, location }],
+        generateBranches: [{ selected, alternatives: [branches[1-index]] }],
+      })),
+    }, "dut", design, "drivers", {}, (file) => pathToFileURL(file).href, async () => undefined);
+  }
+  const selected = await traceBranches(5, true);
+  assert.deepEqual(selected.signals.map(({ name }) => name), ["q", "a"]);
+  assert.equal(selected.assignments.length, 1);
+  assert(!selected.frontier.some(({ reason }) => reason === "unresolvedGenerateBranch"));
+
+  const sharedLine = await traceBranches(4, false);
+  assert.equal(sharedLine.assignments.length, 2);
+  assert(sharedLine.assignments.every(({ hasUnresolvedOperands }) => hasUnresolvedOperands));
+  assert(sharedLine.frontier.some(({ reason }) => reason === "unresolvedGenerateBranch"));
+});
+
+test("an absent generate scope requires proof that no branch matched", async () => {
+  const file = "/sparse_generate.sv";
+  const uri = pathToFileURL(file).href;
+  const location = { uri, range: { start: { line: 1, character: 0 } } };
+  const label = (name, line) => ({ name, uri, line, byteColumn: 5 });
+  const scope = { fullname: "dut.lanes[-1]", file, line: 4, column: 6 };
+  const design = {
+    kind: "verilator",
+    async resolve(fullname) {
+      if (fullname === "dut") return { kind: "npiModule" };
+    },
+    async portLinks() { return []; },
+    generateScopes(parent) { return parent === "dut" ? [scope] : []; },
+  };
+  const trace = {
+    schemaVersion: 1, revision: "1", scope: "file", root: 0,
+    diagnostics: [], frontier: [], signals: [{id: 0, name: "q", declaration: location}],
+    assignments: [{
+      kind: "continuous", location, targets: [0], inputs: [], hasUnresolvedOperands: false,
+      generateBranches: [
+        { selected: label("lanes", 3), alternatives: [], loopScope: true, loopVariable: "lane" },
+        { selected: label("active", 4), alternatives: [] },
+      ],
+    }],
+  };
+  const lane = { op: "generateIndex", args: "lane" };
+  const literal = (value) => ({
+    op: "literal",
+    args: [(value >>> 0).toString(2).padStart(32, "0"), true],
+  });
+  const ifCondition = (comparison) => ({
+    loneIfCondition: { op: "binary", args: [comparison, lane, literal(0)] },
+  });
+  const caseMatch = (labels) => ({
+    caseWithoutDefault: { selector: lane, labels },
+  });
+  const branch = trace.assignments[0].generateBranches[1];
+  for (const [description, evidence, inactive] of [
+    ["false if", ifCondition("greaterEqual"), true],
+    ["true if", ifCondition("less"), false],
+    ["no evidence", {}, false],
+    ["no matching case label", caseMatch([literal(0), literal(1)]), true],
+    ["later case label matches", caseMatch([literal(0), literal(-1)]), false],
+    ["mixed label widths", caseMatch([literal(0), { op: "literal", args: ["1", false] }]), false],
+    ["unknown genvar", caseMatch([{ op: "generateIndex", args: "missing" }]), false],
+  ]) {
+    const [assignment] = trace.assignments;
+    const result = await expandInstanceTrace({
+      ...trace,
+      assignments: [{
+        ...assignment,
+        generateBranches: [assignment.generateBranches[0], { ...branch, ...evidence }],
+      }],
+    }, "dut", design, "drivers", {}, (source) => pathToFileURL(source).href, async () => undefined);
+    assert.equal(result.assignments.length, inactive ? 0 : 1, description);
+    assert.equal(result.frontier.some(({ reason }) => reason === "unresolvedGenerateBranch"), !inactive, description);
+  }
+});
 
 test("trace requests wait for VIDE's startup index and preserve other failures", async () => {
   const response = { schemaVersion: 1 };
@@ -744,6 +1512,29 @@ test("automatic bit history can find a transition before unrelated bus activity"
   assert.deepEqual(denseHistory.observations[0].history, [
     { tick: "300", value: "1" },
   ]);
+
+  const held = path.join(directory, "held.vcd");
+  const heldBody = ["#0", "b0 !", "#400", "b1 !", "#450", "b0 !", "#500", "b1 !"];
+  const readHeld = async (body) => {
+    await fs.writeFile(held, [...header.slice(0, 5), ...body].join("\n") + "\n");
+    const metadata = await backend.request("open", { path: held });
+    return readTraceObservations(
+      backend, metadata, new Map([[0, { ...metadata.signals[0], width: 1, sourceWidth: 2, bitOffset: 1 }]]),
+      "500", "auto", 0,
+    );
+  };
+  const trace = { root: 0, signals: [{ id: 0 }], assignments: [], frontier: [] };
+  const heldHistory = await readHeld(heldBody);
+  assert.equal(heldHistory.historyEnd, "0");
+  assert.equal(heldHistory.observations[0].value, "0");
+  assert.deepEqual(heldHistory.observations[0].history, [{ tick: "0", value: "0" }]);
+  assert.deepEqual(buildTemporalTrace(trace, heldHistory).nodes, [
+    { signal: 0, bit: 1, tick: "0", value: "0", initialSample: true },
+  ]);
+
+  const lateHistory = await readHeld(["#20", ...heldBody.slice(1)]);
+  assert.equal(lateHistory.historyEnd, "500");
+  assert.equal(buildTemporalTrace(trace, lateHistory).nodes.length, 0);
 });
 
 test("static trace marks feedback without treating shared fan-in as a loop", () => {
@@ -884,7 +1675,7 @@ test("packed tracing follows selected bits in both directions and preserves feed
   assert.deepEqual(stop.continuationSignals, ["top.lane[0]", "top.lane[2]", "top.lane[3]"]);
   assert(staticTracePage(limited, "drivers", "top.ascending[1]", 1).trace.signals
     .some(({ id }) => id === stop.signal));
-  const [mapped] = staticTraceCoverage({
+  const [missing, mapped] = staticTraceCoverage({
     ...limited,
     frontier: [
       { signal: 0, reason: "depth", bits: [0], continuation: null },
@@ -892,8 +1683,19 @@ test("packed tracing follows selected bits in both directions and preserves feed
       { signal: 0, reason: "depth", bits: [3], continuation: { signal: "dump.lane", bits: [3] } },
     ],
   }).stops;
+  assert.deepEqual(missing.unavailableBits, [0]);
+  assert.equal(missing.waveformUnavailable, true);
+  assert.equal(missing.canRetrace, false);
   assert.deepEqual(mapped.continuationSignals, ["dump.lane[2]", "dump.lane[3]"]);
   assert.equal(mapped.waveformUnavailable, undefined);
+  const clipped = focusPackedTrace({
+    ...trace,
+    signals: signals.map((node) => node.id === 0 ? { ...node, packedRange: [5, 0] } : node),
+    frontier: [{ signal: 0, reason: "depth" }],
+    assignments: [assign(5, undefined, [0], signal(0))],
+  }, [0, 1], "drivers", new Map(bindings).set(0, { name: "lane[1:1]", width: 1 }));
+  assert.deepEqual(clipped.frontier[0].bits, [0, 1]);
+  assert.deepEqual(clipped.assignments[0].inputs[0].readBits, [0, 1]);
   const cycles = focusPackedTrace(
     { ...trace, root: 0 },
     4,
@@ -1471,6 +2273,10 @@ test("repeated assignment evidence leaves room for upstream temporal edges", () 
   assert.deepEqual(result.edges[0].alsoAssignments, Array.from({ length: 1023 }, (_, i) => i + 1));
   assert.equal(result.edges[1].assignment, 1024);
   assert(!result.coverage.reasons.includes("traversalBudget"));
+  const pli = buildTemporalTrace(trace, { ...evidence, externalPliCallbacks: true });
+  assert.equal(pli.coverage.status, "partial");
+  assert.deepEqual(pli.coverage.reasons, [...result.coverage.reasons, "externalPliCallbacks"]);
+  assert.deepEqual(pli.edges, result.edges);
 });
 
 test("equal-width direct ports retain compatible same-tick samples", () => {
@@ -1498,6 +2304,151 @@ test("equal-width direct ports retain compatible same-tick samples", () => {
     observations: [evidence.observations[0], { ...evidence.observations[1], width: 3 }],
   };
   assert.equal(buildTemporalTrace(trace, differentWidth).edges.length, 3);
+});
+
+test("a single undelayed continuous driver narrows only compatible RHS samples", () => {
+  const assignment = {
+    kind: "continuous", delayFreeContinuous: true, targets: [0],
+    inputs: [1, 2].map(signal => ({ kind: "data", signal })),
+    value: { op: "binary", args: ["bitXor", { op: "signal", args: 1 }, { op: "signal", args: 2 }] },
+  };
+  const trace = { root: 0, scope: "elaborated", assignments: [assignment] };
+  const observations = [
+    ["1", ["0"]],
+    ["0", ["1"]],
+    ["1", ["0"]],
+  ].map(([value, changes], signal) => ({
+    signal, width: 1, initial: { tick: "2", value },
+    history: changes.map(value => ({ tick: "4", value })),
+  }));
+  const evidence = { tick: "4", observations };
+  const samples = (result) => result.edges.map(({ source, timing, rhsSample, rhsSampleEvidence }) => {
+    const { signal, value } = result.nodes[source];
+    return [signal, value, timing, rhsSample, rhsSampleEvidence];
+  });
+  // Either old/new pair makes XOR change to zero. Keep both schedules.
+  assert.equal(samples(buildTemporalTrace(trace, evidence)).length, 4);
+
+  // If input 2 holds high, only input 1's new value gives XOR zero.
+  const held = { ...evidence, observations: [
+    ...observations.slice(0, 2), { ...observations[2], history: [] },
+  ] };
+  const fromInput1 = (graph) => samples(graph).filter(([signal]) => signal === 1);
+  assert.deepEqual(fromInput1(buildTemporalTrace(trace, held)), [
+    [1, "1", "sameTickUnordered", "matches", "waveformCombination"],
+  ]);
+  for (const uncertain of [
+    { ...trace, assignments: [{ ...assignment, delayFreeContinuous: undefined }] },
+    { ...trace, assignments: [assignment, { kind: "continuous", targets: [0], inputs: [] }] },
+    { ...trace, frontier: [{ signal: 0, reason: "depthBudget" }] },
+    { ...trace, compilation: { complete: false } },
+  ]) {
+    assert.equal(fromInput1(buildTemporalTrace(uncertain, held)).length, 2);
+  }
+});
+
+test("continuous RHS callback attribution is per output change and requires a unique entry", () => {
+  const trace = {
+    root: 0, scope: "elaborated", assignments: [{
+      kind: "continuous", delayFreeContinuous: true, targets: [0],
+      inputs: [1, 2].map(signal => ({ kind: "data", signal })),
+      value: { op: "binary", args: ["bitXor", { op: "signal", args: 1 }, { op: "signal", args: 2 }] },
+    }],
+  };
+  function causes(records, callbackRecords = records) {
+    const observations = records.map((changes, signal) => ({
+      signal, width: 1, initial: { tick: "2", value: "0" },
+      history: changes.map(([, value]) => ({ tick: "4", value })),
+    }));
+    const { nodes, edges } = buildTemporalTrace(trace, {
+      tick: "4", observations,
+      recordedValueCallbacks: signal =>
+        callbackRecords[signal]?.map(([ordinal, value]) => ({ ordinal, value })),
+    });
+    return edges.flatMap(edge => edge.continuousCause
+      ? [[nodes[edge.source].signal, nodes[edge.target].orderAtTick, edge.continuousCause]]
+      : []);
+  }
+  const twoOutputs = [[[1, "1"], [3, "0"]], [[0, "1"]], [[2, "1"]]];
+  assert.deepEqual(causes(twoOutputs), [
+    [2, 2, { sourceOrdinal: 2, targetOrdinal: 3 }],
+    [1, 1, { sourceOrdinal: 0, targetOrdinal: 1 }],
+  ]);
+  assert.deepEqual(causes(twoOutputs, twoOutputs.slice(0, 2)), []);
+  assert.deepEqual(causes(twoOutputs, [twoOutputs[0], [[0, "0"]], twoOutputs[2]]), []);
+  assert.deepEqual(causes([
+    [[3, "1"]], [[0, "1"], [1, "0"], [2, "1"]], [],
+  ]), []);
+});
+
+test("same-tick shift narrows only when all matching samples agree", () => {
+  const assignment = {
+    kind: "continuous", delayFreeContinuous: true, targets: [0],
+    targetRange: [7, 0],
+    inputs: [1, 2].map(signal => ({ kind: "data", signal })),
+    value: { op: "binary", args: ["shiftLeft", { op: "signal", args: 1 }, { op: "signal", args: 2 }] },
+  };
+  const trace = { root: 0, scope: "elaborated", assignments: [assignment] };
+  function fromData(value, endData) {
+    const observations = [
+      { signal: 0, width: 1, range: [7, 0], projected: true, bit: 5,
+        initial: { tick: "0", value: value === "1" ? "0" : "1" },
+        history: [{ tick: "4", value }] },
+      { signal: 1, width: 4, range: [4, 7], signed: false,
+        initial: { tick: "0", value: "0000" }, history: [{ tick: "4", value: endData }] },
+      { signal: 2, width: 3, range: [2, 0], signed: false,
+        initial: { tick: "0", value: "011" }, history: [{ tick: "4", value: "010" }] },
+    ];
+    const { nodes, edges } = buildTemporalTrace(trace, { tick: "4", observations });
+    return edges.map(({ source, role, timing }) => [nodes[source].signal, nodes[source].bit, role, timing]);
+  }
+  assert.deepEqual(fromData("1", "1000"), [
+    [1, 4, undefined, "sameTickUnordered"],
+    [2, undefined, "index", "sameTickUnordered"],
+  ]);
+  const ambiguous = fromData("1", "1100");
+  assert(ambiguous.some(([signal, bit]) => signal === 1 && bit === undefined));
+  assert(ambiguous.some(([signal, , role]) => signal === 2 && role === "index"));
+});
+
+test("packed mux paths retain the condition and the lanes used by four-state evaluation", () => {
+  const signal = (args) => ({ op: "signal", args });
+  const assignment = {
+    kind: "continuous", delayFreeContinuous: true, targets: [0], targetRange: [3, 0],
+    inputs: [1, 2, 3].map(signal => ({ kind: "data", signal })),
+    value: { op: "conditional", args: [signal(1), signal(2), signal(3)] },
+  };
+  const trace = { root: 0, scope: "elaborated", assignments: [assignment] };
+  function paths(condition, prior, bBefore, bAfter, output = "0") {
+    const observations = [
+      { signal: 0, width: 1, range: [3, 0], projected: true, bit: 2,
+        initial: { tick: "0", value: "1" }, history: [{ tick: "4", value: output }] },
+      { signal: 1, width: 2, range: [1, 0], signed: false, initial: { tick: "0", value: prior },
+        history: condition === prior ? [] : [{ tick: "4", value: condition }] },
+      { signal: 2, width: 4, range: [0, 3], signed: false,
+        initial: { tick: "0", value: "0100" }, history: [] },
+      { signal: 3, width: 4, range: [3, 0], signed: false,
+        initial: { tick: "0", value: bBefore }, history: [{ tick: "4", value: bAfter }] },
+    ];
+    const { nodes, edges } = buildTemporalTrace(trace, { tick: "4", observations });
+    return edges.map(({ source, role, timing }) => [nodes[source].signal, nodes[source].bit, role, timing]);
+  }
+  assert.deepEqual(paths("00", "01", "0100", "0000"), [
+    [1, undefined, "condition", "sameTickUnordered"],
+    [3, 2, undefined, "sameTickUnordered"],
+  ]);
+  const merged = paths("0x", "0x", "0100", "0000");
+  assert(merged.some(([id, , role]) => id === 1 && role === "condition"));
+  assert(merged.some(([id, bit]) => id === 2 && bit === 1));
+  assert(merged.some(([id, bit]) => id === 3 && bit === 2));
+  for (const unknown of ["0x", "0z"]) {
+    const sameTick = paths(unknown, "01", "0000", "0000", "x");
+    assert(sameTick.some(([id, , role, timing]) =>
+      id === 1 && role === "condition" && timing === "sameTickUnordered"));
+    assert(sameTick.some(([id, bit]) => id === 2 && bit === 1));
+    assert(sameTick.some(([id, bit]) => id === 3 && bit === 2));
+    assert(!sameTick.some(([id, bit]) => (id === 2 || id === 3) && bit === undefined));
+  }
 });
 
 test("temporal trace follows a matched mux arm and retains unresolved candidates", () => {
@@ -1588,6 +2539,18 @@ test("temporal trace follows a matched mux arm and retains unresolved candidates
   assert.equal(boundary.historyCutoff, "4");
   assert.equal(boundary.value, stableNode.value);
   assert.equal(boundary.use.evidence.kind, "data");
+  evidence.observations[2].initial.tick = "2";
+  for (const start of ["5", "6"]) {
+    evidence.historyStart = start;
+    const graph = buildTemporalTrace(trace, evidence);
+    assert(graph.gaps.some(({ signal, historyCutoff }) =>
+      signal === 2 && historyCutoff === "2",
+    ));
+  }
+  evidence.observations[2].history = [{ tick: "6", value: undefined }];
+  assert(!buildTemporalTrace(trace, evidence).gaps.some(({ signal, historyCutoff }) =>
+    signal === 2 && historyCutoff !== undefined,
+  ));
 });
 
 test("packed slice writers compare only their written bits", () => {
@@ -1672,6 +2635,37 @@ test("packed slice writers compare only their written bits", () => {
       ({ status, value }) => status === "possible" && value === undefined,
     ),
   );
+});
+
+test("partial packed waveform samples preserve known bit dependencies without fabricating values", () => {
+  const { evaluateTraceValue } = require("../dist/rtl-trace-values");
+  const evaluate = (expression) => evaluateTraceValue(expression, undefined, () => ({
+    width: 4, range: [3, 0], signed: false, sampledRange: [2, 2], bits: "1",
+  }));
+  const dynamicBit = (index) => ({ op: "bitSelect", args: [1, { op: "literal", args: [index, false] }] });
+  assert.equal(evaluate({ op: "signal", args: 1 }), undefined);
+  assert.equal(evaluate({ op: "select", args: [1, 2, 2] }).bits, "1");
+  assert.equal(evaluate({ op: "select", args: [1, 2, 1] }), undefined);
+  assert.equal(evaluate(dynamicBit("10")).bits, "1");
+  assert.equal(evaluate(dynamicBit("01")), undefined);
+  assert.equal(evaluate(dynamicBit("100")).bits, "x");
+
+  const trace = {
+    root: 0, signals: [{ id: 0 }, { id: 1, packedRange: [3, 0] }], frontier: [],
+    assignments: [{
+      kind: "continuous", targets: [0], inputs: [{ signal: 1, kind: "data" }],
+      value: { op: "binary", args: ["bitXor", { op: "select", args: [1, 2, 2] }, { op: "select", args: [1, 1, 1] }] },
+    }],
+  };
+  const evidence = { tick: "5", historyStart: "0", observations: [
+    { signal: 0, width: 1, initial: { tick: "0", value: "0" }, history: [{ tick: "5", value: "1" }] },
+    { signal: 1, width: 1, range: [2, 2], initial: { tick: "0", value: "0" }, history: [{ tick: "3", value: "1" }] },
+  ] };
+  assert.equal(traceAssignmentCandidates(trace, evidence).candidates[0].value, undefined);
+  const graph = buildTemporalTrace(trace, evidence);
+  assert(graph.nodes.some(({ signal, bit, tick }) => signal === 1 && bit === 2 && tick === "3"));
+  assert(graph.gaps.some(({ signal, bit, reason }) => signal === 1 && bit === 1 && reason === "waveformBitsUnavailable"));
+  assert.equal(graph.coverage.status, "partial");
 });
 
 test("a scalar read of a fixed packed bit follows only that bit's writer", () => {
@@ -1831,6 +2825,67 @@ test("NBA sample comparison distinguishes earlier values and preserves ambiguous
   );
 });
 
+test("waveform binding reports where an upstream signal failed verification", async () => {
+  const { createWaveAnalysis } = require("../dist/wave-analysis");
+  const sourceDir = path.join(os.tmpdir(), "wave-binding-test");
+  const declaration = {
+    uri: pathToFileURL(path.join(sourceDir, "design.sv")).href,
+    range: { start: { line: 4, character: 0 } },
+  };
+  const waveform = (name, supported = true) => ({ scope: "tb", name, supported });
+  const matches = Object.fromEntries([
+    ["unsupported", [waveform("unsupported", false)]],
+    ["ambiguous", [waveform("ambiguous"), waveform("ambiguous")]],
+    ...["absent", "noSource", "wrongLine", "wrongFile", "ok"].map(
+      name => [name, [waveform(name)]],
+    ),
+  ]);
+  const expected = {
+    noDecl: "missingDeclaration",
+    notDumped: "waveformMissing",
+    unsupported: "waveformUnsupported",
+    ambiguous: "waveformAmbiguous",
+    absent: "designObjectMissing",
+    noSource: "designLocationMissing",
+    wrongLine: "declarationMismatch",
+    wrongFile: "declarationMismatch",
+  };
+  const names = ["q", ...Object.keys(expected), "ok"];
+  const design = {
+    kind: "kdb",
+    path: path.join(sourceDir, "simv.daidir"),
+    async resolve(fullname) {
+      const name = fullname.split(".").at(-1);
+      if (name === "absent") throw Error("KDB declaration not found: " + fullname);
+      return {
+        fullname,
+        instance: "tb",
+        line: name === "wrongLine" ? 6 : 5,
+        packedRange: [4, 0],
+        file: name === "noSource" ? undefined
+          : name === "wrongFile" ? "other.sv" : "design.sv",
+      };
+    },
+  };
+  const analysis = createWaveAnalysis({
+    file: pathToFileURL,
+    workspace: { textDocuments: [], getConfiguration: () => ({ get: () => undefined }) },
+  });
+  const { bindings, issues, packedRanges } = await analysis.bindTraceObservations({
+    backend: { async request(method) { assert.equal(method, "matchNames"); return { matches }; } },
+  }, {
+    trace: {
+      root: 0, signals: names.map((name, id) => ({ id, name, declaration: name === "noDecl" ? null : declaration })),
+    },
+    instance: "tb",
+    design,
+    signal: waveform("q"),
+  });
+  assert.deepEqual([...bindings.values()].map(({ name }) => name), ["q", "ok"]);
+  assert.deepEqual([...packedRanges], [[names.indexOf("ok"), [4, 0]]]);
+  assert.deepEqual(Object.fromEntries([...issues].map(([id, issue]) => [names[id], issue])), expected);
+});
+
 test("temporal gaps retain the candidate, consumer tick, and reason", () => {
   const location = {
     uri: "file:///gaps.sv",
@@ -1912,6 +2967,134 @@ test("temporal gaps retain the candidate, consumer tick, and reason", () => {
     observationReport({ ...evidence, temporalTrace: graph }, trace),
     /tb\.hidden @ 5 · No waveform binding · data input to tb\.q @ 5 · .*gaps\.sv.*L6/,
   );
+  const classified = buildTemporalTrace(trace, {
+    ...evidence,
+    bindingIssues: new Map([[1, "declarationMismatch"], [2, "waveformMissing"]]),
+  });
+  assert.deepEqual(classified.gaps.map(({ bindingIssue }) => bindingIssue),
+    [undefined, "waveformMissing", undefined]);
+  assert.match(temporalMermaid(classified, evidence, undefined, trace.signals),
+    /tb\.hidden #64; 5 #183; No matching dumped signal/);
+  const enumTrace = {
+    ...trace,
+    signals: trace.signals.map(signal => signal.id === 2
+      ? { ...signal, enumValue: { bits: "0010101", signed: false } }
+      : signal),
+  };
+  const withEnum = buildTemporalTrace(enumTrace, evidence);
+  const enumNode = withEnum.nodes.findIndex(node => node.signal === 2);
+  assert(enumNode >= 0);
+  assert.deepEqual(withEnum.nodes[enumNode], {
+    signal: 2, tick: "5", value: "0010101", sampleOnly: true, enumConstant: true,
+  });
+  assert(withEnum.edges.some(({ source }) => source === enumNode));
+  assert(!withEnum.gaps.some(({ signal }) => signal === 2));
+  assert.match(temporalMermaid(withEnum, evidence, undefined, enumTrace.signals),
+    /0010101 .* RTL enum constant/);
+  const packageTrace = {
+    ...trace,
+    signals: trace.signals.map(signal => signal.id === 2
+      ? { ...signal, packageParameterValue: { bits: "10", signed: false } }
+      : signal),
+  };
+  const withParameter = buildTemporalTrace(packageTrace, evidence);
+  const parameterNode = withParameter.nodes.findIndex(node => node.signal === 2);
+  assert.deepEqual(withParameter.nodes[parameterNode], {
+    signal: 2, tick: "5", value: "10", sampleOnly: true, packageParameter: true,
+  });
+  assert(withParameter.edges.some(({ source, role }) => source === parameterNode && role === undefined));
+  assert(!withParameter.gaps.some(({ signal }) => signal === 2));
+  assert.match(temporalMermaid(withParameter, evidence, undefined, packageTrace.signals),
+    /10 .* RTL package parameter/);
+  const declaration = {
+    uri: "file:///gaps.sv",
+    range: { start: { line: 2, character: 4 }, end: { line: 2, character: 10 } },
+  };
+  const unresolvedEnum = {
+    ...trace,
+    signals: trace.signals.map(signal => signal.id === 2
+      ? { ...signal, enumValueUnavailable: true, declaration }
+      : signal),
+  };
+  const enumGapGraph = buildTemporalTrace(unresolvedEnum, evidence);
+  const enumGap = enumGapGraph.gaps.find(({ signal }) => signal === 2);
+  assert.equal(enumGap.reason, "enumValueUnavailable");
+  assert.deepEqual(enumGap.declaration, declaration);
+  assert.equal(enumGap.bindingIssue, undefined);
+  assert.equal(enumGap.continuation, undefined);
+  assert.match(temporalMermaid(enumGapGraph, evidence, undefined, unresolvedEnum.signals),
+    /RTL enum value could not be confirmed/);
+  assert.match(observationReport({ ...evidence, temporalTrace: enumGapGraph }, unresolvedEnum),
+    /RTL enum value could not be confirmed.*Declared at .*gaps\.sv.*L3/);
+  const combinedEnumGap = mergeTemporalContinuationGraph({
+    root: unresolvedEnum.root,
+    signals: unresolvedEnum.signals,
+    context: { ...evidence, temporalTrace: enumGapGraph },
+    assignmentSources: { 0: { kind: "nonblocking", location } },
+  }, { segments: [], remaining: [], stopReasons: [], links: [] });
+  const { traceTimeSchematic } = require("../dist/rtl-schematic");
+  const schematic = traceTimeSchematic(unresolvedEnum, combinedEnumGap);
+  const enumNodeInSchematic = schematic.graph.nodes.find(({ kind, detail }) =>
+    kind === "gap" && detail.includes("RTL enum value could not be confirmed"));
+  assert.deepEqual(schematic.locations.get(enumNodeInSchematic.id), declaration);
+  const unknownParameter = {
+    ...trace,
+    signals: trace.signals.map(signal => signal.id === 2
+      ? { ...signal, packageParameterValueUnavailable: true, declaration }
+      : signal),
+  };
+  const unknown = buildTemporalTrace(unknownParameter, evidence).gaps.find(({ signal }) => signal === 2);
+  assert.equal(unknown.reason, "packageParameterValueUnavailable");
+  assert.deepEqual(unknown.declaration, declaration);
+  assert.equal(unknown.continuation, undefined);
+  const instanceTrace = {
+    ...trace,
+    signals: trace.signals.map(signal => signal.id === 2
+      ? { ...signal, instanceParameter: true, instanceParameterValue: { bits: "1", signed: false } }
+      : signal),
+  };
+  const instanceGraph = buildTemporalTrace(instanceTrace, evidence);
+  const instanceNode = instanceGraph.nodes.findIndex(node => node.signal === 2);
+  assert.equal(instanceGraph.nodes[instanceNode].elaboratedParameter, true);
+  assert(instanceGraph.edges.some(({ source, role }) => source === instanceNode && role === undefined));
+  assert(!instanceGraph.gaps.some(({ signal }) => signal === 2));
+  delete instanceTrace.signals.find(({ id }) => id === 2).instanceParameterValue;
+  assert(buildTemporalTrace(instanceTrace, evidence).gaps.some(
+    ({ signal, reason }) => signal === 2 && reason === "instanceParameterValueUnavailable",
+  ));
+
+  const gapsLimited = buildTemporalTrace(
+    {
+      ...trace,
+      assignments: [{
+        ...trace.assignments[0],
+        inputs: [...trace.assignments[0].inputs, ...[4, 5].map((signal) => ({
+          signal,
+          kind: "data",
+        }))],
+      }],
+    },
+    {
+      ...evidence,
+      observations: [
+        ...evidence.observations,
+        ...[4, 5].map((signal) => ({
+          signal,
+          width: 1,
+          initial: { tick: "0", value: "0" },
+          history: [{ tick: "3", value: "1" }],
+        })),
+      ],
+    },
+    undefined, false, undefined, { nodes: 1, edges: 1, gaps: 2 },
+  );
+  assert.deepEqual(
+    gapsLimited.gaps.map(({ signal, reason }) => [signal, reason]),
+    [[4, "nodeBudget"], [5, "nodeBudget"]],
+  );
+  assert.equal(gapsLimited.gapsTruncated, true);
+  assert(gapsLimited.coverage.reasons.includes("missingObservations"));
+  assert.deepEqual(gapsLimited.frontier, [4, 5]);
 
   const fanIn = Array.from({ length: 260 }, (_, i) => ({
     signal: i + 1,
@@ -2049,15 +3232,242 @@ test("static and waveform diagram pages retain their edges and endpoint labels",
   assert.match(observation[1], /t0_500 --> t0_501/);
 });
 
+test("a tick-zero sample keeps its initializer without implying a clock edge", () => {
+  const location = {
+    uri: "file:///initial.sv",
+    range: { start: { line: 0, character: 0 } },
+  };
+  const trace = {
+    schemaVersion: 1,
+    root: 0,
+    signals: ["seed", "clk", "d"].map((name, id) => ({ id, name })),
+    assignments: [
+      { kind: "initialization", targets: [0], inputs: [], value: { op: "literal", args: ["1", false] }, location },
+      { kind: "nonblocking", targets: [0], inputs: [
+        { signal: 1, kind: "trigger", edge: "rising", location },
+        { signal: 2, kind: "data", edge: null, location },
+      ], location },
+    ],
+    frontier: [],
+  };
+  const observation = (signal, history) => ({
+    signal, status: "observed", width: 1, range: [0, 0], history,
+    value: history.at(-1).value,
+  });
+  const start = (value) => [{ tick: "0", value }];
+  const evidence = {
+    tick: "0", historyStart: "0", scale: "1ns",
+    observations: [
+      observation(0, start("1")),
+      observation(1, start("1")),
+      observation(2, start("0")),
+    ],
+  };
+  const graph = buildTemporalTrace(trace, evidence);
+  assert.equal(graph.nodes[0].initialSample, true);
+  assert.deepEqual(graph.nodes[0].initializationAssignments, [0]);
+  assert(graph.gaps.some(gap => gap.reason === "unprovenTrigger"));
+  assert(!graph.edges.some(edge => edge.kind === "trigger"));
+  const startupGap = graph.gaps.find(({ signal }) => signal === 2);
+  assert.equal(startupGap?.reason, "unprovenInitialOrder");
+  assert.equal(startupGap.value, "0");
+  assert.equal(startupGap.continuation, undefined);
+  assert(graph.edges.some(({ source, timing }) =>
+    graph.nodes[source].signal === 2 && timing === "sameTickUnordered"));
+  assert.match(temporalMermaid(graph, evidence), /Startup sample available#44; evaluation order unknown/);
+  assert.match(temporalMermaid(graph, evidence), /Declaration initializer/);
+  assert.equal(buildTemporalTrace(trace, evidence, undefined, false, undefined, {
+    changeOrder: 1,
+  }).nodes.length, 0);
+
+  // A real tick-zero transition still uses the existing change order.
+  const transition = buildTemporalTrace(trace, {
+    ...evidence,
+    observations: [observation(0, [...start("0"), ...start("1")]), ...evidence.observations.slice(1)],
+  });
+  assert.equal(transition.nodes[0].initialSample, undefined);
+  assert.equal(transition.nodes[0].value, "1");
+
+  const missingInput = buildTemporalTrace(trace, {
+    ...evidence,
+    observations: [
+      ...evidence.observations.slice(0, 2),
+      { ...evidence.observations[2], value: undefined, history: [] },
+    ],
+  });
+  assert(missingInput.gaps.some(({ signal, reason }) =>
+    signal === 2 && reason === "noChangeInWindow"));
+
+  // A capture that starts later provides no pre-capture transition evidence.
+  const later = buildTemporalTrace(trace, {
+    ...evidence, tick: "2", historyStart: "2",
+    observations: [observation(0, [{ tick: "2", value: "1" }])],
+  });
+  assert.equal(later.nodes.length, 0);
+});
+
+test("startup initialization cannot explain a later value change or same-value write", () => {
+  const { traceAssignmentCandidates, traceCursorWriters } = require("../dist/rtl-trace-candidates");
+  const initializer = {
+    kind: "initialization", initializationAtStart: true,
+    targets: [0], inputs: [{ signal: 1, kind: "data" }], value: { op: "signal", args: 1 },
+  };
+  const trace = {
+    root: 0, frontier: [],
+    assignments: [initializer, {
+      kind: "blocking", targets: [0], inputs: [{ signal: 2, kind: "data" }],
+      value: { op: "signal", args: 2 },
+    }],
+  };
+  const observations = [["1", "0", "6"], ["1", "0", "2"], ["1", "0", "3"]]
+    .map(([before, value, tick], signal) => ({
+      signal, width: 1, status: "observed", value,
+      history: [{ tick: "0", value: before }, { tick, value }],
+      cursorSamples: { initial: { tick, value }, events: [], truncated: false },
+    }));
+  const evidence = { tick: "7", historyStart: "0", observations };
+  const change = traceAssignmentCandidates(trace, evidence);
+  assert.equal(change.change.tick, "6");
+  assert.equal(change.candidates[0].initializationOutsideStart, true);
+  assert.equal(traceCursorWriters(trace, evidence).candidates[0].initializationOutsideStart, true);
+  const graph = buildTemporalTrace(trace, evidence);
+  assert.deepEqual(graph.edges.map(edge => graph.nodes[edge.source].signal), [2]);
+
+  // Older VIDE replies and scope-entry declarations have no start-time marker.
+  const scopeEntry = { ...trace, assignments: [
+    { ...initializer, initializationAtStart: undefined }, trace.assignments[1],
+  ] };
+  const candidates = buildTemporalTrace(scopeEntry, evidence);
+  assert.deepEqual(candidates.edges.map(edge => candidates.nodes[edge.source].signal), [1, 2]);
+});
+
+test("trace continuation checkpoints track changes to the offline execution recording", async () => {
+  const { createWaveAnalysis } = require("../dist/wave-analysis");
+  const { simulationFilelistsCurrent } = require("../dist/vide-project-config");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trace-checkpoint-"));
+  try {
+    const waveform = path.join(directory, "trace.vcd");
+    const recording = path.join(directory, "execution.jsonl");
+    await fs.writeFile(waveform, "$enddefinitions $end\n");
+    await fs.writeFile(recording, "{}\n");
+    const analysis = createWaveAnalysis({
+      workspace: { getConfiguration: () => ({ get: () => undefined }), textDocuments: [] },
+    }, () => undefined, () => undefined);
+    const viewer = { uri: { fsPath: waveform }, backend: {}, backendKind: "vcd" };
+    const result = { trace: { compilation: { files: [] } } };
+    const guard = () => analysis.createContinuationGuard(viewer, result, undefined, recording, true);
+    const original = await guard();
+    assert.equal(await simulationFilelistsCurrent(original.checkpoint.inputs), true);
+    assert.equal((await guard()).checkpoint.identity, original.checkpoint.identity);
+
+    await fs.appendFile(recording, "{}\n");
+    assert.equal(await simulationFilelistsCurrent(original.checkpoint.inputs), false);
+    await assert.rejects(original.assertCurrent, TraceContextChanged);
+    assert.notEqual((await guard()).checkpoint.identity, original.checkpoint.identity);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("restored Trace Explorer gaps continue with the saved execution recording", async () => {
+  const { createWaveTraceView } = require("../dist/wave-trace-view");
+  const trace = {
+    schemaVersion: 1,
+    root: 0,
+    signals: [{ id: 0, name: "q", instance: "tb" }],
+    assignments: [],
+    frontier: [],
+    diagnostics: [],
+  };
+  const gap = {
+    signal: 0,
+    tick: "7",
+    continuation: { signal: "tb.q", tick: "7", changeOrder: 2 },
+  };
+  const temporalTrace = {
+    nodes: [],
+    edges: [],
+    frontier: [],
+    gaps: [gap],
+    missingEvidence: [],
+  };
+  const waveform = path.resolve("fixture.fsdb");
+  const executionFile = path.resolve("fixture.jsonl");
+  const saved = JSON.stringify({
+    trace,
+    direction: "drivers",
+    waveform,
+    fullname: "tb.q",
+    executionFile,
+    evidence: {
+      tick: "10",
+      observations: [],
+      provider: { kind: "waveform" },
+      temporalTrace,
+    },
+  });
+  const commands = new Map();
+  const viewer = { uri: { fsPath: waveform } };
+  const stop = Error("Continuation reached the observation query");
+  const queries = [];
+  const errors = [];
+  const traceView = createWaveTraceView(
+    {
+      EventEmitter: class { fire() {} },
+      ProgressLocation: { Notification: 15 },
+      window: {
+        withProgress: (_options, run) => run({}, {
+          isCancellationRequested: false,
+          onCancellationRequested: () => ({ dispose() {} }),
+        }),
+      },
+      commands: { registerCommand: (name, run) => commands.set(name, run) },
+    },
+    {
+      context: {
+        subscriptions: [],
+        workspaceState: { get: () => JSON.parse(saved) },
+      },
+      output: { appendLine: (message) => assert.fail(message) },
+      report: (error) => errors.push(error),
+      restoreWaveformViewer: async (filename) => {
+        assert.equal(filename, waveform);
+        return viewer;
+      },
+      analyses: {
+        traceWaveSignal: async () => ({ trace }),
+        bindTraceObservations: async () => ({ bindings: [] }),
+        bindStaticFrontier: async () => trace,
+        verifyWaveTrace: async () => undefined,
+        traceWaveContext: async (_viewer, _result, tick, _history, _build,
+          _bindings, _abort, recording, _expand, limits) => {
+          queries.push({ tick, recording, changeOrder: limits?.changeOrder });
+          throw stop;
+        },
+      },
+    },
+  );
+  const restoredGap = traceView.getTraceSnapshot().evidence.temporalTrace.gaps[0];
+  await commands.get("waveWorkbench.traceFromSignal")({
+    kind: "temporalContinuation",
+    gap: restoredGap,
+  });
+  assert.deepEqual(queries, [{ tick: "7", recording: executionFile, changeOrder: 2 }]);
+  assert.deepEqual(errors, [stop]);
+});
+
 test("Trace Explorer stops a temporal feedback path and shows unavailable evidence", () => {
   const { createTraceExplorer } = require("../dist/trace-explorer");
   let provider;
   const commands = new Map();
+  const views = new Map();
   const followups = [];
   const jumps = [];
   const added = [];
+  const addedWaveformPaths = [];
   const opened = [];
   let resumed = 0;
+  const selectedResumptions = [];
   const noOp = () => {};
   const explorer = createTraceExplorer(
     {
@@ -2070,21 +3480,33 @@ test("Trace Explorer stops a temporal feedback path and shows unavailable eviden
         }
       },
       TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
+      Uri: { file: pathToFileURL },
       window: {
-        registerTreeDataProvider(_id, tree) {
-          provider = tree;
+        createTreeView(id, {treeDataProvider}) {
+          const view = { provider: treeDataProvider };
+          views.set(id, view);
+          if (id === "waveWorkbench.traceExplorer") provider = treeDataProvider;
+          return view;
         },
       },
       commands: { registerCommand: (name, run) => commands.set(name, run) },
     },
     { subscriptions: [] },
     (source) => opened.push(source),
-    (signal, bit) => added.push([signal.name, bit]),
+    (signal, bit, waveformSignal) =>
+      waveformSignal ? addedWaveformPaths.push(waveformSignal) : added.push([signal.name, bit]),
     noOp,
     (...args) => followups.push(args),
     async (tick) => jumps.push(tick),
-    async () => { resumed++; },
+    async (request) => {
+      resumed++;
+      if (request) selectedResumptions.push(request);
+    },
   );
+  const panel = views.get("waveWorkbench.panelTrace");
+  assert.equal(panel.provider, provider);
+  explorer.setMessage("Trace result");
+  assert.equal(panel.message, "Trace result");
   const location = {
     uri: "file:///test.sv",
     range: { start: { line: 0, character: 0 } },
@@ -2152,6 +3574,8 @@ test("Trace Explorer stops a temporal feedback path and shows unavailable eviden
     signal: 1, location, call: "$test$plusargs", literal: "ENABLE",
     argument: { present: false },
   }]);
+  assert.ok(panel.provider.getChildren().length > 0);
+
   const runtime = provider.getChildren().find(({ kind }) => kind === "runtimeInputs");
   const [input] = provider.getChildren(runtime);
   assert.match(provider.getTreeItem(input).label, /argument absent/);
@@ -2208,6 +3632,18 @@ test("Trace Explorer stops a temporal feedback path and shows unavailable eviden
   ]);
   assert(provider.getChildren(selectedRoot).some((item) =>
     provider.getTreeItem(item).label === "Waveform continuation unavailable · signals limit"));
+  explorer.show({
+    ...trace,
+    bitSelection: { range: [2, 1], feedbackEdges: [] },
+    frontier: [
+      { signal: 0, reason: "depth", bits: [1], continuation: null },
+      { signal: 0, reason: "depth", bits: [2], continuation: { signal: "dump.dut.a", bits: [2] } },
+    ],
+  }, "drivers");
+  const partialRoot = provider.getChildren()[0];
+  const partialLabels = provider.getChildren(partialRoot).map((node) => provider.getTreeItem(node).label);
+  assert(partialLabels.includes("Continue from a[2]"));
+  assert(partialLabels.includes("Waveform continuation unavailable · depth limit · bits 1"));
   explorer.show(trace, "drivers", new Map(), {
     ...graph,
     nodes: [],
@@ -2245,6 +3681,58 @@ test("Trace Explorer stops a temporal feedback path and shows unavailable eviden
   const [cycle] = provider.getChildren(sourceAssignment);
   assert.match(provider.getTreeItem(cycle).description, /Cycle/);
   assert.deepEqual(provider.getChildren(cycle), []);
+  const taskSource = { file: path.resolve("task.sv"), line: 9, column: 3, identity: "matched" };
+  const withTask = {
+    ...combined,
+    nodes: [combined.nodes[0], {
+      ...combined.nodes[1],
+      waveformSignal: "dump.tb.b[2]",
+      declaration: location,
+      point: {
+        ...combined.nodes[1].point,
+        recordedTaskTransfer: {
+          input: { tick: "2", ordinal: 3, source: taskSource },
+          write: { tick: "3", ordinal: 6, source: taskSource },
+          reads: [{ operation: "$fgetc at byte 0", source: taskSource, value: "00000001" }],
+        },
+      },
+    }],
+  };
+  explorer.updateCombined(withTask);
+  const [taskRoot] = provider.getChildren(provider.getChildren().find(({ kind }) => kind === "combinedTimeline"));
+  const [taskTransition] = upstream(taskRoot);
+  const taskItem = provider.getTreeItem(taskTransition);
+  assert.match(taskItem.contextValue, /\btraceWaveform\b/);
+  assert.match(taskItem.contextValue, /\btraceSource\b/);
+  commands.get("waveWorkbench.traceAddSignal")(taskTransition);
+  assert.deepEqual(addedWaveformPaths, ["dump.tb.b[2]"]);
+  commands.get("waveWorkbench.traceOpenNodeSource")(taskTransition);
+  assert.deepEqual(opened.splice(0), [location]);
+  const evidence = provider.getChildren(taskTransition).filter(({ kind }) => kind === "executionSource");
+  assert.deepEqual(evidence.map((entry) => provider.getTreeItem(entry).label),
+    ["Task input commit 3 · L9", "Member write commit 6 · L9", "$fgetc at byte 0 · L9"]);
+  const read = provider.getTreeItem(evidence[2]);
+  assert.equal(read.command.command, "waveWorkbench.traceOpenSource");
+  assert.equal(read.command.arguments[0].uri, pathToFileURL(taskSource.file).href);
+  const packedSource = { ...location, range: { start: { line: 19, character: 3 } } };
+  explorer.updateCombined({
+    ...combined,
+    assignmentSources: [combined.assignmentSources[0], { 0: { kind: "nonblocking", location: packedSource } }],
+    nodes: [combined.nodes[0], { ...combined.nodes[1],
+      sources: [{ segment: 0, node: 1 }, { segment: 1, node: 0 }],
+      recordedWordEvidence: [{ segment: 1, node: 0, writers: [
+        { assignment: 0, commitOrdinal: 12, targetRange: [7, 4], contributingRanges: [[7, 4]] },
+      ] }],
+    }],
+  });
+  const [packedRoot] = provider.getChildren(provider.getChildren().find(({ kind }) => kind === "combinedTimeline"));
+  const [packedTransition] = upstream(packedRoot);
+  assert.match(provider.getTreeItem(packedTransition).description, /1 recorded writes/);
+  const [packedWriter] = provider.getChildren(packedTransition);
+  const packedItem = provider.getTreeItem(packedWriter);
+  assert.match(packedItem.tooltip, /Commit 12 .* Contributes \[7:4\]/);
+  assert.deepEqual(packedItem.command.arguments, [packedSource]);
+  explorer.updateCombined(combined);
   commands.get("waveWorkbench.traceJumpToTick")(continued);
   assert.deepEqual(jumps, ["3"]);
   const batchRow = () => {
@@ -2264,8 +3752,45 @@ test("Trace Explorer stops a temporal feedback path and shows unavailable eviden
   assert.equal(provider.getTreeItem(newBatch).description, "1 pending");
   resume(newBatch);
   assert.equal(resumed, 2);
+  const pendingRequest = { signal: "dump.tb.b[2]", tick: "3", changeOrder: 2 };
+  const pendingGap = {
+    ...combined.gaps[0], status: "pending", source: undefined,
+    evidence: { ...combined.gaps[0].evidence, continuation: pendingRequest },
+  };
+  explorer.updateCombined({ ...combined, gaps: [pendingGap], coverage: { status: "partial", reasons: [] } }, 1);
+  const timelineWithPending = provider.getChildren().find(({ kind }) => kind === "combinedTimeline");
+  const pendingGroup = provider.getChildren(timelineWithPending).find(({ kind }) => kind === "combinedGaps");
+  const pendingNode = provider.getChildren(pendingGroup).find(({ kind }) => kind === "combinedGap");
+  const pendingAction = provider.getTreeItem(pendingNode).command;
+  assert.equal(pendingAction.title, "Continue in current graph");
+  commands.get(pendingAction.command)(...pendingAction.arguments);
+  assert.deepEqual(selectedResumptions, [pendingRequest]);
+  assert.equal(resumed, 3);
   explorer.updateCombined({ ...combined });
+  commands.get(pendingAction.command)(...pendingAction.arguments);
+  assert.equal(resumed, 3);
   assert.equal(batchRow(), undefined);
+  const largeGaps = Array.from({ length: 36_775 }, (_, index) => ({
+    ...combined.gaps[0],
+    signal: "tb.upstream" + index,
+    status: index === 0 ? "joined" : "pending",
+  }));
+  explorer.updateCombined({
+    ...combined,
+    gaps: largeGaps,
+    coverage: { status: "partial", reasons: ["requestBudget"] },
+  });
+  const timelineWithGaps = provider.getChildren().find(({ kind }) => kind === "combinedTimeline");
+  const gapRoot = provider.getChildren(timelineWithGaps).find(({ kind }) => kind === "combinedGaps");
+  const pages = provider.getChildren(gapRoot);
+  assert.equal(provider.getTreeItem(gapRoot).description, (largeGaps.length - 1).toLocaleString());
+  assert.equal(pages.length, 289);
+  assert.equal(provider.getTreeItem(pages[0]).label, "Gaps 1–128");
+  assert.equal(provider.getTreeItem(pages.at(-1)).label, "requestBudget");
+  assert.deepEqual(provider.getChildren(pages[0]).map(({ gap }) => gap), largeGaps.slice(1, 129));
+  assert.deepEqual(provider.getChildren(pages.at(-2)).map(({ gap }) => gap), largeGaps.slice(128 * 287 + 1));
+  explorer.updateCombined(combined);
+  assert.deepEqual(provider.getChildren(pages[0]), []);
   explorer.clearCombined();
   commands.get("waveWorkbench.traceJumpToTick")(continued);
   assert.deepEqual(jumps, ["3"]);
@@ -2311,6 +3836,18 @@ test("Trace Explorer stops a temporal feedback path and shows unavailable eviden
   assert.equal(provider.getTreeItem(pending).label, "Continue from c");
   commands.get("waveWorkbench.traceFromSignal")(pending);
   assert.equal(followups.at(-1)[4], "dump.c");
+  explorer.show(trace, "drivers", new Map(), undefined, [], undefined, combinedStatic, ["dump.c"]);
+  const staticTimeline = provider.getChildren().find(({ kind }) => kind === "combinedStaticRoot");
+  const selectedSignal = provider.getChildren(staticTimeline).find(({ kind }) => kind === "signal");
+  const [selectedAssignment] = provider.getChildren(selectedSignal);
+  const [selectedBit] = provider.getChildren(selectedAssignment);
+  const [selectedDriver] = provider.getChildren(selectedBit);
+  const [selectedInput] = provider.getChildren(selectedDriver);
+  const [selectedFrontier] = provider.getChildren(selectedInput);
+  const continueAction = provider.getTreeItem(selectedFrontier).command;
+  assert.equal(continueAction.title, "Continue in current graph");
+  commands.get(continueAction.command)(...continueAction.arguments);
+  assert.deepEqual(selectedResumptions, [pendingRequest, "dump.c"]);
   explorer.clearCombined();
   commands.get("waveWorkbench.traceAddSignal")(portBit);
   assert.deepEqual(added, [["b", 1]]);

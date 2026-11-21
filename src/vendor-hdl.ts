@@ -11,7 +11,7 @@ import { mapPrefix } from "./kdb";
 import type { HdlLocation, Location } from "./shared/protocol";
 
 const exec = promisify(execFile);
-const maxIndexBytes = 128 * 1024 * 1024;
+const maxIndexBytes = 256 * 1024 * 1024;
 
 export function shmDirectory(waveform: string) {
   const directory = /\.shm$/i.test(waveform)
@@ -37,7 +37,7 @@ function validPosition(value: HdlLocation["declaration"]) {
 
 export async function readHdlIndex(filename: string): Promise<HdlLocation[]> {
   if ((await fs.stat(filename)).size > maxIndexBytes)
-    throw Error("HDL index exceeds 128 MiB");
+    throw Error("HDL index exceeds 256 MiB");
   const index = JSON.parse(await fs.readFile(filename, "utf8"));
   if (index?.version !== 1 || !Array.isArray(index.locations))
     throw Error("Invalid SHM HDL source index");

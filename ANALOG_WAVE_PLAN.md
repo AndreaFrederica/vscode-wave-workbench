@@ -64,10 +64,10 @@ Linux x64 扩展使用固定版本的 Ondas fork。安装 SDK 后通过 VS Code 
 
 | 格式 | 使用方式 | 验证范围 |
 |---|---|---|
-| SHM | 打开 `.shm` 目录内的 `.dsn`，也可向后台 MCP 传入整个 `.shm` 路径。配置 `waveWorkbench.xceliumHome` 或 `XCELIUM_HOME` | Xcelium 23.09，同一时间轴的数字和实数，区间初值和截断 |
+| SHM / AMS PSFXL | 打开 `.shm` 目录内的 `.dsn`，也可向后台 MCP 传入整个 `.shm` 路径。配置 `waveWorkbench.xceliumHome` 或 `XCELIUM_HOME` | Xcelium 23.09，同一时间轴的数字和实数。AMS 模拟分区通过本机 `simvisdbutil` 读取，保留 SHM 的时间刻度 |
 | WDB | 打开 `.wdb`，配置 `waveWorkbench.vivadoHome` 或 `XILINX_VIVADO` | XSim 2021.2 的 SDK 路径，同一时间轴的数字和实数，区间初值和截断。原生文件解析仍属研究任务 |
 | WLF | 配置 `waveWorkbench.wlf2vcdPath` 指向 Questa 安装的 `wlf2vcd`。后台 MCP 使用 `WAVE_WORKBENCH_WLF2VCD` | 转换后沿用 VCD 读取器和 128 MiB 限制。当前环境缺少 Questa Reader SDK 和转换器，实际 WLF 待验收 |
-| PSF ASCII | 从 Spectre 输出实值瞬态数据，打开 `.tran` 或 `.psfascii` | Spectre 25.1 RC 瞬态，电压单位、区间测量和 CSV 导出。二进制 PSF 和 PSFXL 待验收 |
+| PSF ASCII | 从 Spectre 输出实值瞬态数据，打开 `.tran` 或 `.psfascii` | Spectre 25.1 RC 瞬态，电压单位、区间测量和 CSV 导出 |
 | RAW | 打开 ngspice 的单 plot ASCII 或 little-endian binary 文件 | RC 瞬态电压、电流、AC 复数分量，ASCII 与 binary 逐点对照 |
 
 ### SHM 和 WDB 的 HDL 导航

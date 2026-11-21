@@ -103,6 +103,9 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
   - [x] VCS filelist 中的 `-pvalue+` 支持多个顶层及指定子实例的参数覆盖。保留 VCS 对同一路径取最后一次赋值的规则。Linux VS Code 1.124.2 从真实 VCS KDB 自动生成配置，MCP 确认 VIDE 收到 `tb_a.SELECT=1` 和 `tb_a.u.SELECT=1`。静态及时间图覆盖两个顶层及两个同类型 DUT 实例。动态节点分别追到 `tb_a.b @ 5 ns` 和 `tb_b.a @ 2 ns`，`tb_a` 下被覆盖的 DUT 和其兄弟实例分别追到 `b @ 5 ns` 和 `a @ 2 ns`。VIDE 的 project-model 和 slang-sys 共 72 项通过。Wave Workbench 独立后端 130 项通过，Verdi NPI 119 项通过并跳过 11 项独立专用用例。
   - [x] 导入实例数组及 generate 层次中的十进制下标，含负数。用真实 VCS KDB 和 VCD 在 Linux VS Code 1.124.2 检查 `tb.bank[1]` 与 `tb.lanes[-1].u`。被覆盖的两路在 5 ns 追到 `tb.b`，相邻元素在 2 ns 追到 `tb.a`。同一编译路径的 `[1]`、`[01]` 冲突时，VCS T-2022.06-SP2 的仿真采用最后一项，KDB 在实测中保留旧值。MCP 保留归一化后的配置、单文件静态图和波形观测，并报告该构建的因果证据缺口。VCS 实测拒绝带分隔空格的转义标识符路径，此类选项继续列为编译缺口。VIDE 相关测试 73 项通过，Wave Workbench 独立后端 131 项通过，Verdi NPI 120 项通过并跳过 11 项独立专用用例。
 - [ ] **Phase 3–4**　导入时分辨 `-f`、`-F`、`+incdir+`、`+define+`、顶层、库和参数的已支持形式，对无法解析的外部路径、缺失的生成文件、顺序或参数信息标记 `unverified` 或 partial。对已证明的宏、top、参数或源码差异标记 `mismatched`，并在 Trace Explorer 和 MCP 中解释受影响部分。缺少 manifest 时支持显式选择配置，并保留可用的静态追踪。
+  - [x] 构建清单声明文件哈希不完整时，继续核对已记录输入，并逐项列出缺少哈希的文件。真实 OpenTitan MAC VCS FSDB 的历史清单记录 54 个编译根，修改版 VIDE 另展开四个 include 文件。旧清单及显式 `files_complete: false` 均报告 `unverified`。从 `x28 @ 2051001 ps` 续查四段后得到 199 个时间节点、400 条边及 70 个待查入口。声明清单完整或更改已记录文件哈希的反例均报告 `mismatched`。Linux VS Code 1.124.2 前台与静默 MCP 的分页、Mermaid 和详细报告逐项一致。
+  - [x] 用 VCS KDB 的 `debug_dump/src_files_verilog` 为运行清单保留已有的 include 哈希。重跑 OpenTitan MAC 归档中的实际 `simv`，生成与新 FSDB 匹配的清单。KDB 记录的 58 个文件均有归档哈希并与 VIDE 加载的文件集合一致。Linux VS Code 前台和静默 MCP 从 `x28 @ 2051001 ps` 续查四段的分页、Mermaid 和详细报告一致，比较时归一化 VIDE revision。错误的 include 哈希返回 `mismatched`。正常样本的构建限制仍列出 VCS 时间单位和 PLI 选项。
+  - [x] 项目清单和修改版 VIDE 支持 VCS `-timescale=` 指定的默认时间尺度。用真实 VCS 的隐式模块、`timescale` 指令与显式 `timeunit` 核对三路实际尺度，VCD 以 10 fs 为刻度。前台和静默 MCP 均返回 `matched`，额外 filelist 覆盖为 `10ns/100ps` 后均报告 `Default RTL timescale` 冲突。OpenTitan MAC FSDB 保留默认尺度及 PLI 核验限制，两端时间图、Mermaid 和 Markdown 一致，比较时归一化 VIDE revision。Slang 回归核对显式模块声明的优先级。
   - [x] 构建清单可核对实际已载入的 Verilator 展开文件和伴随元数据。哈希不符时静态图退回单文件，离线和在线查询保留观测值并省略时间因果图。
   - [x] 从现有 OpenTitan MAC 的 `simv.daidir/vcs_rebuild` 自动恢复 TB 工程。配置生成检查得到顶层 `cv32e40p_mac_trace_tb`、宏 `CV32E40P_ASSERT_OFF`、54 个可核验哈希的源码和 2 个 include 目录。VCS 时间单位与 PLI 参数列入未映射项。检查前后的 OpenTitan 根目录 `vide.toml` 内容一致。
   - [x] 生成子清单缺失时保留其余可用的编译输入，并在预览、MCP 和报告中列出缺失路径。真实 VCS 波形通过 Linux VS Code 1.124.2 验证，同一已关联的 `.waveproj` 补齐子清单后，下一次查询加载生成模块和生成头文件，恢复对应驱动关系。独立后端通过 121 项，Verdi NPI 通过 110 项并跳过 11 项独立专用用例。
@@ -142,6 +145,10 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
         - [x] OpenTitan 验收探针把固件输入的字节计数随 `host_access` 调用传入自动形参，从任务入口和成员写入处分别采样。同次 VCS 执行记录逐一核对了 13 次调用、对应字段提交及四字节组。字节计数 20 的调用在 `880000 ps` 取到 `0x9062be2b`，`890000 ps` 写入 `tl_i.a_data`。用同次 FSDB 在真实 VS Code 的 MCP 根查询中找到该成员节点。
         - [x] `seal-vpi --task-transfers` 保存探针约定。回放核对波形哈希、源文件、调用和成员写入的索引、对应的文件读提交及成员回调顺序。并发回归覆盖两个同 tick 进入且随后反序写入的调用。真实 VS Code 的 OpenTitan MCP 一次查询返回任务与文件字节证据。独立后端通过 119 项，Verdi NPI 通过 108 项并跳过 11 项独立专用用例。
         - [x] `output: "report"` 可单独取得 Markdown 报告与所选 Mermaid 图。OpenTitan 实测响应约 38 MB，包含调用提交和四次文件读取。精选 Mermaid 图在 Chromium 成功渲染。
+        - [x] 合并时间图保留已录制的 task 入参、成员写入与文件读取。Linux VS Code 1.124.2 对同次 OpenTitan MAC FSDB 和执行记录从 `x28=480` 查询并续查一段。逐页核对 5457 个时间节点及 11723 条边，从根沿证据边到达 `0x9062be2b` 对应的提交 354、365 与文件偏移 16–19。图仍有 228 个待查入口。合并 Mermaid 与详细报告包含该路径，Trace Explorer 与原理图回归核对源码跳转。
+        - [x] 从另一份包含 IMEM 字节写入探针的 OpenTitan MAC VCS 记录提取 `u_imem.mem[36] @ 931000 ps` 的局部路径。Linux VS Code 前台与静默 MCP 的详细报告和 Mermaid 一致，包含 `tl_i.a_data` 对应的任务输入提交 514、成员写入提交 525 及固件偏移 16–19 的读取。Chromium 渲染局部图。
+        - [x] 用同次 OpenTitan VCS FSDB 和执行记录从 `x28 @ 2051001 ps` 复验。根图已有 IMEM 地址 36 的四次字节提交。通过 `wave_trace_resume` 指定两个 `wr_data` 位的前沿编号，接回从 `x28` 到 `tl_i.a_data @ 890000 ps` 的 49 边最短路径及固件读取证据。Linux VS Code 前台与静默 MCP 的 13 页局部 Mermaid、Markdown 和结构化分页一致。合并图保留 680 个待查入口。
+        - [x] 静默 MCP 从同一 `x28` 查询按默认队列顺序续查两段，同样在局部图中取得 49 边最短路径及四次固件读取证据。合并图保留 682 个待查入口。
       - [ ] 按写入求值时的索引、守卫和掩码逐字节区分实际写入与同 tick 候选，并将 IMEM 写数据连到 TileLink 接受及文件读取事件。
         - [x] 在带任务和文件读探针的同一次 VCS 仿真中补采 IMEM 时钟、读写字索引、写使能、掩码和数据。新记录验证了字索引 36 在 `931000 ps` 之前的采样为 `wr_en=1`、`wr_be=0xf`、`wr_data=0x9062be2b`，随后在 `2009000 ps` 读回。
         - [x] 针对 OpenTitan 的 `mem[36]` 在隔离的 RTL 副本加四个 NBA 探针。来自同次 VCS 运行的 FSDB 与回调核对了 `931000 ps` 的四次字内变化，聚合执行回放匹配四次提交 553、555、557、559。一次从 `x28` 发起的 MCP 查询在时间图中保留四次变化及最后一个字节的实际写入。
@@ -150,12 +157,29 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
         - [x] 数组字按位保留最后一次已确认写入。真实 VCS 掩码用例在 5、15 和 25 ps 分别写入 `[7:4]`、`[3:0]` 和 `[5:2]`。Linux VS Code 的 MCP 从读出端和数组字本身均核对三个提交，最终来源分别对应 `[7:6]`、`[1:0]` 和 `[5:2]`。首个时间点将尚无来源的 `[3:0]` 标为未解析。回归覆盖较早时间槽未观测写入仅影响相交位，并验证探针声明位于 `timeunit` 和 `timeprecision` 之后。
         - [x] 实际 VCS 同槽用例在 5 ps 记录 `[7:4]` 提交 4、`[3:0]` 未观测结果 7 和 `[2:0]` 提交 8。MCP 从读端和数组字查询均核对槽末值 `0xa3`，保留高四位的提交和上游，低四位标为未解析。回归覆盖波形与日志无法匹配、槽末值不同以及单个位变化序列不一致。独立后端通过 123 项，Verdi NPI 通过 112 项并跳过 11 项独立后端专用用例。
         - [x] 数组字的 `wave_execution_map` 支持 `captureGuards`，`generate-vcs-nba` 可记录求值时的局部守卫操作数。实际 VCS 用例在 5 ps 记录三个 NBA 求值时的 `mask=111`，随后在同槽观察到 `mask=000`。Linux VS Code 的 MCP 从读端和数组字均使用 `111` 的样本解释已核验的高四位提交。详细报告和 Mermaid 保留控制边的求值证据。
+        - [x] 固定目标 NBA 同样可记录 `if/else` 分支入口。真实 VCS 在线提交与离线回放核对，在 5 ns 进入时 `select_a=1`，赋值求值时因块内写入变成 0。已确认的提交 6 沿入口值回溯到 2 ns 的采样。9 ns 的单语句 else 入口为 0，对应提交 12。前台和静默 MCP 的图与报告一致，在线报告比较时归一化本次会话 ID。 [复现步骤](test/fixtures/trace/README.md#vcs-fixed-target-branch-entry)
+        - [x] 普通 `case`、`casez`、`casex` 和 `case inside` 使用 VIDE 的分支源码范围生成入口探针。在真实 VCS 的零时间 NBA 分支中保留四态选择值及默认分支标记。离线与在线证据沿原始选择值回溯。 [复现步骤](test/fixtures/trace/README.md#vcs-case-branch-entry)
+        - [x] 为入口采样记录 VPI 原始 tick，与 NBA 求值和提交分别关联。实际 VCS `#3` 分支在 5 ns 进入，8 ns 求值和提交。时间图沿 2 ns 的选择变化与 7 ns 的数据变化回溯。短历史窗口保留 5 ns 已记录入口和波形缺口。前台、静默和在线暂停实测一致。 [复现步骤](test/fixtures/trace/README.md#vcs-timestamped-branch-entry-after-a-procedural-delay)
+        - [x] 记录 VCS 简单 `wait` 直接控制的 NBA 恢复值与时间。真实 VCD/KDB 用例中，`case` 的入口在 5 ns，`ready` 解除等待和提交在 9 ns。时间图及报告分别标注分支入口与等待恢复，前台和静默 MCP 的离线与在线查询一致。 [复现步骤](test/fixtures/trace/README.md#vcs-wait-resume-inside-a-case)
+        - [x] 同一顺序块内独立 `wait` 与相邻 NBA 建立 Driver/Load 控制依赖，允许中间有独立数字延迟。真实 VCS `wait (ready); #3;` 样本在 7 ns 恢复，10 ns 提交。时间图保留原始恢复值和时间，离线与在线断点都指向 7 ns 的上游变化。 [复现步骤](test/fixtures/trace/README.md#vcs-standalone-wait-before-an-nba)
+        - [x] 为由局部信号、`!`、`&&`、`||` 和括号构成的 VCS `wait` 条件记录全部恢复采样。`case` 内直接等待和独立等待后延迟的 NBA 均经真实仿真核对。时间图保留 `inhibit=0 @ 7 ns` 的同 tick 变化及较早的 `ready` 和 `rescue` 来源，详细报告保留三路恢复值。前台与静默 MCP 的离线及在线图和报告一致。 [复现步骤](test/fixtures/trace/README.md#vcs-compound-wait-before-an-nba)
+        - [x] 用已绑定的四态谓词、恢复采样及完整波形窗口标出等待转为真时唯一观测到的输入变化。真实 VCS 两条路径均将 `inhibit @ 7 ns` 标为该变化，报告、时间图及 Trace Explorer 共用对应的因果边属性。回归覆盖多路同 tick、条件已为真和历史缺失。 [复现步骤](test/fixtures/trace/README.md#vcs-compound-wait-before-an-nba)
+        - [x] VCS 等待条件扩展至整数常量、按位操作、相等及关系比较。实测掩码保留 `X` 位，四态相等和有符号阈值参与同一因果判断。直接分支在 7 ns 提交 9，独立等待加延迟在 10 ns 提交 15。在线断点及离线回放均沿同一控制边定位到 7 ns 的 `status` 变化。 [复现步骤](test/fixtures/trace/README.md#vcs-masked-and-signed-comparisons-in-a-wait)
+        - [x] 对同 tick 的多路条件变化，利用已核对的 VCS 回调顺序重算条件。真实样本中回调 4 后条件仍为假，回调 5 后条件为真。直接和延迟写入的在线、离线时间图及详细报告均保留因果边的回调序号。 [复现步骤](test/fixtures/trace/README.md#vcs-ordered-callbacks-in-a-wait)
+        - [x] 对同一操作数在同 tick 的重复变化，逐个核对波形变化与 VCS 回调。真实样本中 `ready` 在 7 ns 两次变为 1，因果边使用第三次变化和回调 7。若谓词在该 tick 内反复成立，保留候选证据。 [复现步骤](test/fixtures/trace/README.md#vcs-repeated-changes-in-a-wait)
+        - [x] 等待采样增加当时的下一事件序号，并在核对完整回调后仅重放恢复前的变化。真实 VCS 样本在 7 ns 两次使条件成立，当前探针的在线和离线图均定位到第一次成立的回调 5，旧日志仍保留原有推断。 [复现步骤](test/fixtures/trace/README.md#vcs-wait-resumed-during-a-pulse)
+        - [x] 等待原因节点保留已经核验的值变化回调序号，MCP 可按该序号提取局部上游路径。真实 VCS 从直接及延迟 NBA 反查到阻塞提交 8 的 RTL 驱动和 3 ns 的 `trigger_value`，分页报告保留恢复边界与两个赋值的源码位置。 [复现步骤](test/fixtures/trace/README.md#vcs-upstream-writer-of-a-wait-condition)
+        - [x] 时间图预算切断等待控制边时，续查匹配同一个值变化回调。真实 VCS 的在线及离线 MCP 在一条边的预算下优先续查回调 7，一段后接回阻塞提交 8。按回调编号提取路径时仍保留该等待原因及源码位置。 [复现步骤](test/fixtures/trace/README.md#vcs-upstream-writer-of-a-wait-condition)
         - [x] OpenTitan 实跑在 IMEM 地址 36 的四次求值中记录 `wr_en=1` 和 `wr_be=1111`。Linux VS Code 的单次 MCP 查询从 `x28=480` 回溯到四次提交、各自带采样证据的两个控制输入及固件偏移 16–19。独立后端通过 123 项，Verdi NPI 通过 112 项并跳过 11 项独立后端专用用例。
         - [x] 实际 VCS 用例在带嵌套逻辑条件的命名 `if` 块内记录入口 `mask=111`。分支改写后，同次 NBA 求值记录 `mask=110`，并连到高四位提交 7。MCP 从读端和数组字查询均核对两次采样，Markdown 和 Chromium 渲染的 Mermaid 图显示原始条件位置。独立后端通过 123 项，Verdi NPI 通过 112 项并跳过 11 项独立后端专用用例。
         - [x] 实际 VCS 用例采集命名 `else` 块入口的 `mask=111`、同次 NBA 求值的 `mask=110`，以及两条无显式块的 `if` 写入。MCP 从读端和数组字查询均返回假分支入口及原始条件位置。回归覆盖单语句假分支和嵌套 `if` 的 `else` 归属。独立后端通过 124 项，Verdi NPI 通过 113 项并跳过 11 项独立后端专用用例。
         - [x] 实际 VCS 用例验证条件函数的副作用。原始与插桩仿真均只调用 `take_lane()` 一次，读端结果均为 `0xa3`。MCP 从读端和数组字查询均核对函数执行后的入口值 `mask=110`、分支改写后的求值 `mask=111` 与高四位提交 8。回归覆盖 VIDE 只能提供条件源码位置时的入口采集，并核对生成的条件保留一次函数调用。独立后端通过 124 项，Verdi NPI 通过 113 项并跳过 11 项独立后端专用用例。
 - [x] 用真实 VCS DPI 仿真核对 SystemVerilog 调用的输入、返回值和输出参数。MCP 保留调用点、波形观测和外部执行缺口。
 - [ ] 将 DPI 函数内部及其他外部激励关联到可复验的执行记录。
+  - [x] 记录 VCS `-P` 表、链接对象及本次运行前的文件哈希。真实自定义 PLI 和 Verdi FSDB 用例均通过前台与静默 MCP 验收。自定义回调在 5 ns 写入信号，报告同时显示已观测的赋值传播与 `externalPliCallbacks` 覆盖缺口。文件缺失和哈希冲突分别返回 `missing` 与 `mismatched`。回调内部的读写顺序仍待采集。
+  - [x] 将运行清单或 VCS `-P` 表的调用名称载入隔离 VIDE 配置。真实 `$wb_drive` 的 Driver 与 Load 都定位到 RTL 调用，时间图保留 2 ns 输入和 5 ns 输出之间的候选边。前台与静默 MCP 核对静态图、时间图和详细报告。未注册的调用不推断实参写入。保留 `unresolvedSubroutineEffects` 和 `externalPliCallbacks`，仍需收集回调本身的实参读写及顺序证据。
+  - [x] 对可插桩的同步 VCS PLI 写入，采集两次 C 操作的值和顺序、RTL 调用位置及写入后的实际信号。用真实 `$wb_drive` VCD 和封装记录回放，Linux 前台与静默 MCP 均从 `observed` 追到 `target @ 5 ns` 的提交 4。两端时间图和报告一致，Mermaid 在 Chromium 渲染。覆盖核对依赖波形、探针映射和源码哈希，跨槽提交反例被拒绝。
+  - [x] 使用同一 VCS 可执行文件在线暂停于 `$wb_drive` 的提交 4。核对运行参数、RTL 编译配置、PLI 表与对象、采集库和各信号的事件序列后，VS Code、前台 MCP 与静默 MCP 恢复同步写入的 C 步骤与源码，在线图与离线图一致。采集库、PLI 对象或 plusargs 的反例保留在线观测，撤除旧日志归因。未插桩回调继续计入覆盖缺口。
   - [x] 单线程 Verilator 的同步 DPI 调用可显式记录 C++ 内部步骤。按实际的 RTL 求值封装这些步骤，核对 C++ 源码哈希，在动态时间图和报告中链接步骤。已验证实参、返回值和源哈希变化。
 
 ## Phase 1　VIDE 静态语义
@@ -195,7 +219,11 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
   - [x] Verilator JSON 基础端口连接已合并进跨实例图，包括简单变量引用、命名和位置端口，以及生成实例的一位选择。边保存源和目标位索引。
   - [x] Verilator JSON 固定 packed 端口切片支持升序和降序声明。Trace Explorer、Mermaid 与详细报告显示所选范围。尚未建模的复杂端口表达式在查询前沿明确标记。
   - [x] Verilator JSON 中 elaboration 后的直接常量输入端口进入静态图，图和报告可定位常量连接的 RTL。
-  - [x] Verilator 用实例展开位置筛选命名条件 generate 的赋值和上下游信号。MCP 静态图、时间图和报告使用同一筛选结果。无法确认的分支保留候选并提供 `unresolvedGenerateBranch`。逐次循环展开的赋值归属仍待验证。
+  - [x] Verilator 用实例展开位置筛选命名条件 generate 的赋值和上下游信号。MCP 静态图、时间图和报告使用同一筛选结果。无法确认的分支保留候选并提供 `unresolvedGenerateBranch`。
+  - [x] 用 Verilator 5.054 的展开 JSON、VCD 和 FST 核对循环 generate 的逐次绑定。三个匿名迭代各写入一个确定的输出位，内层条件各自选择 `src_a` 或 `src_b`。前台和静默 MCP 共核对六张分页时间图、源码位置和报告。命名循环与内层命名分支通过单独的 VCD 样本复核。 [复现步骤](test/fixtures/trace/README.md#verilator-generate-loops)
+  - [x] Verilator 循环内的单语句 `if/else` 使用其隐式展开作用域。VCD 与 FST 在同一行的两个赋值之间按列号核对实际分支。三个输出位的前台和静默 MCP 分页图均保留各自的迭代、源码列号和输入变化。 [复现步骤](test/fixtures/trace/README.md#verilator-generate-loops)
+  - [x] 循环内无 `else` 的条件在展开作用域缺失时，用当前实例的 genvar 核对条件。真实 VCS KDB/VCD 和 Verilator JSON/VCD 均验证 `lane < 0` 与 `lane == 0`，两组总线共保留两个有效写入位。条件为真或无法求值而作用域缺失时继续报告 `unresolvedGenerateBranch`。 [复现步骤](test/fixtures/trace/README.md#generate-loops-without-else)
+  - [x] 循环内无 `default` 的 `case generate` 在展开作用域缺失时核对全部标签。真实 VCS KDB/VCD 和 Verilator JSON/VCD 均验证多标签分支、负 genvar 和无匹配迭代。匹配标签仍存在、无法求值或操作数位宽不一致时保留 `unresolvedGenerateBranch`。 [复现步骤](test/fixtures/trace/README.md#generate-case-without-default)
   - [x] Verilator 波形按展开位置绑定直接的层次读取。Driver 查询递归追踪到叶子实例输入。Load 查询可追踪展开设计中读取该信号并写入单个本地信号的使用点。复杂层次写入和其他设计后端的绑定仍待覆盖。
   - [x] Verilator 波形的直接层次写入按展开的实际目标和 RTL 写入点绑定。Driver 可从叶实例跳到 TB 写入点，再沿 TB 信号向上游追踪。Load 可从 TB 输入沿写入继续到实际目标实例。
   - [x] 使用 Verilator 展开树可将命名 modport 的直接成员及指向单一成员的别名绑定到实际接口实例。直接成员的读写端可跨转接模块追踪。别名用 VCS 和 Xcelium 的 VCD 验证。
@@ -237,6 +265,8 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
   - [x] 从一维 packed 总线的单个位开始静态 Driver 查询。按确定的写入位筛选赋值，再通过固定选择、拼接和受支持的按位表达式向上游传播位索引。Trace Explorer、MCP 和 Mermaid 显示确定位索引。跨同一总线其他位的路径可继续展开，按位判断反馈环。
   - [x] Driver 和 Load 可从一维 packed 总线的固定位或固定范围追踪。MCP 返回读位、写位及可确定的逐位关系，Trace Explorer 在沿关系展开时使用对应位。动态索引的回归验证了可能相关的读取端和写入位被保留。
   - [ ] 扩展独立 KDB 的其余端口表达式及无名 generate 的赋值绑定。VCS T-2022.06-SP2 对测试的动态输出位选及范围选择报 `IPC-E`，动态输出仍需以能生成对应展开数据库的仿真器验证。
+    - [x] 匿名条件 generate 子句从修改版 VIDE 获得源码范围。真实 VCS KDB 在两个实例上按生成作用域的唯一源码行选中不同分支，Verilator JSON 还使用列号区分同一行上的两个子句。前台与静默 MCP 的 Driver、Load、时间图和详细报告核对到实际路径。KDB 同行反例保留两个候选和明确缺口。 [复现步骤](test/fixtures/trace/README.md#parameterized-generate-branches)
+    - [x] 用同次 VCS 仿真的 KDB、FSDB 和 VCD 核对匿名循环与嵌套条件。循环下标 −1、0、1 分别写入 `result_bus` 的第 0、1、2 位。独立 KDB 与 Verdi NPI 核对实际赋值上下文。VCD 将作用域写进变量名时按完整波形路径绑定并继续自动回溯。前台和静默 MCP 的六个分页时间图、源码引用、Mermaid 和报告逐项一致。 [复现步骤](test/fixtures/trace/README.md#vcs-anonymous-generate-loops)
 - [x] 从波形信号菜单、层级视图和 RTL 选中位置提供适用的 Driver/Load 入口。用原生 VS Code 树实现懒展开、源码/赋值跳转、加入波形、复制路径和以当前节点继续追踪。
   - [x] 已接入原生 Trace Explorer、波形信号菜单、RTL 光标命令、源码跳转、加入波形及复制路径。
   - [x] Trace Explorer 的信号节点可作为新的根继续追踪。VS Code 扩展测试使用实际 FST 验证该入口。
@@ -252,6 +282,16 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
 ### 从单个信号生成图表和报告
 
 - [x] MCP 提供 `followAllContinuations` 自动遍历，默认返回分页图。当前每次续查最多 64 段或 100 秒。分页包含未访问的前沿与失败诊断，达到预算后仍可使用游标续查。Linux VS Code 和静默后台使用同一 Verilator VCD 的 161 级链验证 Driver 在首批 64 段后仍有一个待查入口，第二批累计 80 段并抵达源输入。静默后台从源输入反向执行 Load 同样得到 161 条赋值。两端时间图在一次调用中完成 40 个续查，得到相同的 323 节点、322 条边。队列为空时仍明确保留 `missingObservations`。从只查一段的时间图续查，节点从 17 增至 323，根查询报告正文逐字保留。
+  - [x] Linux VS Code 1.124.2 与静默 MCP 用同一 OpenTitan FSDB 从 `x28 @ 2051001 ps` 自动续查。首批 64 段分别用 46.5 秒和 45.4 秒，保留 5,172 个节点、12,462 条边、169 页 Mermaid 和 336 个待查入口。恢复八段后保留原节点身份、边和赋值位置，累计 5,598 个节点、13,324 条边、174 页 Mermaid 和 328 个待查入口。两端的完整报告及前沿逐字节一致，共用 `requestBudget` 和 `gapBudget` 覆盖状态。用隔离 VS Code 宿主的测试钩子加载首批 MCP 保存的图。Trace Explorer 的 36,614 条未接合缺口按 128 条分页，287 页逐项与 MCP 的对应缺口核对，并在实际侧栏展开首页。
+  - [x] 时间图输出按原因和状态汇总已经保留的缺口。以相同 OpenTitan FSDB 的 `x28` 续查 64、8、8 段，从前台和静默 MCP 的分页数据逐项重算汇总。第 80 段后共 51,534 条缺口，其中 243 条已接合，1,479 条待查缺口共享 322 个入口。未解决项中 41,535 条未建立波形绑定，8,261 条在窗口内无可用变化，16 条历史截断。两端的详细报告与去重后的待查入口逐字节一致。仍有 `gapBudget`。
+  - [x] 时间图中的 `unmapped` 缺口提供具体的 `bindingIssue`，详细报告、Mermaid、Trace Explorer 和原理图显示这一步失败的位置。用同一 OpenTitan FSDB 在前台和静默 MCP 续至 80 段，两端从缺口分页重算的结果均为 41,534 条未找到匹配波形、1 条多个同名波形对象。原生 FSDB 按实例路径查询确认 `a_data[31:0]` 对应 ID 841、867 和 891。回归覆盖 RTL 声明缺失、类型不支持、设计库查询无结果、设计对象没有源位置、声明行和文件不匹配。
+  - [x] 对位宽已验证的 RTL 枚举字面量使用 VIDE 源码值。OpenTitan 的 `ALU_AND` 由 package 参数 `ALU_OP_WIDTH` 确认 7 位，字面量为 `0010101`。在前台、静默 MCP 从 `x28 @ 2051001 ps` 复查六段，两个可达的 `ALU_AND` 常量均定位到 `cv32e40p_pkg.sv` 第 94 行。报告逐字节一致，Mermaid 在 Chromium 渲染。已验证 49 个枚举常量节点，仍有 45 个上游待查入口。受影响的 VIDE Rust 套件通过 358 项、忽略 6 项。Node 通过 100 项、跳过 65 项。
+  - [x] VIDE 在声明位宽内恢复负的有符号枚举字面量和隐式递增。用 VCS 同一次仿真的 FSDB、VCD 和 KDB 验证，Linux VS Code 1.146.0（隔离测试窗口）和静默 MCP 的 Driver 查询均从 `signed_q` 找到 `NEG_NEXT` 和 `ZERO`，Load 查询从 `gate` 找到 `q` 和 `signed_q`。5 ps 与 10 ps 的两种波形格式均核对到实际变化。四条常量路径为 `NEXT=1000`、`START=0001`、`ZERO=0000`、`NEG_NEXT=1111`。枚举声明位于 `enum_tb.sv` 第 5 或第 8 行。两端 FSDB 详细报告逐字节一致，Mermaid 以 Chromium 渲染。VIDE Rust 套件通过 359 项、忽略 6 项，Node 通过 100 项、跳过 65 项。初始化表达式和带下标范围的枚举项仍待支持。
+  - [x] 另一组 VCS 仿真的 FSDB、VCD 和 KDB 核对枚举初始化表达式。无符号表达式由乘法、减法和位掩码求得 `BASE=7`，有符号表达式由加法和取负求得 `NEG_BASE=-2`。Linux VS Code 前台和静默 MCP 均通过 Driver、Load 和八次时间查询。5 ps 的 `q=1000` 追到 `NEXT`，10 ps 的 `signed_q=1111` 追到 `NEG_NEXT`，均保留枚举声明位置。两端 Driver 和时间详细报告逐字节一致，Chromium 渲染两种图。Rust 通过 359 项、忽略 6 项，Node 通过 100 项、跳过 65 项。混合位宽、依赖名称的表达式及带下标范围的枚举仍待支持。
+  - [x] 通过 VIDE 的位置感知名称解析计算枚举值。VCS 样本中的 `START=WAITING+1` 使用导入的 `LOWER`，`BASE` 使用限定名称 `encodings::STRIDE`，有符号起始项使用 `encodings::NEGATIVE`。Linux VS Code 前台和静默 MCP 的 Driver 与 Load 结果一致，FSDB 和 VCD 的八个时间点查询核对到 `NEXT=1000`、`START=0010`、`ZERO=0000`、`NEG_NEXT=1111` 及声明位置。静态详细报告逐字节一致，时间报告仅 VIDE revision 不同。两种图均经 Chromium 渲染。Rust 通过 360 项、忽略 6 项，Node 通过 100 项、跳过 65 项。
+  - [x] 枚举初始化支持混合位宽和可验证的符号扩展。前台和静默 MCP 用同一次 VCS 仿真的 FSDB、VCD 及 KDB 核对了 12 条已确认的时间路径。另在两种格式核对 `mixed_q @ 5 ps` 保留根波形值 2 和上游缺口。单独的 Verilator 5.054 仿真对相同的嵌套表达式给出 18。两端结构化核对结果一致，详细报告忽略 VIDE revision 后一致，Driver 和时间图均经 Chromium 渲染。Verilator 还独立核对可无损收窄的正负值，VCS T-2022.06-SP2 在相应声明上报告 `ENUMSIZE_MIS`。Rust 通过 360 项、忽略 6 项，Node 通过 100 项、跳过 65 项。
+  - [x] 支持 `SLOT[2]`、`UP[3:4]` 与 `DOWN[7:6]` 形式的字面量枚举范围。VCS 仿真的 FSDB、VCD 与 KDB 验证前台和静默 MCP 的 Driver、Load 及 12 条时间查询。降序经 `DOWN7=16` 到 `DOWN6=17`，后续普通枚举项为 `NEXT=18`。生成项保持独立身份、共享声明位置，禁止单独重命名。两端详细报告忽略 VIDE revision 后一致，两种 Mermaid 图均在 Chromium 渲染。Rust 回归和新增重命名测试共通过 366 项，忽略 6 项。Node 通过 100 项、跳过 65 项。
+  - [x] 对 VIDE 识别但无法求值的枚举项返回 `enumValueUnavailable`。用 VCS 的 FSDB 和 VCD 从 `mixed_q @ 5 ps` 复验，前台和静默 MCP 均保留根值 `00000010`，缺口定位到 `enum_tb.sv` 第 17 行，并计入相应原因的汇总。详细报告忽略 VIDE revision 后一致，Chromium 渲染包含缺口的时间图。Rust 通过 366 项、忽略 6 项，Node 通过 100 项、跳过 65 项。
 - [x] 以带执行记录的两级 Verilator 流水线复核自动遍历。Linux VS Code 与静默后台的离线 FST 和在线 Trace 都将 tick 3 的提交 8 追到 tick 1 的提交 4，在线查询保持暂停在 tick 3。Chromium 渲染自动续查输出的四张静态、时间和在线图。实际 Linux VS Code 冒烟同时覆盖仲裁样本的 FST、VCD、源码跳转及详细报告分页。
 
 - [ ] **Phase 3**　从信号、实例和可选位范围自动递归遍历所有可解析的上游关系，包含数据来源、控制条件、端口、时钟与复位。图中合并重复节点并标记环路。若达到资源预算、遇到未解析边或查询取消，返回已得到的图、停止原因以及可继续展开的节点。完整遍历只有在可达前沿耗尽且没有遗漏边时才标记为完成。
@@ -259,21 +299,36 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
   - [x] MCP 的 `staticCoverage` 报告当前分析范围、停止原因、未解析赋值和编译缺口。达到预算后，带有实例路径的前沿可以作为下一次查询的根。
   - [x] 遇到端口声明与展开数据库不一致时，跨实例 Driver / Load 仅保留已匹配的连接，并将覆盖状态标为 `partial`。使用真实 Verilator FST 与展开树，在隔离的 Linux VS Code 中通过测试钩子偏移远端 VIDE 声明一行。MCP 和 Trace Explorer 均报告缺失的端口连接，界面提示分别跳到输出和输入连接的第 25、22 行。撤销偏移后，两种查询恢复原来的赋值。独立后端 126 项通过，Verdi NPI 115 项通过并跳过 11 项独立专用用例。
   - [x] 位级预算前沿返回可直接查询的 `continuationSignals`。Linux VS Code 与实际 VCS FSDB 核对 `result[2]` 经 `mid[2]`、`data[6]` 到达 `source_hi[2]`。五页拼接的赋值与一次查询相同，预算前沿的信号信息可以跨页读取。TreeDataProvider 回归验证 Trace Explorer 可以保留根位选择。独立后端通过 124 项，Verdi NPI 通过 113 项并跳过 11 项独立后端专用用例。
+  - [x] 修改版 VIDE 提供固定字面量声明范围。用 VCS VCD 与 KDB 的 `tb.q[2:1]` 核对完整采集以及分别只采集 `middle[1]` 或 `middle[2]` 的副本。前台和静默 MCP 继续追踪可采集位，在同一信号上保留 `unavailableBits` 并返回 `partial`。VS Code 波形菜单、详细报告和 Mermaid 核对到具体缺失位。VIDE 回归覆盖升序、负下标和实例参数决定的范围。
+  - [x] 对一维整型总线，用 VCS KDB 或 Verilator 展开树提供实例范围。`parameter_packed_tb.sv` 的两个实例共用 `middle` 声明，展开为 `[2:0]` 与 `[5:0]`。真实 VCS 和 Verilator 的完整及部分采集 VCD 验证前台、静默 MCP 的 Driver 与时间追踪。Verdi NPI 从同一 KDB 读取范围时还核对实例和源码位置。测试固定声明与实例展开的证据来源。
   - [x] Trace Explorer 的可续查前沿提供 **Continue from** 操作。Linux VS Code 的隔离验收通过树项命令从 `result[2]` 续查 `mid[2]`，并与 MCP 比对两次查询的直接赋值位置。源码跳转定位到相同行列。
   - [x] 静态续查使用核对过的波形层级和位下标。将真实 Verilator FST 转为 VCD，并给测试副本设置映射，将波形顶层 `dump_tb` 关联到 RTL 的 `port_slice_tb`。从 `dump_tb.dut.request[1]` 开始，MCP 和 Trace Explorer 均续查到 `dump_tb.tb_request[2]`。从另一份测试副本移除上游信号后，MCP 保留静态前沿并返回 `waveformUnavailable`。Trace Explorer 的树模型回归验证了对应提示。VS Code 测试钩子设置界面查询的深度预算。
   - [x] `expandReachable` 提高静态和时间图的默认遍历上限，保留显式静态预算。实测同一根信号的浅层结果报告深度前沿，完整静态查询抵达外部输入，动态查询回溯同一输入的变化。
   - [x] 静态 Driver / Load 的 `followContinuations` 跨过单段预算自动查询波形前沿。实测 Linux VS Code 1.124.2 的 Verilator 波形以深度 1 从 `dump_tb.dut_response[5]` 续查四段并到达 `tb_request`，保留其过程延迟缺口。Load 从 `tb_request[2]` 续查三段并到达 `dut_response`。预算为 1 时返回两条待查路径，深度为 0 时返回 `noProgress`，移除 TB 输入的波形副本返回 `waveformUnavailable`。独立测试验证共享入口、回边、取消及上下文变化。用隔离宿主的测试钩子将界面深度设为 1，界面报告附录与 MCP 逐字一致。Playwright 验证波形菜单命令，Chromium 渲染续查总览。
   - [x] 静态 Driver / Load 可通过 `wave_trace_resume` 跨批扩展同一张图。Linux VS Code 1.124.2 使用 Verilator 波形的层级映射测试副本，Driver 分两批完成 4 段，Load 完成 3 段。两张图分别包含 6 和 5 条赋值，均与一次查询逐项一致。更改隔离 filelist 后，旧游标失效。Trace Explorer 以隔离宿主的测试预算触发分批，从 `dump_tb.dut_response[5]` 的首批 1 段续查到 4 段，报告附录与 MCP 一致，可跳到 `result[1]` 对应的第 11 行。独立后端 129 项通过，Verdi NPI 118 项通过并跳过 11 项独立后端专用用例。
 - [ ] **Phase 3**　从统一追踪结果生成静态依赖图。插件内可展开、定位源码和添加波形信号。MCP 可返回结构化图或导出 Mermaid，支持自动遍历、分页续查与可选 Markdown 详细报告。报告列出实例、位范围、各边的依赖类型、RTL 位置、遍历范围和缺口。
+  - [x] 静态 Driver 和 Load 快照可按信号 ID 或声明路径提取最短路径及已有的全部分支。用真实 Verilator 仲裁器 FST 核对 `request` 与 `owner_q` 之间两种追踪方向，前台和静默 MCP 的图与报告一致。报告记录单条赋值的读写位范围，路径搜索在声明层级运行。
+  - [x] 静态快照保留 RTL 数据位映射时，MCP 可按声明和位提取最短路径或全部已映射分支。真实 VCS FSDB 核对 `lanes[0]` 到升序总线 `ascending_bus[1]` 的三条赋值和另一条无关位。Driver 和 Load 的前台与静默结果一致。缺少映射的赋值保留为覆盖限制。
+  - [x] 已展开的等宽直连端口可为静态位路径补充连接证据，图和报告标出 RTL 连接位置。真实 VCS 和 Verilator 分别核对父模块输入位经端口到达子模块输出，以及子模块输出经过端口到达父模块的 Load 路径。
+  - [x] 位路径保留已核验端口声明的展开范围，使用匹配的转换位宽确定截断、符号扩展和零扩展依赖。真实 VCS FSDB/KDB 的 Driver 和 Load 共九次查询在前台、静默 MCP 一致，包含位级三跳跨模块路径及整总线快照中的端口位边。详细报告保留 RTL 连接位置和两态转换，Chromium 渲染五张图。符号性未知的扩展位和缺少位映射的 RTL 赋值仍计入证据缺口。
+  - [x] 使用整总线查询保存跨续查段的 RTL 表达式，以已知位宽和位序推导普通赋值的位映射。真实 VCS FSDB/KDB 的整总线 Driver 从 `whole_signed_input` 追到 `whole_signed[1]`，保留 9 条位边，分别通往输出的位 1、2、3。从整总线 `whole_signed` 查询 Load，到 `whole_signed_input[3]` 的路径共 3 条赋值。两个结果均包含中间连续赋值。前台与静默 MCP 的 10 个结果逐项一致，Chromium 渲染上述两图。
+  - [x] 静态位路径和时间证据按赋值宽度追踪固定移位和常量三元表达式。真实 VCS VCD/KDB 复验窄输入向宽目标左移、算术右移的符号填充，以及带 `1x` 常量条件的分支选择。两种 MCP 的三份静态图和三份时间图在结构化证据及 Markdown 报告上一致。运行时移位量继续保留信号级候选。
+  - [x] 静态 Driver、Load 和时间图可通过 MCP 在同一快照按前沿编号续查。隔离的 Linux VS Code 1.124.2 在真实 Verilator VCD 上重启，分别从静态 Driver 和 Load 视图选取待查分支，两版合并图的信号、赋值和缺口均与前台 MCP 一致。真实仲裁器 FST 验证静默 MCP 可先查队尾的 `accept`，保留前三个入口及原顺序。
   - [x] 大规模静态 Driver / Load 图、时间因果图、波形观测图和执行图可按 Mermaid 渲染能力分成多页。页间复用相同编号的节点，图表分页保留全部边，静态赋值数据仍可用 `pageCursor` 分页。
   - [x] MCP 静态 Driver / Load 查询可分页返回赋值及其信号、Mermaid 和详细报告。实际 VS Code 在独立 VIDE 会话之间取回全部 7 条关系，拼接后与一次查询一致。原图变化后旧页游标失效。
   - [x] `staticContinuationGraph` 将根查询和静态续查合成一张图，保留各赋值的原始查询、源码位置和位选择。Linux VS Code 1.124.2 的 Verilator 端口切片用例得到 Driver 图 5 个信号和 6 条赋值，Load 图 7 个信号和 5 条赋值。两张图保留未解析项，所有赋值逐项核对原始查询。Chromium 渲染两张合并图。使用隔离宿主的测试钩子限制界面查询深度后，VS Code 与 MCP 输出相同的报告附录。回归覆盖跨段反馈及不同位造成的伪环路。独立后端 128 项通过，Verdi NPI 117 项通过并跳过 11 项独立后端专用用例。
   - [x] MCP Driver / Load 支持 `output: "graph"`、合并图分页和完整 Markdown 报告。Linux VS Code 的 261 路 VCS 扇入样例从 `q` 得到 264 个信号和 528 条赋值，分 5 页取回原编号、源码位置及赋值来源，与单次响应逐项一致。Chromium 渲染首页，并用 `input_data` 验证 Load 独立查询的分页。独立后端 129 项通过，Verdi NPI 118 项通过并跳过 11 项独立后端专用用例。
   - [x] Trace Explorer 可展开合并静态图并添加位投影。Linux VS Code 1.124.2 使用真实 Verilator 波形的层级映射测试副本，从 `dump_tb.dut_response[5]` 展开到 `result[1]` 和续查段的第 11 行赋值，点击信号行的 **+** 添加 `result[1]`。测试钩子将界面查询深度设为 1，报告附录与 MCP 一致。回归覆盖剩余前沿续查和旧节点操作失效。
 - [ ] **Phase 4–6**　输入波形信号和时间点生成时间因果图，包含跨周期数据来源、控制条件、相关触发、候选驱动和保持原因。报告按需附上波形值、仿真时间、源码与构建身份、证据来源和确定性。执行记录回放与在线会话可附上关联的事件及求值、提交顺序。
+  - [x] 时间图检测已保留关系中的反馈闭环。直接查询、自动续查和局部路径图共用检测逻辑。真实 VCS VCD/KDB 从 `time_feedback_tb.q @ 3 ns` 自动续查七段，前台与静默 MCP 分页结果在归一化 VIDE revision 后一致。`feedbackEdges`、Mermaid 和详细报告均标注启动和 3 ns 的闭环。待查队列为空时仍保留未 dump 的 `hidden` 所产生的部分覆盖。 [复现步骤](test/fixtures/trace/README.md#feedback-and-missing-samples-in-a-time-trace)
+  - [x] 从续查合并的时间图逐层提取局部因果路径。真实 Verilator VCD 从 `TOP.chain_tb.q @ 5 ns` 分批续查 80 段到达 `stimulus`。前台与静默 MCP 均返回 161 跳，再用局部图游标选取 `s120 @ 5 ns` 得到 40 跳。两张局部图各保留 40 和 10 条续查接回记录，重新选取后稳定保留原图节点号及每条因果边的 RTL 位置。前台与静默 MCP 的图、分页和 Markdown 逐项一致，Chromium 渲染两张图。
   - [x] 分支或过程时序存在未解析项时，静态 Driver / Load 和时间图保留可解析的 RHS 位依赖。报告继续标明控制缺口，波形推断保留候选置信度。相同构建的执行记录可独立确认具体写入。
 - [ ] **验收**　对同一根信号调用 UI 和 MCP，逐边核对静态与动态图的输入、路径和证据。双 Ibex 仲裁样本应覆盖两个 hart 输入及真正导致指定周期更新的路径。用含环路、多个等值候选、未 dump 和大规模扇入的样本验证停止状态、续查和详细报告。
   - [x] Linux VS Code 1.124.2 的 Trace Explorer 与 MCP 查询同一 RV32A FSDB 的 `hart_q @ 280000 ps`。两端的两个直接写入位置一致，界面跳转到构建快照中的赋值行。时间图的 103 个节点、168 条边、247 个边到赋值的链接及 299 项缺口逐项匹配。波形记录两路请求在 `270000 ps` 同时有效，`ready=10`，`capture_atomic=1`，`hart_q` 于 `275000 ps` 变为 1。FSDB 时间图保留 `selected_hart` 数据边及 `capture_atomic` 控制边为可能的依赖，槽内先后仍属证据缺口。Chromium 渲染三页静态图及两页时间图。此项验证使用隔离的 VS Code 扩展宿主与 Trace Explorer 测试钩子。
+  - [x] 以 Linux VS Code 的波形菜单和前台 MCP 对同一 RV32A FSDB 的 `hart_q[0:0] @ 280000 ps` 自动续查。MCP 的分段时间图使用完整波形路径，与界面保留相同的总线后缀。静态和时间报告分别逐字节一致，静态图含 213 个信号、774 条赋值，时间图含 4,547 个节点、11,910 条边和 8,929 个缺口。首批查 64 段，仍有 520 个待查入口。Chromium 渲染两图首页。
+  - [x] 修复 Trace Explorer 时间续查仅更新内存的问题。实际 VCS FSDB 的 `wide_causal_tb.q @ 5 ps` 在隔离宿主将每批设为两段后，使用续查命令使工作区保存的合并图从 261 增至 265 个节点。节点、267 条边、1,028 个缺口逐项匹配相同预算的 MCP 游标恢复。测试钩子用于读工作区状态和取得 Trace Explorer 命令参数。Node 通过 100 项、跳过 65 项。
+  - [x] 追踪查询和批次续查等待工作区状态写入后完成。Linux VS Code 1.124.2 运行真实 VCS FSDB，在隔离宿主将首批设为两段，首批查询结束后立即关闭窗口。重新启动后图数据逐项一致，包含 261 个节点、261 条边和 1,026 个缺口。从恢复的缺口追查 `wide_causal_tb.d_257 @ 2` 并打开报告。回归覆盖离线执行记录路径、tick 和变化序号。Node 通过 101 项，跳过 65 项。
+  - [x] 在工作区状态保存离线批量续查的已查段、待查入口及报告。重启后先核对波形、编译输入、设计数据库和执行记录的文件指纹，再用当前配置核对根查询。Linux VS Code 1.124.2 中，隔离宿主每批查询两段，重启后从第 3 段继续。Verilator VCD 的 Driver 与 Load 图均从 96 增至 160 条赋值，VCS FSDB 时间图从 261 增至 265 个节点。静态图的信号、赋值和缺口，以及时间图的节点、边和缺口均逐项匹配前台 MCP 的同预算分页结果。修改隔离 VCD 后拒绝旧的批次并保留历史图。Node 通过 102 项，跳过 65 项，含执行记录变更回归。
   - [x] MCP 支持 `output: "temporal"`，保留时间图、原 ID 对应的赋值源码位置和结构化续查入口。实际 OpenTitan MAC FSDB 的 `x28` 查询含 2,881 个静态信号及 4,888 条赋值，默认响应正文为 35,160,117 字节。精简输出含 Mermaid 为 54,516 字节，24 个时间节点和 26 条边逐项相同。用预算前沿直接续查 `regfile_alu_wdata_fw_o[31:0] @ 2051000 ps`，到达乘法相关信号并返回 768 个节点和 1,546 条边。Chromium 渲染起始图和续查图首页。
   - [x] 在线精简输出也保留会话标识、槽末采样和写入的赋值位置。实测 Verilator 流水线按同一会话的前沿续查 tick 1，在相同时间图中定位实际提交 4。
   - [x] `followContinuations` 可在一条 MCP 请求内自动跟进多个时间图前沿，合并重复查询并保留来源缺口、失败原因及尚待查询的入口。实际 OpenTitan MAC FSDB 的 `x28` 查询自动续查写回总线的 `2051000 ps` 与 `2037000 ps` 两次变化，各得到 24 个节点和 23 条边。返回 35 条前沿链接与 16 个剩余续查请求。Verilator 在线回查在同一会话中定位 tick 1 的提交 4，仿真保持在 tick 3。独立后端 125 项通过，Verdi NPI 114 项通过并跳过 11 项独立专用用例。
@@ -306,10 +361,23 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
   - [x] 从读取固定位的标量输出发起 MCP 查询，静态 Driver 和时间图都沿实际读取的位回溯。Linux VS Code 1.124.2 与真实 VCS VCD 验证 `bank_value[1]` 和 `lane_value[-1]` 各自连到被参数覆盖的实例和 `tb.b @ 5 ns`，相邻两路各自连到兄弟实例和 `tb.a @ 2 ns`。独立 KDB 和 Verdi NPI 均核对了四路展开及 Mermaid 和 Markdown。Node 回归覆盖负下标和缺少范围时的信号级路径。
   - [x] 对单维 packed 向量的变量写入索引保留静态依赖，按波形计算目标位并比较对应 RHS。索引没有可验证的值时保留候选。真实 FST 在 tick 5 和 tick 9 验证同一条 `q[index]` 分别写入 bit 2 和 bit 1，其索引来源进入时间图。
 - [ ] 构建有界时间图。组合依赖在相关时间槽内搜索，顺序依赖按时钟或异步复位回退并区分前值、求值和提交。支持赋值覆盖、无写入时保持、同值写入候选及跨多周期递归。
+  - [x] VIDE 在 ANSI 输出网线声明具有可核对的 `wire`、`tri` 或 `uwire` 类型时，为无延迟、无强度说明的连续赋值提供同槽值核对标记。真实 Verilator VCD 从 `q @ 5 ns` 续查至 `stimulus`，排除与根变化不符的初始值分支及其 160 条初始求值顺序缺口。MCP 两种宿主均得到 162 个节点、161 条候选边和 40 条续查接回记录，覆盖为 `resolvedWithinWindow`。VCS VCD/KDB 的反例保留 `#2` 延迟来源、强度赋值的前值候选和双驱动证据。Rust 回归还覆盖输出变量、`wand` 及延迟网线声明。
+  - [x] 波形时间图可按稳定的运行时移位量追踪数据位，并继续追踪移位量来源。真实 VCS VCD/KDB 的 `q[5] @ 6 ns` 回溯至 `data[4] @ 6 ns` 和 `amount=2 @ 2 ns`。同槽移位量在多个值之间变化时保留总线候选和 `sameTickUnordered`。前台与静默 MCP 的 6、9、12、15 ns 图及分页一致，报告仅 VIDE revision 数字不同。
+  - [x] 单一无延迟连续驱动可从与输出相符的同槽采样组合推断一致的移位量。用相同 VCS VCD/KDB 样本核对 12 ns 缩小到 `data[4]`，9 ns 保留总线和两个移位量，15 ns 保留 X 变化。前台和静默 MCP 的边及报告在归一化本地 VIDE revision 后一致。推断的位边仍保留 `sameTickUnordered`。
+  - [x] 三元表达式按稳定条件或一致的同槽采样结果追踪所选数据位，将条件依赖标为 `condition`。真实 VCS VCD/KDB 样本核对升序输入真分支、同槽选择假分支、条件发生 X 变化的总线级候选，以及稳定 X 条件下的两路逐位合并。两种 MCP 的四组图与分页一致，报告仅含本地 VIDE revision 差异。
+  - [x] 四态同槽比较使用波形中实际的 X/Z 样本。真实 VCS VCD/KDB 的 `q[2] @ 8 ns` 由不定条件合并两路相反的数据位，图保留 `a[1]`、`b[2]` 及条件的三条候选因果边。Node 回归覆盖条件变为 X 和 Z。两种 MCP 的四组结果按本地 VIDE revision 归一化后一致。
+  - [x] VCS 移位和三元选择的 NBA 使用 KDB 自动映射和插桩生成捕获实际操作数。真实回放在 tick 3 从 `q[5]`、`r[3]` 分别查到已记录的移位量、条件和共同的数据位 `a[4]`。前台与静默 MCP 的位路径、执行证据和报告一致，移除操作数记录后保留信号级候选。原始与插桩 VCD 的设计信号观测一致。
+  - [x] 将 tick 0 的首个波形值作为初始采样，保留声明初始化的候选赋值与源码位置。真实 VCS VCD 和 Linux VS Code 1.124.2 从 `result @ 0` 回到 `q` 的声明，从 `result @ 4 ns` 回到 `seed @ 0`，并给仅有首个时钟采样的 `gated` 标注触发边沿待证。前台与静默 MCP 的三张时间图和 Mermaid 逐项一致，分页保留初始化赋值位置，Chromium 渲染三个图。回归覆盖同槽变化序号和非零时刻首次采集。
+  - [x] 修改版 VIDE 标记仅在仿真开始时执行的声明初始化。真实 VCS VCD 中 `state @ 0` 保留 `seed` 和声明位置，`state @ 6 ns` 只连接到运行时赋值的 `runtime_value`，报告列出初始化被排除的原因。4 ns 与 8 ns 两次进入过程时，自动局部变量的初始化仍保留在静态链中，波形未采集该变量。前台与静默 MCP 的四张时间图和 Mermaid 一致，两张 `state` 图已在 Chromium 渲染。VIDE 回归覆盖模块、generate、显式 static、automatic 和循环初始化。
   - [x] 游标值与上一采样相同时，使用游标时刻的触发、守卫和 RHS 证据判断已列写入路径是否可排除，或是否存在同值写入候选。执行记录可同时核对实际提交或保持。
   - [x] Linux VS Code 1.124.2 与真实 VCS VCD 核对了根信号的同值提交。查询 `left_q @ 5 ns` 时，纯波形时间图以 1 ns 的可见变化为根。回放和在线 MCP 均匹配到 3 ns 的提交 14，自动历史窗口随提交时间重新取样。Mermaid 和详细报告标记为已记录的同值写入，显式 `changeOrder` 仍能选择 1 ns 的波形变化。
   - [x] 有可核对触发和守卫的非阻塞赋值可比较同 tick 的多个 RHS 样本组合。MCP、Mermaid 和详细报告标出波形匹配结果，保留调度候选。两级流水线复现跨时钟周期的数据来源。
+  - [x] 修改版 VIDE 标记可核实无延迟的普通 net 声明赋值及连续赋值。时间图对单一驱动、完整静态覆盖和可求值的二态样本枚举同槽 RHS 组合，只在找到兼容样本时收窄候选，并保留同槽顺序未知。实际 VCS VCD 在 4 ns 验证直连与反相均只保留 `q=0`，net 声明延迟、显式赋值延迟及多驱动各保留两种候选。Linux VS Code 与静默 MCP 的五张时间图和 Mermaid 一致，Chromium 渲染五图。VIDE 回归覆盖声明赋值、显式赋值和两种延迟位置。
+  - [x] 使用与波形一致的完整 VPI 回调重放无延时单驱动连续赋值的 RHS。起始 RHS 必须与前一个输出值一致，到达目标值的回调必须唯一且 RHS 保持到输出回调。前台和静默 MCP 在实际 VCS 样本中将 `a[1]` 回调 0 和 `q` 回调 1 关联到同一条边，分页查询、按位路径、Mermaid 和 Markdown 使用该证据。Trace Explorer 在边详情显示两个序号。覆盖缺失或 RHS 多次到达目标值时保留候选。 [复现步骤](test/fixtures/trace/README.md#vcs-late-callbacks-on-an-undelayed-assignment)
 - [ ] 为竞争、等值候选、同 tick 多次更新、X/Z、未 dump、时基差异和源码不一致保留候选及诊断。将缺少精度的节点和边作为结构化证据返回。
+  - [x] 普通 `case`、`casez` 与 `casex` 共用整条语句的比较位宽和符号属性。真实 VCS 样本验证未采样的后置固定宽度标签仅提供类型，轮到读取该标签时报告 `waveformMissing`。同一 X 样本在三种 case 中分别核对精确 X 匹配、默认分支和首个通配匹配。前台和静默 MCP 的静态图、八张时间图及报告一致。 [复现步骤](test/fixtures/trace/README.md#procedural-case-comparison-type)
+  - [x] 修改版 VIDE 输出过程 `case inside` 的范围、标签和源码位置，时间图用整条 case 的公共类型和先匹配规则判断候选写入。真实 VCS VCD/KDB 样本的七次查询核对闭区间、重叠标签、标签通配位、选择值中的 X/Z、default 和后置无符号标签。前台与静默 MCP 的静态 Driver/Load、时间分页、Mermaid 和报告一致。 [复现步骤](test/fixtures/trace/README.md#procedural-case-inside)
+  - [x] 在时间图中分别使用 RTL 声明范围计算位依赖、用波形范围核对采样。实际 VCS VCD 查询 `tb.scalar @ 2 ps` 时，前台与静默 MCP 的完整图保留两条位路径。单个位采集仍能续查已采集位，另一位保留 `waveformBitsUnavailable`，VS Code 报告和 Mermaid 显示同一缺位。回归覆盖固定和动态位选，并区分声明范围内缺样与越界 `X`。
   - [x] 过程 `#delay` 和 `wait` 保留控制输入。静态前沿、Trace Explorer 和详细报告标出无法仅用当前波形重建的过程调度，MCP 返回对应源码范围。
   - [x] `temporalTrace.gaps` 保留未采集信号、截断历史、无法核实的触发边沿及节点或边预算，并关联具体赋值和时间节点。Mermaid、Markdown 和 Trace Explorer 显示同一缺口。预算前沿包含上游信号、位下标及 tick，可从 UI 或 MCP 继续追踪。
   - [x] 离线波形的时间图前沿返回可用于 `wave_trace_context` 的 `continuation`，Trace Explorer 提供同址续查并保留赋值源码入口。隔离 Linux VS Code 与真实 VCS FSDB 在单节点预算下核对从 `result[2]` 续查 `mid[2] @ 5 ps`，再到 `source_hi[2]` 的同一时刻变化。
@@ -319,7 +387,24 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
   - [x] FST 和 VCD 验证了恰在查询起点的变化可保留前值。后端返回同 tick 的多个目标样本时，报告标识该时间槽并保留候选，跳过无法定位到具体写入的 RHS 比较。
   - [x] VCD 和 FST 的追踪查询保留同一信号在一个 tick 内的全部记录变化。MCP、时间图和 Trace Explorer 显示同信号的变化序号，每个根变化可回溯到同 tick 的多个数据样本、进入该 tick 前的值及匹配的触发边沿。跨信号顺序保留为未知。
   - [x] 自动回溯单个位时按该位最近一次变化选择历史窗口。VCD 验证跳过其他位的变化与密集总线事件下的局部重读。
+  - [x] 位历史从 tick 0 起可连续核实时，稳定的总线位可回溯至初始波形采样。OpenTitan MAC FSDB 的 `x28 @ 2051001 ps` 首批 64 段中，19 次位级查询将 57 条缺口接回 tick 0。Mermaid 边与 Trace Explorer 区分初始采样和前序变化。VCD、FST 读取结果一致，晚开始采集的反例保留缺口。
+  - [x] 将可核实的 package 参数作为 RTL 操作数参与数据和守卫核对。真实 OpenTitan MAC FSDB 的 `x28 @ 2051001 ps` 首批 64 段保留 120 个参数节点及声明位置，前台和静默 MCP 的完整分页、Mermaid 与 Markdown 一致。无法求值的 package 参数给出专门诊断，可被实例覆盖的模块参数沿用展开数据。
+  - [x] 修改版 VIDE 识别实例参数声明，Wave Workbench 用独立 KDB 核对实例和声明位置后读取实际展开值。OpenTitan MAC FSDB 的同一查询消除 43 条参数绑定缺口，保留 7 个已使用的参数节点。前台和静默 MCP 逐项对照完整结果。
+  - [x] Verdi NPI 桥接读取实例展开后的整型和位向量参数。真实 OpenTitan MAC KDB 中五个值及声明位置与独立后端相同。VCS 测试工程覆盖同声明的两个实例、符号、68 位和四态参数。用 Verdi NPI 与 SDK FSDB Reader 对 `x28 @ 2051001 ps` 续查 64 段，前台和静默 MCP 的分页、图及报告一致，Chromium 渲染 `P_WMACC` 的证据图页。
+  - [x] Verdi SDK 波形窗口保留窗口前的真实采样时刻。同一 OpenTitan MAC FSDB 查询补回复位变化和稳定信号初始采样，首批 64 段与独立读取器的分页、Mermaid 和报告一致。回归使用 VCS 的 `selective.fsdb` 核对窄窗口、相同边界和跨变化窗口。
+  - [x] 自动续查及恢复批次按信号、时间、变化序号、会话和实际生效的历史起点识别同一次查询。OpenTitan MAC FSDB 的 `x28 @ 2051001 ps` 由前台与静默 MCP 各查询 64 段并续查 8 段，图、57 页 Mermaid 和详细报告逐项一致。72 段接回 681 条缺口，并报告 423 个待查入口和 `requestBudget`。
+  - [x] 通过图游标按需读取同一快照的 Mermaid 和 Markdown。用 OpenTitan MAC FSDB 验证原查询和恢复批次的图表及报告分别等同于预先生成的结果。Verilator FST 复验已结束的静态 Driver 和离线时间查询。
+  - [x] 静默 MCP 连续十批查询同一 OpenTitan MAC FSDB 的 `x28 @ 2051001 ps`，走到 640 段，累计接回 9,138 处缺口。仍有 728 个待查入口，另有两条 RTL 声明定位失败，均指向不在当前构建清单内的生成 testbench。
+  - [x] 用 VCS 实际编译的生成 testbench 重建 OpenTitan MAC 样本清单，首轮及两批恢复共 192 段，确认两条时钟与复位查询恢复。运行记录脚本接收 `--vcs-kdb` 并保留实际编译根。用同一 VCS 可执行文件生成新 FSDB，隔离的 Linux VS Code 前台和静默 MCP 验证静态 Driver、Load、时钟和复位时间图、Mermaid 及 Markdown。四张图已在 Chromium 渲染。
+  - [x] 修正清单后再次进行 OpenTitan MAC FSDB 十批续查，640 段全部返回，无未接合缺口。9,140 条缺口已接回，730 个待查入口保留。匹配错误已消除，tick 0 的 42,666 条初始求值顺序缺口与 450 条触发边沿缺口仍需更多仿真执行证据。
+  - [x] 用同次 VCS FSDB 和执行记录核对 OpenTitan ALU 两条 tick 0 路径。VCS 执行映射支持阻塞赋值和固定 packed 位段的操作数采集。回放使用完整的阻塞写入顺序和前后两次值变化回调，将 `adder_in_a[1]` 与 `adder_in_b[1]` 分别绑定到改变该位的提交 38 和 88。前台与静默 MCP 的详细报告及图一致，两条局部图的初始求值顺序缺口已消除。
+  - [x] 整条 packed 总线的 tick 0 波形初始采样可按位关联到实际阻塞提交。OpenTitan 两条 ALU 总线各核对 32 位和四次提交，另有 4 位未核对。从 `x28` 启动自动续查，经五批共 320 段，两条总线及其记录证据均可由根节点沿候选和续查边到达。仍有 670 个待查入口。
+  - [x] MCP 可从分页时间图提取选定节点到根的一条最短路径。OpenTitan MAC FSDB 的 `x28` 合并图中，两条 ALU 路径各经过 13 条边，保留上述八次实际提交及原图候选关系。Linux VS Code 前台和静默 MCP 返回一致的路径、Mermaid 和详细报告。
+  - [x] MCP 路径导出支持保留快照中通往追踪根的全部分支。OpenTitan MAC FSDB 的同一批 320 段，从上述两条 ALU 总线导出 198 个节点、1,216 条候选边、311 个已接合缺口和 728 条赋值来源。Linux VS Code 前台和静默 MCP 的每个分页章节一致，独立正反可达性核对重现边集合。Chromium 渲染全部 4 张 Mermaid 图。原图保留部分覆盖状态和 670 个待查入口。
+  - [x] 同一个 MCP 批次内，使用构建清单的时间续查可在不同 tick 复用静态 RTL 查询。OpenTitan 前三批共 192 段中复用 37 次。构建和续查输入仍逐段检查，波形按各自 tick 采样。Linux VS Code 前台、静默 MCP 与缓存前的图和诊断一致。
+  - [x] 同槽输入只有初始采样、求值顺序无法核实时，保留候选边，并在缺口中携带已观测的值和对应赋值。真实 OpenTitan MAC FSDB 首批 64 段有 5,177 条此类缺口与 6 条未证实的触发边沿。VS Code 前台和静默 MCP 逐项比对分页及详细报告，Chromium 渲染包含启动顺序诊断的图页。
   - [x] 时间图保留候选赋值使用的稳定输入值。输入在窗口内有连续的已知采样时，离线续查可沿其窗口边界查找前序变化，并在位选择和保持值一致时将结果接入合并图。Linux VS Code 1.124.2 的 MCP 在 Verilator VCD、FST 和 VCS FSDB 上从 `q[1] @ 200 ns` 回溯到 `data[1] @ 5 ns` 和 `seed @ 2 ns`。同一波形的整总线查询回溯到 `data[2:0] @ 115 ns`。三种格式均核对了单独提交续查参数和详细报告。Chromium 渲染 VCD、FST 合并图。回归验证历史中有不可用采样时保留缺口。独立后端 129 项通过，Verdi NPI 118 项通过并跳过 11 项独立后端专用用例。
+  - [x] 稳定输入的离线回溯可从读取器返回的窗口前采样时刻开始。多个窗口使用同一采样时，共用信号、位选择和时间相同的续查请求。真实 OpenTitan MAC FSDB 的 `x28 @ 2051001 ps` 从 `rst_n @ 1911000 ps` 接回复位来源。首批 64 段接回 100 处前序历史缺口，包含 10 个查询段中共用 `shift_left @ 0` 的 16 个接点。前台和静默 MCP 的分页、Mermaid 与报告一致，仍有 389 个待查入口。Verilator VCD、FST 和 VCS FSDB 复验整总线、位查询及手动续查。
 - [x] 接入 `wave_trace_context`，包含静态依赖、当前值、必要历史、候选路径、报告状态和缺失原因。Trace Explorer 支持回到各证据时间点和对应源码。
   - [x] Trace Explorer 列出时间因果图的观测变化。选择变化将波形游标移到该 tick 并调整视窗，展开可定位关联候选赋值的源码。
   - [x] Trace Explorer 按候选赋值逐层展开时间图的上游采样，显示依赖类型、RHS 比对和同 tick 调度歧义。路径重复时终止展开，历史缺口和预算前沿可在时间视图中查看。
@@ -331,6 +416,13 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
 - [ ] 用最小同步设计及双 Ibex / RV32A 仲裁覆盖最近有效赋值、保持、`grant`、`request`、`requester_id`、两个 hart 请求和跨周期证据。固定真实工程版本与仿真产物后复跑。
   - [x] 固定 OpenTitan RV32A Adapter 的真实 KDB、FSDB 和 189 个编译根。复跑静态端口关系及时间图，核对两路请求 `11`、就绪 `10`、选中 hart 1 和紧随其后的 `hart_q` 提交值。结果继续标注同 tick 行为及静态关系的证据缺口。
   - [x] 以 `+rv32a_random_delay=3 +ntb_random_seed=1` 重跑 RV32A Adapter 的原始版和探针版。两路请求于 `370000 ps` 同时有效，`ready=10`。离线回放将 `375000 ps` 的 `hart_q=1` 对应到第 747 行的求值 120 和 NBA 提交 121，确认保持至 `380000 ps`。八个仲裁信号在两次仿真的 11,495 个槽末值一致。
+  - [x] 前台与静默 MCP 对已归档的 RV32A VCS VCD、KDB 和执行记录重新生成时间图。`wave_trace_graph_path` 按信号、tick 和槽内变化序号提取请求 `10`、请求 `11`、就绪 `10` 和较早的 `selected_hart` 变化到 `hart_q` 的路径。按节点编号重查得到同一份图。局部 Markdown 保留波形回调 115–117、求值 120 的操作数、提交 121 和 RTL 位置。请求到组合控制的边保留候选及同槽顺序诊断。
+  - [x] 逻辑与、逻辑或纳入动态位依赖推导，确定选择索引时按被选中的请求和就绪位追踪。归档的双 hart VCS 回放核对 `hart_q` 提交 121 和 151。前者从 370000 ps 的 `valid[1]` 和 `ready[1]` 经 `capture_atomic` 到达根，后者从 370000 ps 的 `valid[0]` 与 455000 ps 的 `ready[0]` 到达根。前台与静默 MCP 的两份分页路径和报告一致。组合握手边保留证据置信度。
+  - [x] VIDE 对局部整数变量上无延时且无强度标注的连续赋值提供时间语义。双 hart VCS 回放中，两次 `capture_atomic=1` 都通过波形组合排除选中握手位的低电平候选。就绪路径在 MCP 和 Trace Explorer 标注波形组合证据，仍保留同槽调度不确定性。Rust 回归包含局部变量正常与带延时的赋值，Node 回归保留多个相容组合。
+  - [x] 在可核验的单驱动无延时路径上，按完整波形和回调一致性排除晚于输出的输入变化。真实 VCS 样本在 5 ns 由回调 0、1、2 依次记录 `a[1]`、`q`、`b[1]`，回放显示 `a[1]` 上升和 `b[1]` 的先前值。归档的两次 RV32A 仲裁仍保留各自的请求、就绪位和源回调。 [复现步骤](test/fixtures/trace/README.md#vcs-late-callbacks-on-an-undelayed-assignment)
+  - [x] 补采 RV32A 的握手输入与枚举状态。VCS 在 370000 ps 记录 `ready[1]` 回调 131 和 `capture_atomic` 回调 132，在 455000 ps 记录 `ready[0]` 回调 168 和 `capture_atomic` 回调 169。两条时间图接回 `hart_q` 的 NBA 提交 136、174。在线断点与离线回放逐条核对这两条因果边。原始与探针 VCD 的 11 路信号在 11,495 个槽末值一致。 [复现步骤](test/fixtures/trace/README.md#vcs-rv32a-dual-hart-ready-callbacks)
+  - [x] VCS 为简单变量索引的单 bit 阻塞写入记录实际目标位及求值时的控制操作数。RV32A 双 hart 的时间图从 `hart_q` 接回 `ready[selected_hart]` 的提交 162、219，并继续到枚举空闲状态、初始化标志和选择有效位。独立升序总线样本核对两个有效位、越界索引和 X 索引，后两者记录 `assignment-no-target`。 [复现步骤](test/fixtures/trace/README.md#vcs-rv32a-dual-hart-ready-callbacks)
+  - [x] `wave_trace_graph_path` 的局部图和报告保留所选节点关联的待查、未匹配和未解决缺口。用 RV32A VCS 回放核对 8 处尚待核实的证据，并用单个位采集的 VCS VCD 核对 `waveformBitsUnavailable`、消费者和原始 RTL 赋值位置。前台和静默 MCP 返回相同的分页结果，Chromium 渲染两图。回归覆盖缺口不会成为可达路径、保留初始化引用及滤除路径外的缺口。
 
 **验收**　对明确的简单同步用例能解释状态形成的时间及原因。对观测不足、竞争和等值分支能复现歧义。仲裁用例能从 `owner_q` 依次追到相关触发、仲裁输入和 RTL。
 
@@ -339,7 +431,7 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
 - [ ] 确定 Verilator 的可选插桩入口和支持范围。按调试信号、过程或范围选择性启用，输出版本化、可流式读取且可索引的事件记录。
   - [x] 选择 `wave_execution_map` 中的直接过程赋值，可生成带 DPI 探针的 RTL 副本和按实例过滤的配置。通用运行时记录求值和阻塞提交，并为可定位的过程块入口记录触发事件。harness 核对单写入 NBA 目标时可记录时槽结束证据。通用调度器提交仍待实现。
   - [x] 可定位的 `if` 分支入口生成独立语句 ID。实际 Verilator 日志在 tick 1 记录进入分支并提交 NBA，在 tick 3 仅记录过程触发。
-  - [x] 回放维护有界内存检查点，重复访问同一实例信号的较晚窗口时可跳过已验证的记录前缀。文件变化后重建。跨会话持久索引待验收。
+  - [x] 回放维护有界内存和磁盘检查点，重复访问同一记录与目标的较晚窗口时可跳过已核对的前缀。真实 VCS RV32A 的 17,801 条记录由静默 MCP 建索引。新启动的 Linux VS Code 1.124.2 和静默 MCP 均从序号 17,287 之后扫描，返回与冷回放一致的 `hart_q @ 57315000 ps` 求值 17,762、提交 17,763、源码核验、Mermaid 和 Markdown。等长修改结束事件计数后重新扫描，返回 `missingEventOrdinals`。回归覆盖索引损坏、波形哈希不符及命中索引后重新核对源码。
 - [ ] 生成构建级 `statementId`/ `processId` 与源码映射表，覆盖实例、宏展开及多赋值点。明确事件 ID 关联、事件序列、NBA 求值和提交、丢失事件及记录覆盖边界。
   - [x] `wave_execution_map` 从已附加的 Verilator JSON 获取指定实例信号的直接变量赋值，按实例、源坐标和内容哈希生成语句与过程 ID。示例记录器可将已有的源探针映射到这些 ID。
 - [x] 实现执行记录 Provider 和回放查询，与离线波形会话的时基和构建身份关联。UI/MCP 展示精确证据及记录缺口，支持仅回放执行记录。
@@ -352,6 +444,7 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
   - [x] Trace Explorer 直接列出回放事件和源码链接。与波形绑定的事件支持跳转到对应 tick。
   - [x] `wave_trace_context` 将源码坐标唯一匹配的运行事件关联到同信号的静态赋值。磁盘源码哈希变化、编译上下文明显不匹配或坐标存在歧义时保留原始记录。
 - [x] 对同值写入、同 tick 多次更新、多个实例、阻塞与 NBA 覆盖以及保持执行对照测试，用记录验证离线归因的正确性和降级。
+  - [x] 执行覆盖从 tick 0 开始且同槽提交可唯一核实时，初始波形采样可关联提交与求值。真实 VCS 仿真中 `early` 保留求值记录捕获的 `seed=0` 与缺少该波形值的证据，`late` 继续追到求值前的同槽阻塞提交。VS Code 前台与静默 MCP 的时间图、Mermaid 和详细报告一致。
   - [x] `wave_trace_context` 对照根信号的波形变化和匹配执行记录的提交。在完整记录中跳过同值写入，逐项匹配可归因的变化，时间图标注提交序号。实际 FST 隐去同 tick 的中间写入时，报告保留执行序列和波形之间的差异。
   - [x] 一次回放扫描同时核对根信号与时间图中的已记录上游信号。唯一匹配的提交选择实际赋值，按可用求值时刻回溯输入。MCP 和 Trace Explorer 显示提交及求值位置，未核对的路径保留为波形候选。
   - [x] 归因改变可访问的上游变化时，使用同一次扫描取得的执行证据继续确认。图达到重建预算时提供部分状态和停止原因。Linux 独立复跑双实例竞争、两级流水线、在线 DPI、UI 和 MCP。
@@ -374,6 +467,10 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
   - [x] VCS 阻塞输出 modport 拼接可记录实际组件求值。Linux VS Code 1.124.2 的 MCP 从原始 KDB 导出三组件映射。真实 VCS 在 3 ns 记录 `data[3:1]=100`、`data[2:0]=101`、`bypass=0`，沿用原始拼接写入。原始和插桩 VCD 的五个相关信号具有相同的有序变化。VCD 与 FSDB 的两个 KDB 后端均核对数据位段的候选分别关联求值 38、37 及回调 43、45。物理提交仍记录为 `assignment-unobserved`。独立后端通过 137 项，Verdi NPI 通过 131 项。
   - [x] VCS modport 的整总线及位级查询可用完整组件求值匹配物理回调。只监视两个目标的真实 VCS 运行中，Linux VS Code 1.124.2 的两个后端均通过 VCD 和 FSDB 验证 `data[2:0]`、`data[3:1]` 分别关联求值 32、31 及回调 37、39。在线 MCP 在 3 ns 命中求值 32 的断点。以 FSDB 为参考波形的 `wave_live_trace` 在核对执行序列后恢复停顿快照之间合并的两次位变化。在线和离线原始记录逐字节相同。修改参考组件值的反例报告 `eventSequenceDiffers`。物理写入提交仍未观测，直接在原始别名赋值前后读物理数据也验证了延迟传播。
   - [x] 用 VCS T-2022.06-SP2 同槽三次阻塞 modport 写入验证重复 RHS。以整个时间槽的完整回调检查一对一的求值配对。总线五次变化的回调 → 求值为 43 → 38、45 → 37、54 → 49、55 → 48、64 → 58。第 3 次回调未改变 bit 2，单比特查询仍可用该回调约束全槽配对。VCD、恢复同槽变化的 FSDB、在线 MCP 和 Linux VS Code 在线报告得到相同的配对。采集到的物理提交状态为 `assignment-unobserved`。
+  - [x] 用 VCS VCD/FSDB 验证两个实例从同一 RTL 位置写同一重叠 modport。按进程身份和范围关联求值事件，全槽一对一配对后，前两个物理回调归到第一个实例，后两个归到第二个实例。在线暂停与离线回放得到相同的配对。缺少任一实例的有效求值证据时保留候选。 [复现步骤](test/fixtures/trace/README.md#two-writer-instances-on-the-same-modport)
+  - [x] VCS 阻塞 modport 拼接探针使用语句求值前后的物理总线值与槽内回调，验证能够唯一归因的同步写入。两个实例在 3 ns 的四次物理提交均支持逐次波形追踪，在线提交断点命中序号 23。延后传播、同值写入和两组件均能解释的回调保留 `assignment-unobserved`。 [复现步骤](test/fixtures/trace/README.md#two-writer-instances-on-the-same-modport)
+  - [x] 同一时间槽同时存在明确及未观测提交时，审计物理回调、求值和提交三个序号。真实 VCS VCD、FSDB 和在线回放均将 4 ns 的第二次变化和 bit 3 关联到回调 43、提交 44 与 `writer2.d`，第一次变化与 bit 2 保留候选。FSDB 槽末采样可通过记录恢复两次变化。 [复现步骤](test/fixtures/trace/README.md#mixed-commit-coverage-in-a-single-time-slot)
+  - [x] 对整槽已有精确提交的记录逐条核对回调、位段和波形序列。真实 VCS 的 3 ns 时间图保留四组回调和提交序号。把提交 15 的回调换成同槽旁路信号的回调后，VCD 保留其他三条归因，FSDB 保留槽末采样并报告记录差异。 [复现步骤](test/fixtures/trace/README.md#mixed-commit-coverage-in-a-single-time-slot)
   - [x] 从根信号的同一份 VPI 记录一次读取可达上游的值变化。在逐项匹配的时间节点标记回调序号，并显示同 tick 上游与目标回调的先后。执行图包含根与可达上游，保留回调顺序与赋值候选各自的证据。
   - [x] VPI 记录携带成功注册的观测信号与采集开始时间。回放区分覆盖完整且无值变化、未选信号与截断记录。观测覆盖独立于赋值和提交覆盖。
   - [x] VCS 可为指定模块内可遍历的过程赋值注册语句入口回调，记录源码文件、行号、实例与赋值类型。直接写入已选信号的事件可跟踪到根或上游，即使对应时间槽内信号未变化。VCS 的求值结果及位级提交归因仍需独立证据。
@@ -383,8 +480,13 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
   - [x] VCS 覆盖单维 packed 变量的固定选位与范围。互不重叠的 NBA 位段各自观测提交。阻塞写入和 NBA 事件携带有方向的目标范围，回放可逐次还原总线值，并在位查询中将变化归因到写入该位的 RTL。
   - [x] VCS 动态单个位 NBA 可保存简单变量下标的求值结果，按实际目标位核对提交。含 X 或越界的下标保留为未观测结果，其他时间槽的独立提交仍可归因。
   - [x] VIDE 静态图保留 `+:`、`-:` 的方向和宽度。VCS 为简单变量起点、十进制恒定宽度的多位 NBA 保存实际目标范围，时间图可继续追到 RHS 对应位。部分越界和 X 的写入保留仿真行为，执行结果报告未观测。
+  - [x] 部分越界的 VCS NBA 同时保留求值 RHS 和尝试写入的范围。真实 VCS T-2022.06-SP2 与 Linux VS Code 1.124.2 验证升序总线在 6 ns 的 `[7:8]`、降序总线在 8 ns 的 `[0:-1]`，分别只有 bit 7 和 bit 0 落在总线内。MCP 执行图和报告保留这两个范围与未观测状态。在线及离线原始记录逐字节一致。回归验证同槽及较早时间槽的部分越界写入只影响相交位的归因。
+  - [x] 扩展 VCS 部分越界探针，在观察到提交标记且在界位的值吻合时记录实际提交。用 VCS T-2022.06-SP2 实测升序和降序总线两端的四个写入，核对 2 ns 的同值提交与 4 ns 的位变化。在线和离线时间图均可从实际写入位回溯至 `d[0] @ 3 ns`，保留尝试范围和完整的 RHS。核对源码位置后两种模式的证据一致。显式未观测的旧记录继续保留原覆盖状态。
   - [x] VCS 接受同一 packed 变量的重叠固定范围、动态选择和整信号 NBA。各求值保留实际目标范围，回放报告无法确认的提交。独立位段和后续时间槽仍可获得提交归因。
+  - [x] VCS 探针确认动态选择无可写位时，记录与原求值关联的 `assignment-no-target`。回放和在线时间图可以核对同槽的有效写入。VCS T-2022.06-SP2 在完全越界及 X 下标的两个时间槽中，分别将 `q[0]` 与 `q[1]` 的变化关联到提交 6 和 13。图回溯到对应输入变化，图和详细报告同时保留两次无目标求值的 RTL 位置。旧记录中的未观测提交、部分越界和重叠合并的覆盖缺口继续保留。
   - [ ] VCS 合并更新中间写入的精确调度及复杂左值组件仍需位级证据。
+    - [x] 为不同固定范围、动态选择形式和整信号写入分配各自的 VCS 提交标记。在同一个 packed 目标中验证动态、固定和整信号写入。前台与静默 MCP 的在线和离线时间图均可按 `changeOrder` 区分 `mixed[1]` 在 2 ns 的两次变化。回调核对覆盖实际范围、求值和提交顺序。相同标记内无法确认的合并仍保留观测缺口。 [复现步骤](test/fixtures/trace/README.md#vcs-overlapping-packed-writes)
+    - [x] 同一目标只包含固定范围 NBA 时，区分不同的范围标记。真实 VCS VCD/KDB 在 2 ns 验证 `q[2:1]` 和 `q[1:0]` 的两个重叠提交。前台、静默 MCP 用同次执行记录和波形核对两条 `q[1]` 时间路径。在线快照的槽末值与 VPI 回调一致，精确提交重建出相同顺序后补入中间变化。相同范围、动态选择和整信号写入的合并缺口继续保留。
 
 **验收**　给定同一构建，能逐条定位已记录的过程、分支、求值及提交，并证明不同实例及同时间戳事件可区分。构建不一致及日志截断均能发现。
 
@@ -394,21 +496,27 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
   - [x] `wave_live_trace` 将 harness 保留的采样与静态图组合，复用离线时间图和报告。构建清单可核对启动时的 harness 哈希、波形、时基、展开和编译配置。构建证据缺失时显示 `unverified`，未采样信号保留 `unavailable` 状态。
   - [x] 在线样本用波形元数据恢复 packed 范围和单个位。真实 Verilator harness 在 tick 5 复现 `q[index]` 写 bit 2，MCP 返回与离线相符的观测与目标索引。
   - [x] 在线预算前沿按保留的槽末快照和会话 ID 续查。实际 Verilator 流水线停在 tick 3，隔离 Linux VS Code 的 MCP 和 Trace Explorer 从预算前沿回查 tick 1 的 `first_q`，核对提交 4，仿真仍处于 tick 3。MCP 拒绝缺失快照和已替换会话的请求。独立后端通过 124 项，Verdi NPI 通过 113 项并跳过 11 项独立后端专用用例。
+  - [x] 首次查询可用 `followContinuations: 0` 保存根图和待查队列，再按编号续查。真实 Verilator 流水线停在 tick 3，前台与静默 MCP 从 `second_q` 的提交 8 追到 `first_q @ tick 1` 的提交 4。Trace Explorer 点击待查缺口后得到与前台 MCP 相同的续查附录。新仿真启动后清除旧的界面续查入口并拒绝旧续查游标，旧图仍可分页读取。
 - [x] 实现声明能力的暂停、继续、指定时钟步进、信号条件或语句断点，以及明确的断点命中和时间语义。
   - [x] Verilator harness 声明有无执行事件。UI 和 MCP 支持按实例与语句 ID 设断点，MCP 可指定分支、求值或提交事件。命中响应携带准确事件序号，仿真在对应时间槽结束时暂停。
   - [x] 自动生成的探针可向在线 harness 发送执行事件。同一生成分支的在线断点和离线回放已核对语句 ID 与事件序号。
   - [x] VS Code 和 MCP 可在实际 NBA 提交或覆盖事件上设断点，按提交时机过滤。自动插桩双实例模型核对命中序号、在线执行图和同一模型的离线记录。
-- [ ] 验证会话断开、仿真退出、取消、重复暂停/继续、事件缓冲和不支持能力。保留 VPI 适配点，按具体仿真器支持报告能力。
+- [x] 验证会话断开、仿真退出、取消、重复暂停/继续、事件缓冲和不支持能力。保留 VPI 适配点，按具体仿真器支持报告能力。
   - [x] 在线 MCP 按所选实例、信号和时间查询保留的事件。响应标注会话序号缺口、缓冲区淘汰及返回上限。用断开测试核对步进和暂停会共同返回失败状态。
   - [x] MCP 取消多周期步进时等待已发出的时间槽返回，再停止推进。真实仿真验收覆盖暂停边界、保留提交事件和重新步进。
   - [x] VCS VPI 在只读时间槽采样，支持启动后暂停、继续、重复暂停、时钟步进、信号值断点与自然退出。仅采集值变化时，能力显示值变化回调可用。真实 VCS 验证 VS Code 入口及 MCP 控制。
   - [x] 启用 VCS 过程赋值入口采集后，在线会话声明 `assignment-entered` 断点能力。实际样本在无值变化的 NBA 时间槽命中，MCP 返回语句 ID、源码行和原始序号，仿真停在相应时间槽末尾。
   - [x] VCS DPI 插桩支持 `assignment-evaluated` 与阻塞赋值的 `assignment-committed` 断点。真实仿真核对停下时的最终值、对应源码和在线回放。
   - [x] VCS NBA 探针在真实仿真中支持 `simulator-commit` 断点，核对同值写入以及有变化的 NBA 与其上游阻塞提交。
+  - [x] 在线追踪、分页图和详细报告保留来源会话 ID。真实 Verilator 流水线在 tick 3 重复暂停，停止后两种 MCP 宿主都能从首批 1 段续查到 3 段，Linux VS Code 命令也能打开同一会话的报告。替换会话后旧续查游标和显式旧会话请求失效，旧分页图仍保留原节点与报告。新会话在 tick 7 自然退出后仍可查询 tick 3。启用真实 Verilator 和 VCS 样本的在线回归 11 项全部通过，覆盖连接中断、重复暂停、取消、序号缺口、缓冲淘汰及未支持的断点类型。
 - [x] 回放同一在线会话的记录，逐项核对断点时间、当前值、候选/精确路径、实例与语句位置。
   - [x] 在实际运行的 Verilator harness 上验证暂停、步进、继续和条件断点，同一 fixture 的在线序列与离线记录一致。
   - [x] `wave_live_trace` 和 VS Code 的 **Trace Live Signal** 使用已验证的参考构建及对应的执行 JSONL，逐条核对根信号与上游信号的在线事件。已确认的赋值、求值和提交出现在时间图及报告。日志不匹配时保留波形候选。同 tick 中间变化丢失时保留序列差异。
   - [x] VCS 在线回放使用选定信号的观测覆盖，逐项核对根信号和可达上游的回调。MCP 返回回放核对状态，配套时间图与执行图标注回调序号，Trace Explorer 命令可打开详细报告。
+  - [x] 真实 VCS 在 tick 0 暂停时，在线 `early` 和 `late` 时间图与离线回放一致。MCP 分页保留执行回放核对状态，合并图保留捕获操作数的求值序号及上游提交。修改根信号的操作数记录会取消该信号的执行归因，其他信号仍按各自记录核验。VS Code 与静默 MCP 均复跑通过。
+  - [x] 真实 VCS 在 3 ns 的 `q` 提交 5 暂停。前台与静默 MCP 使用求值 2 的移位量和求值 3 的三元条件，将 `q[5]` 和 `r[3]` 都追到 `a[4] @ 1 ns`。在线与离线的节点值、来源位、求值、提交和边的证据一致。在线整总线标签沿用观察名，离线标签带声明范围。VS Code 的 Trace Live Signal 报告与前台 MCP 在归一化本地 VIDE revision 后一致。修改日志里的移位量后，在线回放报告序列差异并撤下根提交归因。继续仿真自然退出后，两份在线原始记录与离线记录逐字节一致。
+  - [x] 从仓库样本重新编译，并通过可重复运行的静默 MCP 回归验证上述 VCS 断点、位路径和回放拒绝。 [构建与回归步骤](test/fixtures/trace/README.md#vcs-recorded-shift-and-mux-operands)
+  - [x] 在线图的整总线节点采用已绑定波形的声明范围。真实 VCS 在线和离线查询使用相同的 `tb.amount[2:0]` 与 `tb.choose[1:0]` 筛选到相同节点及路径。前台和静默 MCP 的局部图一致，映射后的波形别名也可作为路径选择器。
 
 - [x] 接入 VS Code「运行和调试」。实际 Verilator 调试命中 RTL 源码行并步进至下一时钟上升沿。实际 VCS 附加调试命中 VPI 源码行和采样值断点。 [启动配置](WORKFLOW.md#在-vs-code-中调试在线-rtl)
 
@@ -419,10 +527,18 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
 - [ ] 用最小工程和大型 SoC 测量冷/热静态查询、增量索引、波形窗口读次数、A 游标更新、图展开、MCP 数据量、内存、插桩运行开销和事件文件大小。用结果确定并记录预算。初始默认建议为深度 3、节点数 256，包含控制和时序边。
   - [x] 因果图按目标信号索引赋值，波形身份核验复用同一文件版本的 SHA-256。文件替换或内容修改后重新核对。
   - [x] 在 Linux VS Code 中测量最小 FST 和 OpenTitan RV32A adapter FSDB 的冷查询、热查询和 MCP 数据量。计时包含启动 MCP stdio 客户端。RV32A adapter 使用 189 个编译根，深度 8 的查询返回 86 个信号和 85 条赋值，含图及详细报告的响应为 576933 字节。
+  - [x] 从相邻或显式构建清单加载的 MCP 续查在同一批内复用 VIDE 工程，逐段核对声明的构建输入，批次结束释放工程。真实 OpenTitan RV32A VCD 的 189 根构建用 `hart_q[0:0] @ 280000 ps` 对照同一工作树修改前后的响应。静默 MCP 首批四段从 25.68 秒降至 6.58 秒，VIDE 从启动 5 次降至 1 次。同一会话重复查询从 25.77 秒降至 6.61 秒，后续两段从 10.23 秒降至 5.45 秒。Linux VS Code 1.124.2 前台分别为 7.30、6.70、5.51 秒。改动前后及两种 MCP 的各分页章节、Mermaid 和 Markdown 逐项一致。首批摘要 1,306 字节，八次分页共 287,402 字节。续查后 49 个节点、134 条边、256 个缺口和 17 个待查入口。隔离宿主用测试钩子在第二段查询返回后改写清单，保留第一段并返回 `contextChanged`。
   - [x] 在 Linux VS Code 1.124.2 用同一份 OpenTitan MAC FSDB 对比 `x28` 的默认静态响应与 `output: "graph"`。深度 24 并续查 1 段时，两种响应的合并图逐项相同，均含 2,674 个信号和 4,683 条赋值。MCP 响应正文从 64,327,555 字节降到 17,553,749 字节。
   - [x] `output: "paged"` 和 `wave_trace_graph_page` 支持读取静态、离线及在线合并图的快照。Linux VS Code 1.124.2 用真实 OpenTitan MAC FSDB 续查 6 段后，离线时间图的首页摘要为 809 字节，43 次取回 489 个节点、925 条边、3,168 个缺口、440 条赋值源码引用、14 张 Mermaid 和完整 Markdown。拼接后与完整响应逐项一致。静态 Driver 的分页测试核对 167 条赋值、反馈边、Mermaid 和报告。在线 Verilator 样例的分页保留提交 4 及赋值位置，重启后仍可读取先前的图快照。Linux 本地 IPC 冒烟、独立后端 129 项及 Verdi NPI 118 项通过，另有 11 项独立后端专用测试跳过。
   - [x] 在同一 Verilator 双实例模型上测量未插桩、DPI 探针和实际 NBA 提交记录的时间开销、事件数及文件大小，逐项比对输出波形变化。
 - [ ] 验证图共享节点、静态及动态环路终止、局部缓存失效、时间窗口和批量点值缓存、异步取消、分页及过期结果丢弃。
+  - [x] 跨请求恢复时间前沿时恢复上一批的优先分支。在 Linux VS Code 1.124.2 对真实 OpenTitan MAC FSDB 的 `x28 @ 2051001 ps` 比较一次续查 6 段与分批续查 2、1、3 段，两次均得到 1419 个节点、2843 条边、4664 条缺口、440 条赋值源码、24 页 Mermaid 及 102 个待查入口。合并图、MCP 分页数据与 Mermaid 逐项一致，报告扣除独立编译的 VIDE revision 后一致。首次查询约 26.9 秒，分批版三次分别约 11.0、2.9 和 12.8 秒，两者的查询顺序分别为先冷、后热。
+  - [x] 对同一真实 FSDB 的 `x28 @ 2051001 ps` 复验合并图的 RTL 赋值来源。证据边和有使用点的缺口标出段内赋值编号，详细报告提供实例与源码行列索引。使用修改版 VIDE，Linux VS Code 1.124.2 前台 MCP 耗时约 26.7 秒，静默 MCP 约 33.3 秒。两端逐条核对 8,537 组边与赋值编号关联及 440 条源码引用，27 页 Mermaid 和约 2.94 MB 的详细报告完全一致。Chromium 用默认 Mermaid 限制渲染全部页面，并核对每页保留的赋值编号。六段续查后仍有 102 个入口受请求预算限制。
+  - [x] 用同一 VCS 运行的 OpenTitan FSDB 与执行记录核对合并时间图的多位写入。前台 VS Code 与静默 MCP 均由四次字节提交 553、555、557、559 重建 `u_imem.mem[36] @ 931000 ps = 0x9062be2b`，并将提交定位到 RTL 第 116–119 行。详细报告的整字证据章节一致，Chromium 渲染的 Mermaid 保留四个提交和段内赋值编号。回归另外覆盖两段合并时保留各自的未核对位范围、同槽回调和源码位置。
+  - [x] 定位并修复该 OpenTitan 整字样本两端的上游图差异。捕获的 VIDE 编译清单逐字节相同，进入差异前的请求和响应一致。修复前静默 MCP 省略 `backend` 时按 `auto` 使用 Verdi，显式指定 `independent` 即与前台完整报告一致。修复后两端均默认采用工作区设置，直接查询和续查后的完整报告、两页 Mermaid、四次写入的来源和分页统计一致。续查一段有 157 个节点、355 条边、197 条缺口和 56 个待查入口。
+  - [x] 分页同时返回图和详细报告时共用已生成的合并 Mermaid。用真实 OpenTitan FSDB 的 `u_imem.mem[36] @ 931000 ps` 验证首批一段、恢复两段及静态 Driver。前台和静默 MCP 逐项比较所有分页章节，另将时间图各章节与改动前的静默 MCP 比对。Markdown 比较前归一化 VIDE revision。恢复后获得 206 个时间节点、468 条边、三页图及 62 个待查入口。静态 Driver 获得 160 个节点、176 条赋值、两页图及 24 个待查入口。逐页核对所有返回的合并 Mermaid 都出现在各自的详细报告中。
+  - [x] 显式 filelist 的 MCP 根查询和续查在同一批次复用隔离的 VIDE 工程。每次恢复先复核原输入，再启动本批工程。OpenTitan `x28 @ 2051001 ps` 通过静默 MCP 一次续查六段，VIDE 从启动 7 次降到 1 次，单次实测从 27.4 秒降到 10.8 秒。分批 2、4 段分别用 7.6、6.7 秒，各启动一次。前台复测分别为 10.8、7.1、6.7 秒。前台静态 Driver 首批三段和续查两段各启动一次。验证批次进程退出，并对比 1419 个节点、2843 条边、4664 条缺口、440 条源码引用、27 页 Mermaid 及详细报告。局部信号编号按路径归一化，报告按 VIDE revision 归一化。六段后仍有 102 个待查入口。
+  - [x] 在真实 VCS 样本的显式 filelist 续查中，用隔离宿主的测试钩子在第二段查询后改写嵌套 filelist。结果返回 `contextChanged`，保留第一段和七个待查入口。恢复文件后新查询完成四段。
   - [x] MCP stdio 读到取消通知后关闭该请求的 IPC 连接，扩展把取消传到 VIDE 查询。动态采样检查批次之间的取消。测试用两个服务进程验证取消和连接路由，并在扩展宿主测试中观察到 VIDE API 的取消令牌。
   - [x] MCP 取消离线执行回放时终止 JSONL 流读取。后续查询可重新扫描，完整查询建立的检查点仍可复用。
   - [x] 隔离 VIDE 会话按源码 revision、文档版本和查询预算复用端口分析。复用后再次核对 revision。真实 VS Code 验证两次查询等价，保存子模块赋值修改后转到新输入。
@@ -653,3 +769,7 @@ Wave Workbench 在开始追踪时按关联的仿真构建生成配置。优先�
 | 2026-11-21 | 4–7 | 使用原始 VCS KDB 生成重复 RHS 样本的组件探针。原始与插桩仿真的目标总线 10 个有序回调逐项一致。Linux VS Code 独立后端与 Verdi NPI、静默后台复核总线及 bit 2 的逐变化结果。在线会话在 3 ns 保持暂停，MCP 与 VS Code 报告均将回调 64 配对到求值 58。Chromium 渲染 VCD、FSDB 和在线时间图。扩展了包含固定、动态、索引位段及重叠 NBA 的回归，113 项通过、49 项跳过。 |
 | 2026-11-21 | 7 | 新版 MCP 传输在 Linux 和 Wine 6 下的 Windows x64 Node 22.22.2 通过冒烟。Linux 另通过现有发行二进制与 Tcl 冒烟。四个 macOS、Windows x64/arm64 的 Rust 交叉检查停在 LuaJIT 编译，Linux 环境分别缺少 Darwin 目标编译器与 MSVC `cl`。原生系统 VSIX 验收仍待完成。 |
 | 2026-11-21 | 7 | 在隔离的 Linux x64 VS Code 1.124.2 中安装 Wave Workbench 0.9.23 与修改版 VIDE 1.3.0，使用 `TOP.trace_tb.dut.owner_q` 验证 VCD 和 FST。两种格式均返回 16 条静态赋值和 32 节点、37 条边的时间图。解包 VSIX 后，静默 MCP 通过实际波形打开、区间截取和 Tcl 查询。GitHub 基线 `c8530be` 通过 Linux 和 macOS 的 x64、arm64 构建与打包，Windows 的两个架构在 Tcl 源码版本清单构建失败。 [GitHub 构建记录](https://github.com/AndreaFrederica/vscode-wave-workbench/actions/runs/44797050649) |
+| 2026-11-21 | 3–7 | 拆分扩展宿主入口后，在隔离的 Linux VS Code 1.124.2 安装实际 VSIX 和修改版 VIDE。VCD、FST 均保留 16 条静态赋值、32 个时间节点及 37 条边。用前台 MCP 和实际 Verilator 模型核对离线 FST 与在线执行记录，两张图均从 tick 3 的提交 8 回溯到 tick 1 的提交 4，仿真停留在 tick 3。解包 VSIX 的静默 MCP、Tcl 和本地 IPC 冒烟均通过。 |
+| 2026-11-21 | 3–4 | 界面自动续查与 MCP 共用 64 段和 100 秒预算，静态和时间续查保留取消前已确认的结果。Linux VS Code 波形菜单对真实 Verilator VCD 的 Driver 与 Load 均跨 5 段取得 161 条赋值，真实 VCS FSDB 的 A 游标时间图跨 8 段取得 270 个节点和 273 条边，保留 `gapBudget`。报告附录和 MCP 分页结果核对时忽略独立查询产生的 VIDE revision 数字。默认 Node 回归通过 98 项、跳过 65 项，Webview 回归通过 34 项、跳过 5 项。 |
+| 2026-11-21 | 7 | GitHub 的 `8707800` 通过 Checks。六个平台均构建 VSIX。Linux 和 macOS 的 x64 与 arm64 通过包冒烟。Windows x64 与 arm64 通过原生后端、静默 MCP 及 Tcl 查询，随后在 `smoke-mcp.mjs` 的管道注册查验失败，安装后的 Windows 桌面验收待测。 [平台矩阵](https://github.com/AndreaFrederica/vscode-wave-workbench/actions/runs/44798601976) |
+| 2026-11-21 | 4–7 | 时间图的缺口预算可独立设置，优先保留不同续查入口。Linux VS Code 1.124.2 用真实 VCS FSDB 的 `wide_causal_tb.q @ 5 ns` 验证根图在一节点、一边、12 缺口预算下保留 12 个不同的上游入口。默认图含 270 节点、273 边、1030 条缺口。提高缺口预算后恢复至 1033 条，清除 `gapBudget`，图仍记录观测、遍历与静态覆盖缺口。用 Chromium 渲染分页图首页。Verilator FST 与在线 MCP 在显式缺口预算下继续核对提交 8 与 4，在线会话停留于 tick 3。Node 回归通过 98 项、跳过 65 项。Windows 冒烟脚本复用生产注册目录函数，Linux 与 Wine 下的 Windows x64 Node 通过。 |

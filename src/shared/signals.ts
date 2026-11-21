@@ -10,7 +10,7 @@ import {
   validateProfile,
 } from "./decoders";
 const baseKey = (s: Pick<Signal, "id" | "scope" | "name">) =>
-  `${s.scope}\u0000${s.name}\u0000${s.id}`;
+  `${s.scope}\u0000${s.name}\u0000${s.id.startsWith("psfxl:") ? "psfxl:" : s.id}`;
 const key = (s: Pick<Signal, "id" | "scope" | "name" | "bitOffset">) =>
   baseKey(s) +
   (Number.isInteger(s.bitOffset) ? "\u0000bit:" + s.bitOffset : "");
@@ -70,6 +70,7 @@ function restore(s: Partial<Signal>, canonical: Signal): Signal {
     throw Error("解码配置与信号位宽不符");
   return {
     ...canonical,
+    analogScale: canonical.real ? analogScale(s.analogScale) : undefined,
     unit:
       canonical.real && typeof s.unit === "string"
         ? s.unit.slice(0, 24)
@@ -97,6 +98,25 @@ function restore(s: Partial<Signal>, canonical: Signal): Signal {
         }
       : {}),
   };
+}
+
+function analogScale(scale: Signal["analogScale"]): Signal["analogScale"] {
+  if (
+    scale?.mode === "manual" &&
+    Number.isFinite(scale.min) &&
+    Number.isFinite(scale.max) &&
+    scale.min < scale.max
+  )
+    return scale;
+  if (
+    scale?.mode === "window" &&
+    Number.isSafeInteger(scale.start) &&
+    Number.isSafeInteger(scale.end) &&
+    scale.start >= 0 &&
+    scale.start < scale.end
+  )
+    return scale;
+  if (scale?.mode === "cursors") return scale;
 }
 
 export { baseKey, key, label, project, bits, restore };

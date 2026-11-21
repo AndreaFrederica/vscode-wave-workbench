@@ -8,8 +8,8 @@ async function clickTool(page,selector){const target=page.locator(selector),pare
 const {test,expect}=require('@playwright/test');
 const path=require('node:path'),fs=require('node:fs'),os=require('node:os');
 const {Backend}=require('../dist/backend');const {TclRunner}=require('../dist/tcl');const {WaveCommands,quote}=require('../dist/commands');const {KdbSession}=require('../dist/kdb');
-async function setup(page,filename,kdbPath,decoderConfig){
-  const backend=new Backend(path.resolve(__dirname,'../bin/wave-backend'));const pending=new Map();let sequence=0,queryDelay=0;const logs=[],queries=[],catalogRequests=[],decoderRequests=[],rtlRequests=[],mathRequests=[];
+async function setup(page,filename,kdbPath,decoderConfig,options={}){
+  const backend=new Backend(path.resolve(__dirname,options.independent?'../bin/wave-backend-independent':'../bin/wave-backend'));const pending=new Map();let sequence=0,queryDelay=0;const logs=[],queries=[],catalogRequests=[],decoderRequests=[],rtlRequests=[],mathRequests=[],consoleRequests=[];
   const viewer={backend,uri:{fsPath:filename},meta:await backend.request('open',{path:filename})};
   const send=m=>page.evaluate(m=>window.dispatchEvent(new MessageEvent('message',{data:m})),m);
   viewer.ui=(action,payload)=>new Promise((resolve,reject)=>{const id=++sequence;pending.set(id,{resolve,reject});send({type:'ui',id,action,payload}).catch(reject);});
@@ -18,6 +18,7 @@ async function setup(page,filename,kdbPath,decoderConfig){
   const runner=new TclRunner((name,args,dir)=>{viewer.scriptDirectory=dir;return engine.execute(name,args);},{log:text=>logs.push(text)});
   await page.exposeFunction('bridge',async m=>{
     if(m.type==='waveMath')mathRequests.push(m);
+    if(m.type==='showTclConsole')consoleRequests.push(m);
     if(['rtlTrace','rtlSchematic','rtlModuleSchematic','rtlTraceSchematic'].includes(m.type))rtlRequests.push(m);
     if(m.type==='ready'){await send({type:'metadata',...viewer.meta,title:path.basename(filename),vide:'1.2.5'});}
     else if(m.type==='queryWaveDecoder'){decoderRequests.push(m);}
@@ -45,22 +46,83 @@ async function setup(page,filename,kdbPath,decoderConfig){
       }
     }
     else if(m.type==='uiResult'){const p=pending.get(m.id);if(p){pending.delete(m.id);if(m.error)p.reject(new Error(m.error));else p.resolve(m.result);}}
-    else if(m.type==='query'){queries.push(m);if(queryDelay)await new Promise(r=>setTimeout(r,queryDelay));await send({type:'data',request:m.request,result:await backend.request('query',{signals:m.signals,start:String(m.start),end:String(m.end),limit:m.limit||20000})});}
+    else if(m.type==='query'){queries.push(m);if(queryDelay)await new Promise(r=>setTimeout(r,queryDelay));await send({type:'data',request:m.request,result:await backend.request('query',{signals:m.signals,start:String(m.start),end:String(m.end),limit:m.limit||options.queryLimit||20000})});}
+    else if (m.type === 'overview') {
+      try {
+        const result = await backend.request('overview', {
+          name: m.signal, start: String(m.start), end: String(m.end), bins: m.bins,
+        });
+        await send({ type: 'overview', request: m.request, result });
+      } catch (error) {
+        await send({ type: 'overview', request: m.request, error: String(error) });
+      }
+    }
     else if(m.type==='defineVirtual')await send({type:'virtualCreated',...await backend.request('defineVirtual',{definition:m.definition,name:m.name})});
     else if(m.type==='search'){catalogRequests.push(m);await send({type:'searchResult',request:m.request,...await backend.request('search',{query:m.query,offset:m.offset,limit:m.limit})});}
     else if(m.type==='scopeSignals')await send({type:'scopeSignals',request:m.request,...await backend.request('scopeSignals',{query:m.scope,offset:m.offset,limit:512})});
     else if(m.type==='executeTcl'){try{const result=await runner.run(m.script,path.dirname(filename));await send({type:'commandLog',text:result||'OK'});}catch(e){await send({type:'commandLog',text:'ERROR: '+e.message});}}
   });
-  await page.addInitScript(()=>{window.acquireVsCodeApi=()=>({getState:()=>null,setState(s){window.__savedWaveState=s;},postMessage:m=>window.bridge(m)});});
+  await page.addInitScript(() => {
+    window.acquireVsCodeApi = () => ({
+      getState: () => JSON.parse(sessionStorage.getItem('waveState') || 'null'),
+      setState(state) {
+        window.__savedWaveState = state;
+        sessionStorage.setItem('waveState', JSON.stringify(state));
+      },
+      postMessage: message => window.bridge(message),
+    });
+  });
   await page.route('http://wave.test/**',async route=>{const name=new URL(route.request().url()).pathname.slice(1)||'index.html';if(!['index.html','wave.js','wave.css'].includes(name)){await route.abort();return;}let body=fs.readFileSync(path.resolve(__dirname,name.endsWith('.js')?'../dist/webview':'../media',name),'utf8');if(name==='index.html')body=body.replaceAll('{{csp}}','http://wave.test').replaceAll('{{nonce}}','testnonce').replace('{{css}}','/wave.css').replace('{{script}}','/wave.js');await route.fulfill({body,contentType:name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});});
   await page.goto('http://wave.test/');await expect(page.locator('#backend')).toContainText(viewer.meta.backend);
-  return {viewer,send,logs,queries,catalogRequests,decoderRequests,rtlRequests,mathRequests,running:()=>!!runner.pending,setQueryDelay(ms){queryDelay=ms;},run:(script,directory)=>runner.run(script,directory||path.dirname(filename)),dispose(){runner.dispose();backend.dispose();viewer.kdb?.dispose();}};
+  return {viewer,send,logs,queries,catalogRequests,decoderRequests,rtlRequests,mathRequests,consoleRequests,running:()=>!!runner.pending,setQueryDelay(ms){queryDelay=ms;},run:(script,directory)=>runner.run(script,directory||path.dirname(filename)),dispose(){runner.dispose();backend.dispose();viewer.kdb?.dispose();}};
 }
+
+test('wave toolbar fits two rows in a narrow editor and remembers the layout', async ({page}) => {
+  await page.setViewportSize({width: 560, height: 700});
+  const env = await setup(page, path.resolve(__dirname, '../examples/demo.vcd'));
+  try {
+    const toolbar = page.locator('#compactToolbar');
+    const toggle = page.getByRole('button', {name: '双行工具栏'});
+    const fit = page.locator('[data-action="fit"]');
+    const search = page.locator('#findSignal');
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    const oneRow = (await toolbar.boundingBox()).height;
+
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    expect((await toolbar.boundingBox()).height).toBeGreaterThan(oneRow);
+    expect((await search.boundingBox()).y).toBeGreaterThan((await fit.boundingBox()).y);
+    const fits = await toolbar.locator('.toolbarRow').evaluateAll(
+      rows => rows.every(row => row.scrollWidth <= row.clientWidth + 1),
+    );
+    expect(fits).toBe(true);
+
+    await search.fill('clk');
+    await page.locator('#toggleFilter').click();
+    await expect(page.locator('#filterSignals')).toBeVisible();
+    await page.locator('#markerMenu > summary').click();
+    await expect(page.locator('#manageMarkers')).toBeVisible();
+
+    await expect.poll(() => page.evaluate(() => window.__savedWaveState?.toolbarRows)).toBe(2);
+    await page.reload();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+
+    await page.setViewportSize({width: 390, height: 700});
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    expect((await toolbar.boundingBox()).height).toBeLessThan(oneRow + 5);
+  } finally {
+    env.dispose();
+  }
+});
+
 test('real Tcl and wave UI: groups, units, values, markers, transition, export/replay, errors',async({page})=>{
   const env=await setup(page,path.resolve(__dirname,'../examples/demo.vcd'));
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'wave-save-test-'));
   try{
-    await clickTool(page,'[data-action="console"]');
+    await clickTool(page,'[data-action="showTclConsole"]');
+    await expect.poll(()=>env.consoleRequests).toEqual([{type:'showTclConsole'}]);
+    await page.locator('#console > summary').click();
     await page.locator('#commandInput').fill('set w [wvCreateWindow]; foreach s {clk data[7:0]} {wvAddSignal -win $w -group [list MAC [list /tb/dut/$s]]}; wvSetCursor 20; wvSetMarker -name EX 30');
     await page.locator('#commandForm button').click();await expect(page.locator('.row')).toHaveCount(2);await expect(page.locator('#commandLog')).not.toContainText('ERROR');
     await expect(page.locator('.row .group').first()).toHaveText('MAC');await expect.poll(()=>env.running()).toBe(false);
@@ -296,11 +358,16 @@ test('RTL batch delivery adds many signals once and reports existing rows',async
 test('compact controls leave waveform height available; editors float and menus close',async({page})=>{
  const env=await setup(page,path.resolve(__dirname,'../examples/demo.vcd'));try{
   await page.setViewportSize({width:1200,height:480});await page.evaluate(()=>window.dispatchEvent(new MessageEvent('message',{data:{type:'sidebarVisibility',visible:true}})));await env.run('wvAddSignal -group {G1 {/tb/dut/clk} {/tb/dut/data[7:0]} {/tb/dut/valid}}; wvSetCursor 20');
-  const height=()=>page.locator('#tracks').evaluate(e=>e.clientHeight+document.querySelector('#waveScrollbars').clientHeight);expect(await height()).toBeGreaterThanOrEqual(390);await expect(page.locator('header')).toHaveCount(0);
+  const height=()=>page.locator('#tracks').evaluate(e=>e.clientHeight+document.querySelector('#waveScrollbars').clientHeight);expect(await height()).toBeGreaterThanOrEqual(390);await expect(page.locator('header:visible')).toHaveCount(0);
   await clickTool(page,'#newGroup');await expect(page.locator('#editPopover')).toBeVisible();expect(await height()).toBeGreaterThanOrEqual(390);await page.keyboard.press('Escape');await expect(page.locator('#editPopover')).toBeHidden();
   await page.locator('#signalMenu summary').click();await expect(page.locator('#expandBus')).toBeVisible();await page.locator('#groupMenu summary').click();await expect(page.locator('#expandBus')).toBeHidden();await page.keyboard.press('Escape');
   await page.screenshot({path:'test-results/compact-waveform.png'});
-  await page.setViewportSize({width:720,height:400});expect(await height()).toBeGreaterThanOrEqual(310);await page.locator('#sourceMenu summary').click();await expect(page.locator('[data-action=source]')).toBeVisible();const rect=await page.locator('#sourceMenu .menuPanel').boundingBox();expect(rect.x).toBeGreaterThanOrEqual(0);expect(rect.x+rect.width).toBeLessThanOrEqual(720);await page.keyboard.press('Escape');await page.screenshot({path:'test-results/compact-waveform-narrow.png'});
+  await page.setViewportSize({width:720,height:400});expect(await height()).toBeGreaterThanOrEqual(310);await page.locator('#sourceMenu summary').click();await expect(page.locator('[data-action=source]')).toBeVisible();
+  await expect.poll(async()=>{
+    const rect=await page.locator('#sourceMenu .menuPanel').boundingBox();
+    return rect!==null && rect.x>=0 && rect.x+rect.width<=720;
+  }).toBe(true);
+  await page.keyboard.press('Escape');await page.screenshot({path:'test-results/compact-waveform-narrow.png'});
  }finally{env.dispose();}
 });
 
@@ -311,12 +378,14 @@ test('trace and schematic toolbar menus dispatch to the selected waveform signal
     await env.run('wvAddSignal {/tb/dut/clk}; wvSetCursor 20');
     await page.locator('.row').first().click();
     await clickTool(page, '#traceMenu [data-action=traceContext]');
+    await clickTool(page, '#traceMenu [data-action=traceLoadContinuations]');
     await clickTool(page, '#schematicMenu [data-action=rtlTraceSchematic]');
     await clickTool(page, '#schematicMenu [data-action=rtlSchematicLoads]');
     await clickTool(page, '#schematicMenu [data-action=rtlSchematicModule]');
     await expect.poll(() => env.rtlRequests).toMatchObject([
       {type: 'rtlModuleSchematic'},
       {type: 'rtlTrace', mode: 'context', signal: 'tb.dut.clk', tick: '20'},
+      {type: 'rtlTrace', mode: 'loads', signal: 'tb.dut.clk', followContinuations: true},
       {type: 'rtlTraceSchematic'},
       {type: 'rtlSchematic', direction: 'loads', signal: 'tb.dut.clk', tick: '20'},
       {type: 'rtlModuleSchematic', signal: 'tb.dut.clk'},
@@ -358,11 +427,37 @@ test('waveform hover shows position value, bit and virtual content without chang
  }finally{env.dispose();}
 });
 
-test('hover reads truncated tail on demand and drops tooltip on leave',async({page})=>{
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'wave-hover-tail-')),file=path.join(dir,'dense.vcd');let text='$timescale 1 ns $end\n$scope module top $end\n$var wire 8 v bus [7:0] $end\n$upscope $end\n$enddefinitions $end\n';for(let i=0;i<=25000;i++)text+='#'+i+'\nb'+(i%256).toString(2)+' v\n';fs.writeFileSync(file,text);const env=await setup(page,file);
- try{await env.run('wvAddSignal {/top/bus[7:0]}');await expect(page.locator('#status')).toContainText('超限');const c=await page.locator('canvas').boundingBox(),r=await page.locator('.row').boundingBox();await page.mouse.move(c.x+c.width*24000/25000,r.y+16);await expect.poll(()=>env.queries.filter(q=>String(q.request).startsWith('hover:')).length).toBe(1);await expect(page.locator('#waveTooltip')).toContainText('24000 × 1ns');await expect(page.locator('#waveTooltip')).toContainText('C0');expect((await env.viewer.ui('snapshot')).cursorA).toBe(0);
- env.setQueryDelay(200);await page.mouse.move(c.x+c.width*24500/25000,r.y+16);await expect.poll(()=>env.queries.filter(q=>String(q.request).startsWith('hover:')).length).toBe(2);await page.mouse.move(0,0);await page.waitForTimeout(300);await expect(page.locator('#waveTooltip')).toBeHidden();
- }finally{env.dispose();fs.rmSync(dir,{recursive:true,force:true});}
+test('hover reads truncated tail on demand and drops tooltip on leave', async ({page}) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wave-hover-tail-'));
+  const file = path.join(directory, 'dense.vcd');
+  let text = '$timescale 1 ns $end\n$scope module top $end\n$var wire 8 v bus [7:0] $end\n$upscope $end\n$enddefinitions $end\n';
+  for (let tick = 0; tick <= 25000; tick++)
+    text += `#${tick}\nb${(tick % 256).toString(2)} v\n`;
+  fs.writeFileSync(file, text);
+  const env = await setup(page, file);
+  try {
+    await env.run('wvAddSignal {/top/bus[7:0]}');
+    await expect(page.locator('#status')).toHaveText(/^(波形概览 ·|部分信号的概览不可用)/);
+    const canvas = await page.locator('canvas').boundingBox();
+    const row = await page.locator('.row').boundingBox();
+    const tooltip = page.locator('#waveTooltip');
+    const hoverQueries = () => env.queries.filter(({request}) => String(request).startsWith('hover:')).length;
+    await page.mouse.move(canvas.x + canvas.width * 24000 / 25000, row.y + 16);
+    await expect.poll(hoverQueries).toBe(1);
+    await expect(tooltip).toContainText('24000 × 1ns');
+    await expect(tooltip).toContainText('C0');
+    expect((await env.viewer.ui('snapshot')).cursorA).toBe(0);
+
+    env.setQueryDelay(200);
+    await page.mouse.move(canvas.x + canvas.width * 24500 / 25000, row.y + 16);
+    await expect.poll(hoverQueries).toBe(2);
+    await page.mouse.move(0, 0);
+    await page.waitForTimeout(300);
+    await expect(tooltip).toBeHidden();
+  } finally {
+    env.dispose();
+    fs.rmSync(directory, {recursive: true, force: true});
+  }
 });
 
 test('changing row height scales the waveform and its hover band', async ({page}) => {
@@ -1069,32 +1164,251 @@ test('mixed wave rows preserve real cursor values and Tcl range measurements', a
   }
 });
 
-test('measurement menu reports cursor values, clock duty and first rising-edge delay', async ({page}) => {
+test('dense waveforms fill the viewport and analog scales restore per channel', async ({page}) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wave-overview-ui-'));
+  const filename = path.join(directory, 'dense.vcd');
+  fs.writeFileSync(filename, [
+    '$timescale 1ns $end', '$scope module tb $end', '$var real 64 ! voltage $end',
+    '$var real 64 " current $end', '$upscope $end', '$enddefinitions $end',
+    '#0', 'r0 !', 'r10 "', '#4', 'r0.125 !', '#9', 'r0.9 !', '#12', 'r3 !', '#17',
+  ].join('\n') + '\n');
+  const env = await setup(page, filename, undefined, undefined, {independent:true,queryLimit:2});
+  try {
+    await env.run('wvAddSignal /tb/voltage /tb/current; wvSetCursor 15');
+    await expect(page.locator('#status')).toContainText('波形概览');
+    await expect(page.locator('.row .value').first()).toHaveText('3');
+    const [voltage] = env.viewer.meta.signals;
+    const extrema = await env.viewer.backend.request('overview', {
+      name: voltage.id, start: '4', end: '9', bins: 1,
+    });
+    expect(extrema).toEqual([['4','9','0.125','0.9']]);
+    await page.locator('.row').first().click();
+    await clickTool(page, '[data-action=analogScale]');
+    await page.locator('#analogScaleMode').selectOption('manual');
+    await page.locator('#analogScaleMin').fill('-1');
+    await page.locator('#analogScaleMax').fill('2');
+    await page.locator('#analogScaleForm [type=submit]').click();
+    const snapshot = await env.viewer.ui('snapshot');
+    expect(snapshot.chosen[0].analogScale).toEqual({mode:'manual',min:-1,max:2});
+    expect(snapshot.chosen[1].analogScale).toBeUndefined();
+    await env.viewer.ui('restoreView', snapshot);
+    await clickTool(page, '[data-action=analogScale]');
+    await expect(page.locator('#analogScaleMin')).toHaveValue('-1');
+    await page.locator('#analogScaleMode').selectOption('window');
+    await page.locator('#analogScaleStart').fill('4');
+    await page.locator('#analogScaleEnd').fill('9');
+    await page.locator('#analogScaleForm [type=submit]').click();
+    expect((await env.viewer.ui('snapshot')).chosen[0].analogScale)
+      .toEqual({mode:'window',start:4,end:9});
+  } finally {
+    env.dispose();
+    fs.rmSync(directory, {recursive:true, force:true});
+  }
+});
+
+test('AMS viewport reuses the prefetched overview and refills before the edge', async ({page}) => {
+  test.skip(!process.env.WAVE_TEST_AMS_SHM, 'Set WAVE_TEST_AMS_SHM to the SAR ADC database');
+  const env = await setup(page, process.env.WAVE_TEST_AMS_SHM, undefined, undefined,
+    {independent: true, queryLimit: 20});
+  const viewportQueries = () => env.queries.filter(query => typeof query.request === 'number');
+  const move = (start, end) => env.viewer.ui('window', {start, end});
+  try {
+    await move(1400000000, 1500000000);
+    await env.run('wvAddSignal /sar_adc_ams_tb/I_BRIDGE/I_ANA/topp');
+    await expect(page.locator('#status')).toContainText('波形概览 · 1 条信号');
+    expect(viewportQueries().map(({start, end}) => [start, end]))
+      .toEqual([[1300000000, 1600000000]]);
+
+    // Move within the buffer, then shrink the view while the requested
+    // resolution can still be rendered from the prefetched overview.
+    await move(1430000000, 1530000000);
+    await move(1380000000, 1480000000);
+    await move(1410000000, 1490000000);
+    await expect(page.locator('#status')).toContainText('波形概览 · 1 条信号');
+    expect(viewportQueries()).toHaveLength(1);
+
+    await move(1505000000, 1585000000);
+    await expect.poll(() => viewportQueries().length).toBe(2);
+    expect(viewportQueries().at(-1)).toMatchObject({start: 1425000000, end: 1665000000});
+    await expect(page.locator('#status')).toContainText('波形概览 · 1 条信号');
+
+    await move(1510100000, 1510101000);
+    await expect.poll(() => viewportQueries().length).toBe(3);
+    await expect(page.locator('#status')).not.toContainText('波形概览');
+  } finally {
+    env.dispose();
+  }
+});
+
+test('amplitude cursor toolbar uses the pinned analog axis and leaves time cursors independent', async ({page}) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wave-amplitude-ui-'));
+  const filename = path.join(directory, 'amplitude.vcd');
+  fs.writeFileSync(filename, [
+    '$timescale 1ns $end', '$scope module tb $end', '$var real 64 ! voltage $end',
+    '$var real 64 " current $end', '$var wire 1 # clock $end',
+    '$upscope $end', '$enddefinitions $end',
+    '#0', 'r-2 !', 'r10 "', '0#', '#4', 'r2 !', 'r20 "', '1#', '#12', '0#',
+  ].join('\n') + '\n');
+  const env = await setup(page, filename, undefined, undefined, {independent:true});
+  try {
+    await env.run('wvAddSignal /tb/voltage /tb/current /tb/clock; wvSetCursor 3; wvSetMarker 9');
+    const time = page.getByRole('toolbar', {name:'游标', exact:true});
+    const toggle = time.getByRole('button', {name:'幅值', exact:true});
+    const amplitude = page.getByRole('toolbar', {name:'幅值游标'});
+    const y1 = amplitude.getByRole('textbox', {name:'Y1 幅值'});
+    const y2 = amplitude.getByRole('textbox', {name:'Y2 幅值'});
+    const first = page.getByRole('slider', {name:'拖动 Y1 幅值游标'});
+    const second = page.getByRole('slider', {name:'拖动 Y2 幅值游标'});
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await page.locator('.row').nth(0).click();
+    await env.send({type:'analogUnit', signal:env.viewer.meta.signals.find(s => s.name === 'voltage'), unit:'V'});
+    await toggle.click();
+    await expect(y1).toHaveValue('1');
+    await expect(y2).toHaveValue('-1');
+    await expect(amplitude.locator('output')).toHaveText('ΔY 2 V');
+    await expect(first).toBeVisible();
+    await expect(second).toBeVisible();
+
+    const handle = await first.boundingBox();
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(handle.x + handle.width / 2, handle.y - 15, {steps:4});
+    await page.mouse.up();
+    await expect(y1).toHaveValue('2');
+    await expect(time.getByRole('textbox', {name:'Cursor A'})).toHaveValue('3');
+    await expect(time.getByRole('textbox', {name:'Cursor B'})).toHaveValue('9');
+
+    await y2.fill('-3.125');
+    await y2.press('Enter');
+    await expect(amplitude.locator('output')).toHaveText('ΔY 5.125 V');
+    await expect(second).toHaveAttribute('aria-valuetext', '-3.125 V（超出当前纵轴）');
+    await second.press('Home');
+    await expect(y2).toHaveValue('-2');
+
+    await page.locator('.row').nth(1).click();
+    await expect(amplitude.locator('#amplitudeCursorSource')).toHaveText('voltage · V');
+    await amplitude.getByRole('button', {name:'使用选中通道'}).click();
+    await expect(amplitude.locator('#amplitudeCursorSource')).toHaveText('current');
+    await expect(y1).toHaveValue('17.5');
+    await expect(y2).toHaveValue('12.5');
+    await toggle.click();
+    await expect(amplitude).toBeHidden();
+    await expect(first).toBeHidden();
+    await toggle.click();
+    await expect(y1).toHaveValue('17.5');
+  } finally {
+    env.dispose();
+    fs.rmSync(directory, {recursive:true, force:true});
+  }
+});
+
+test('measurement cards follow the gate and keep results across docked and floating layouts', async ({page}) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wave-measurement-ui-'));
   const filename = path.join(directory, 'clock.vcd');
   fs.writeFileSync(filename, [
     '$timescale 1us $end', '$scope module tb $end', '$var wire 1 ! clk $end',
-    '$var wire 1 " gated $end', '$upscope $end', '$enddefinitions $end',
-    '#0', '0!', '0"', '#1', '1!', '#3', '1"', '#5', '0!', '#9', '1!',
-    '#13', '0!', '#17', '1!', '#21', '0!', '#25',
+    '$var wire 1 " gated $end', '$var wire 1 # divided $end', '$var real 64 % voltage $end',
+    '$upscope $end', '$enddefinitions $end',
+    '#0', '0!', '0"', '0#', 'r0 %', '#1', '1!', '#2', '1#', '#3', '1"', '#5', '0!', 'r2 %',
+    '#8', '0#', '#9', '1!', '#10', 'r0 %', '#13', '0!', '#14', '1#', '#15', 'r2 %',
+    '#17', '1!', '#20', 'r0 %', '#21', '0!', '0#', '#25', 'r2 %',
   ].join('\n') + '\n');
   const env = await setup(page, filename);
   try {
-    await env.run('wvAddSignal /tb/clk /tb/gated; wvSetCursor 1; wvSetMarker 21');
-    const dialog = page.getByRole('dialog', {name: '数字脉宽、周期、频率和占空比'});
+    await env.run('wvAddSignal /tb/clk /tb/gated /tb/divided /tb/voltage; wvSetCursor 1; wvSetMarker 21');
+    const panel = page.locator('#measurementPanel');
+    const layout = panel.getByLabel('测量显示方式');
+    const trackHeight = () => page.locator('#tracks').evaluate(e => e.clientHeight);
+    const emptyHeight = await trackHeight();
+    const clocks = panel.getByRole('region', {name: '脉宽、周期、频率和占空比'});
+    const pulse = clocks.filter({has: page.locator('.measurement-card-source').getByText('clk', {exact:true})});
+    const gated = clocks.filter({has: page.locator('.measurement-card-source').getByText('gated', {exact:true})});
     await page.locator('.row').first().click();
-    await clickTool(page, '[data-action=measure-pulse]');
-    await expect(dialog.getByRole('row').filter({hasText: '平均周期'})).toContainText('8 µs');
-    await expect(dialog.getByRole('row').filter({hasText: '高电平占空比'})).toContainText('50 %');
-    await expect(dialog.getByRole('row').filter({hasText: '频率'})).toContainText('125 kHz');
-    await dialog.getByRole('button', {name: '关闭'}).click();
-
     await page.locator('.row').nth(1).click({modifiers:['Control']});
-    await clickTool(page, '[data-action=measure-delay]');
-    await expect(page.locator('#measurementRows').getByRole('row').last()).toContainText('2 µs');
-    await page.keyboard.press('Escape');
+    await clickTool(page, '[data-action=measure-pulse]');
+    await expect(clocks).toHaveCount(2);
+    await expect(pulse.getByRole('row', {name: /^平均周期 /})).toContainText('8 µs');
+    await expect(pulse.getByRole('row').filter({hasText: '高电平占空比'})).toContainText('50 %');
+    await expect(pulse.getByRole('row').filter({hasText: '频率'})).toContainText('125 kHz');
+    await expect(gated.getByRole('row', {name: /^上升沿 /})).toContainText('1');
+    await expect.poll(trackHeight).toBeLessThan(emptyHeight);
+
+    await layout.selectOption('floating');
+    await expect.poll(trackHeight).toBe(emptyHeight);
+    await expect(pulse.getByRole('row', {name: /^平均周期 /})).toContainText('8 µs');
+    const move = panel.getByRole('button', {name:'移动浮动测量面板'});
+    const before = await panel.boundingBox();
+    const handle = await move.boundingBox();
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(handle.x + handle.width / 2 - 30, handle.y + handle.height / 2 - 50, {steps:3});
+    await page.mouse.up();
+    await expect.poll(async () => (await panel.boundingBox()).y).toBeLessThan(before.y - 30);
+
+    await panel.getByLabel('添加测量', {exact:true}).selectOption('measure-pulse');
+    await expect(clocks).toHaveCount(2);
+    await panel.getByLabel('添加测量', {exact:true}).selectOption('measure-delay');
+    const delay = panel.getByRole('region', {name: '双通道延时、相位和建立／保持时间'});
+    await expect(delay.getByRole('row').filter({hasText: '首个上升沿延时'})).toContainText('2 µs');
+    await expect(delay.getByRole('row').filter({hasText: '最小建立时间 · 上升沿'})).toContainText('2 µs');
     await clickTool(page, '[data-action=measure-cursors]');
-    await expect(page.locator('#measurementRows').getByRole('row').filter({hasText: 'clk'})).toContainText('A 1 · B 0');
+    const cursors = panel.getByRole('region', {name: 'A/B 游标读数与差值'});
+    await expect(cursors.getByRole('row').filter({hasText: 'clk'})).toContainText('A 1 · B 0');
+
+    await env.run('wvSetMarker 17');
+    await expect(cursors.getByRole('row').filter({hasText: 'clk'})).toContainText('A 1 · B 1');
+    await expect(pulse.getByRole('row').filter({hasText: '测量区间'})).toContainText('17 µs');
+    await expect(gated.getByRole('row').filter({hasText: '测量区间'})).toContainText('17 µs');
+    await expect(delay.getByRole('row').filter({hasText: '测量区间'})).toContainText('17 µs');
+    const sourceDialog = page.locator('#measurementSourceDialog');
+    const choose = async (text) => {
+      await sourceDialog.getByRole('searchbox').fill(text);
+      const option = sourceDialog.getByRole('option').filter({hasText: text});
+      await expect(option).toHaveCount(1);
+      const value = await option.getAttribute('value');
+      await sourceDialog.getByRole('listbox').selectOption(value);
+      await sourceDialog.getByRole('button', {name: '绑定'}).click();
+      await expect(sourceDialog).toBeHidden();
+    };
+    await pulse.getByRole('button', {name: '更换通道 · clk'}).click();
+    await choose('divided');
+    const divided = clocks.filter({has: page.locator('.measurement-card-source').getByText('divided', {exact:true})});
+    await expect(divided.getByRole('row', {name: /^平均周期 /})).toContainText('12 µs');
+    await expect(gated.getByRole('row', {name: /^上升沿 /})).toContainText('1');
+    await expect(clocks).toHaveCount(2);
+    await delay.getByRole('button', {name: '更换源 / 数据 · clk'}).click();
+    await choose('gated');
+    await expect(delay.getByRole('button', {name: '更换源 / 数据 · gated'})).toBeVisible();
+    await expect(delay.getByRole('button', {name: '更换目标 / 时钟 · clk'})).toBeVisible();
+    await expect(delay.getByRole('row').filter({hasText: '首个上升沿延时'})).toContainText('-2 µs');
+    await layout.selectOption('docked');
+    await expect.poll(trackHeight).toBeLessThan(emptyHeight);
+    await expect(move).toBeHidden();
+    await panel.getByLabel('测量区间').selectOption('full');
+    await expect(divided.getByRole('row').filter({hasText: '测量区间'})).toContainText('25 µs');
+    await panel.getByRole('button', {name: '收起'}).click();
+    await expect(divided).toBeHidden();
+    await panel.getByRole('button', {name: '展开'}).click();
+    await expect(divided).toBeVisible();
+    await delay.getByRole('button', {name: '移除此项测量'}).click();
+    await expect(delay).toHaveCount(0);
+    await expect(divided).toBeVisible();
+    await panel.getByRole('button', {name: '清空'}).click();
+    await expect(panel).toBeHidden();
+
+    await page.locator('.row').nth(3).click();
+    await page.locator('.row').nth(0).click({modifiers:['Control']});
+    await clickTool(page, '[data-action=measure-pulse]');
+    await expect(clocks).toHaveCount(2);
+    const voltage = clocks.filter({has: page.locator('.measurement-card-source').getByText('voltage', {exact:true})});
+    await expect(voltage.getByRole('row', {name: /^平均周期 /})).toContainText('10 µs');
+    await expect(voltage.getByRole('row', {name: /^高电平占空比 /})).toContainText('50 %');
+    await pulse.getByRole('button', {name:'更换通道 · clk'}).click();
+    await choose('divided');
+    await divided.getByRole('button', {name:'更换通道 · divided'}).click();
+    await expect(sourceDialog.getByRole('option').filter({hasText:'voltage'})).toBeVisible();
+    await sourceDialog.getByRole('button', {name:'取消'}).click();
   } finally {
     env.dispose();
     fs.rmSync(directory, {recursive: true, force: true});

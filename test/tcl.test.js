@@ -16,6 +16,9 @@ test('real Tcl: variables, loops, nested lists, source, persistence, errors and 
   await assert.rejects(runner.run('wvNonexistent',dir),/Unsupported Verdi/);
   await assert.rejects(runner.run('exec touch should-not-exist',dir),/Unsupported Verdi/);
   assert.equal(await runner.run('set sum',dir),'7');
+  assert.equal(await runner.isComplete('expr {'),false);
+  assert.equal(await runner.isComplete('expr {\n  $sum + 1\n}'),true);
+  assert.equal(await runner.run('set sum',dir),'7');
   const dangerous='a [$sum] $var "x" \\ {hello}\nend';assert.equal(await runner.run('set literal '+quote(dangerous),dir),dangerous);
 });
 test('value formats preserve bit order, signed values and partial unknown nibbles',()=>{

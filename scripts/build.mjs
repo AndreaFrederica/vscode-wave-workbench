@@ -31,6 +31,7 @@ await build({
 await build({
   entryPoints: [
     "src/webview/wave.ts",
+    "src/webview/wave-cache.ts",
     "src/webview/sidebar.ts",
     "src/webview/live-wave.ts",
     "src/webview/schematic.ts",
@@ -42,6 +43,33 @@ await build({
   target: "chrome118",
   sourcemap: true,
 });
+await build({
+  entryPoints: {
+    "tcl-console": "src/webview/tcl-console.ts",
+    "tcl-editor-worker": "monaco-editor/editor/editor.worker.js",
+  },
+  outdir: "dist/webview",
+  bundle: true,
+  platform: "browser",
+  format: "iife",
+  target: "chrome118",
+  minify: true,
+  legalComments: "linked",
+  loader: { ".ttf": "file" },
+});
+await copyFile(
+  "node_modules/monaco-editor/LICENSE",
+  "dist/monaco-editor-license.txt",
+);
+await copyFile(
+  "node_modules/monaco-editor/ThirdPartyNotices.txt",
+  "dist/monaco-editor-third-party-notices.txt",
+);
+await copyFile(
+  "node_modules/monaco-editor/esm/vs/nls/lang/zh-cn.js",
+  "dist/webview/tcl-editor-zh-cn.js",
+);
+
 await mkdir("dist/tcl", { recursive: true });
 await copyFile("src/tcl/bridge.tcl", "dist/tcl/bridge.tcl");
 await build({

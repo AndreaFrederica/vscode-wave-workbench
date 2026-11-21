@@ -5,6 +5,21 @@
 
 const UNITS = { s: 1, ms: 1e-3, us: 1e-6, ns: 1e-9, ps: 1e-12, fs: 1e-15 };
 
+export function normalizeRtlTimescale(value: string) {
+  const match =
+    /^(1|10|100) *(s|ms|us|ns|ps|fs) *\/ *(1|10|100) *(s|ms|us|ns|ps|fs)$/.exec(
+      value.trim(),
+    );
+  if (!match) return undefined;
+  const [, unitMagnitude, unit, precisionMagnitude, precision] = match;
+  const units = Object.keys(UNITS);
+  const unitExponent = unitMagnitude.length - 3 * units.indexOf(unit);
+  const precisionExponent =
+    precisionMagnitude.length - 3 * units.indexOf(precision);
+  if (precisionExponent > unitExponent) return undefined;
+  return unitMagnitude + unit + "/" + precisionMagnitude + precision;
+}
+
 export function scaleSeconds(scale: string) {
   const match = /^([\d.e+-]+)\s*(s|ms|us|ns|ps|fs)$/i.exec(scale);
   if (!match || !(Number(match[1]) > 0))

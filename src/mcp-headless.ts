@@ -276,8 +276,8 @@ async function main(workspace: string) {
 
   async function open(
     filename: string,
-    preference: FsdbBackend,
     signal: AbortSignal,
+    preference = config.get<FsdbBackend>("fsdbBackend") ?? "auto",
   ) {
     const projectPath = /\.waveproj$/i.test(filename) ? filename : undefined;
     const project = /\.waveproj$/i.test(filename)
@@ -395,11 +395,7 @@ async function main(workspace: string) {
       decodeTransactions: (viewer, instance, start, end) =>
         decode(viewer, instance, start, end, signal),
       open: async (filename) => {
-        target = await open(
-          path.resolve(scriptDirectory, filename),
-          "auto",
-          signal,
-        );
+        target = await open(path.resolve(scriptDirectory, filename), signal);
         selected = target.filename;
       },
       scope: async (scope) => {
@@ -508,8 +504,8 @@ async function main(workspace: string) {
     if (name === "wave_open") {
       const session = await open(
         path.resolve(workspace, String(args.path)),
-        (args.backend ?? "auto") as FsdbBackend,
         signal,
+        args.backend as FsdbBackend | undefined,
       );
       selected = session.filename;
       const { start, end, scale, total, backend } = session.meta;
@@ -578,7 +574,7 @@ async function main(workspace: string) {
       if ("signal" in result && result.signal)
         session.state.addVirtual(result.signal);
       if ("path" in result && result.path && args.open === true)
-        selected = (await open(result.path, "auto", signal)).filename;
+        selected = (await open(result.path, signal)).filename;
       return result;
     }
     if (name === "wave_decoder_list") {

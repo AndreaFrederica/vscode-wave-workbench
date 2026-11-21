@@ -7,6 +7,7 @@ export interface TraceOperand {
   signed?: boolean;
   bits?: string;
   range?: readonly [number, number];
+  sampledRange?: readonly [number, number];
 }
 
 const maxWidth = 4096;
@@ -91,6 +92,46 @@ function common(left?: Shape, right?: Shape): Shape | undefined {
   return { width: Math.max(left.width, right.width), signed };
 }
 
+function matchMembershipLabel(
+  selector: string,
+  label: string,
+  upper: string | undefined,
+  signed: boolean | undefined,
+): "0" | "1" | "x" | undefined {
+  if (upper !== undefined) {
+    if (/[xz]/.test(selector + label + upper)) return "x";
+    const value = traceInteger(selector, signed);
+    const lowerBound = traceInteger(label, signed);
+    const upperBound = traceInteger(upper, signed);
+    if (
+      value === undefined ||
+      lowerBound === undefined ||
+      upperBound === undefined
+    )
+      return undefined;
+    return lowerBound <= value && value <= upperBound ? "1" : "0";
+  }
+  let unknown = false;
+  for (let index = 0; index < label.length; index++) {
+    const pattern = label[index];
+    if (pattern === "x" || pattern === "z") continue;
+    const bit = selector[index];
+    if (bit === "x" || bit === "z") unknown = true;
+    else if (bit !== pattern) return "0";
+  }
+  return unknown ? "x" : "1";
+}
+
+function matchesCase(selector: string, label: string, wildcard?: RegExp) {
+  if (!wildcard) return selector === label;
+  for (let index = 0; index < selector.length; index++) {
+    const left = selector[index];
+    const right = label[index];
+    if (left !== right && !wildcard.test(left + right)) return false;
+  }
+  return true;
+}
+
 export function traceValueShapes(
   getOperand: (id: number) => TraceOperand | undefined,
 ) {
@@ -112,6 +153,8 @@ export function traceValueShapes(
 
   function infer(node: AssignmentValue): Shape | undefined {
     switch (node.op) {
+      case "typeShape":
+        return { width: node.args[0], signed: node.args[1] };
       case "generateIndex":
         return undefined;
       case "signal": {
@@ -199,6 +242,9 @@ export function traceValueShapes(
       }
       case "conditional":
         return common(shape(node.args[1]), shape(node.args[2]));
+      case "caseMatch":
+      case "membership":
+        return { width: 1, signed: false };
     }
   }
 
@@ -223,7 +269,21 @@ export function evaluateTraceValue(
   function read(id: number) {
     inputs.add(id);
     const value = getOperand(id);
-    return value && normalizeBits(value.bits, value.width);
+    return value && !value.sampledRange
+      ? normalizeBits(value.bits, value.width)
+      : undefined;
+  }
+
+  function readSlice(id: number, first: number, last: number) {
+    const value = getOperand(id);
+    if (!value?.sampledRange) {
+      const bits = read(id);
+      return bits && sliceTraceBits(bits, value?.range, first, last);
+    }
+    inputs.add(id);
+    return (
+      value.bits && sliceTraceBits(value.bits, value.sampledRange, first, last)
+    );
   }
 
   function fit(
@@ -253,13 +313,7 @@ export function evaluateTraceValue(
         return fit(normalizeBits(node.args[0], type.width), width, signed);
       case "select": {
         const [id, first, last] = node.args;
-        const value = getOperand(id);
-        const bits = read(id);
-        return fit(
-          bits && sliceTraceBits(bits, value?.range, first, last),
-          width,
-          signed,
-        );
+        return fit(readSlice(id, first, last), width, signed);
       }
       case "slice": {
         const [input, left, right] = node.args;
@@ -298,13 +352,18 @@ export function evaluateTraceValue(
         const vectorWidth = BigInt(base.width);
         if (start >= vectorWidth || end <= 0n)
           return fit("x".repeat(type.width), width, signed);
-        const sourceBits = read(id);
-        if (!sourceBits) return undefined;
         const validStart = Number(start < 0n ? 0n : start);
         const validEnd = Number(end > vectorWidth ? vectorWidth : end);
+        const stride = ascendingVector ? 1 : -1;
+        const selected = readSlice(
+          id,
+          left + validStart * stride,
+          left + (validEnd - 1) * stride,
+        );
+        if (!selected) return undefined;
         return fit(
           "x".repeat(start < 0n ? Number(-start) : 0) +
-            sourceBits.slice(validStart, validEnd) +
+            selected +
             "x".repeat(end > vectorWidth ? Number(end - vectorWidth) : 0),
           width,
           signed,
@@ -441,11 +500,7 @@ export function evaluateTraceValue(
         if (caseComparison) {
           const wild =
             op === "caseItemZ" ? /z/ : op === "caseItemX" ? /[xz]/ : undefined;
-          const matched = wild
-            ? Array.from(left).every(
-                (bit, i) => bit === right[i] || wild.test(bit + right[i]),
-              )
-            : left === right;
+          const matched = matchesCase(left, right, wild);
           return fit(
             matched === (op !== "caseNotEqual") ? "1" : "0",
             width,
@@ -526,6 +581,47 @@ export function evaluateTraceValue(
               "",
             )
           : undefined;
+      }
+      case "caseMatch":
+      case "membership": {
+        const [selector, labels, [first, end]] = node.args;
+        const kind = node.op === "caseMatch" ? node.args[3] : "inside";
+        const wild =
+          kind === "wildcardZ"
+            ? /z/
+            : kind === "wildcardX"
+              ? /[xz]/
+              : undefined;
+        let comparison = shape(selector);
+        // All labels determine the comparison type, including later arms.
+        for (const label of labels) {
+          comparison = common(comparison, shape(label[0]));
+          if (label[1]) comparison = common(comparison, shape(label[1]));
+        }
+        if (!comparison) return undefined;
+        const { width: operandWidth, signed: operandSigned } = comparison;
+        const left = evalBits(selector, operandWidth, operandSigned);
+        if (!left) return undefined;
+        let result: "0" | "x" | undefined = "0";
+        for (const [firstTerm, lastTerm] of labels.slice(first, end)) {
+          const lower = evalBits(firstTerm, operandWidth, operandSigned);
+          const upper =
+            lastTerm && evalBits(lastTerm, operandWidth, operandSigned);
+          if (!lower || (lastTerm && !upper)) {
+            result = undefined;
+            continue;
+          }
+          const match =
+            kind === "inside"
+              ? matchMembershipLabel(left, lower, upper, operandSigned)
+              : matchesCase(left, lower, wild)
+                ? "1"
+                : "0";
+          if (match === "1") return fit("1", width, signed);
+          if (match === undefined || (match === "x" && result !== undefined))
+            result = match;
+        }
+        return fit(result, width, signed);
       }
     }
   }

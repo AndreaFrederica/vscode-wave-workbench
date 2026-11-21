@@ -38,4 +38,7 @@ module generate_tb;
         #5 b = 0;
         #5 $finish;
     end
+
+    wire probe_inline;
+    if (1) assign probe_inline = a; else assign probe_inline = b;
 endmodule

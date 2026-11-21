@@ -32,3 +32,7 @@ The license is in licenses/Lz4-flex-MIT.txt.
 
 The Rust PSF reader includes psfkit under the MIT license.
 The license is in licenses/Psfkit-MIT.txt. Source: https://github.com/henjo/polars-psf.
+
+The Tcl Console bundles Monaco Editor 0.57.0 under the MIT license.
+The license is included in dist/monaco-editor-license.txt.
+Source: https://github.com/microsoft/monaco-editor/tree/v0.57.0.

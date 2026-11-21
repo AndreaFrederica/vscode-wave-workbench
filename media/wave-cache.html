@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{csp}}; script-src 'nonce-{{nonce}}';">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="{{css}}">
+  <title>波形缓存</title>
+</head>
+<body>
+  <main>
+    <header class="page-header">
+      <div>
+        <h1>波形缓存</h1>
+        <p id="waveform">正在读取波形会话…</p>
+      </div>
+      <button type="button" id="refresh" class="secondary">刷新</button>
+    </header>
+    <p id="route" class="route" hidden></p>
+    <section class="cards" aria-label="缓存容量和命中">
+      <article class="card memory" data-cache="cacheSizeMB">
+        <h2>解码事件 <small>L1 · 内存</small></h2>
+        <p class="usage">—</p>
+        <progress aria-label="解码事件内存占用" max="1"></progress>
+        <dl class="stats"></dl>
+        <div class="hits" role="img" aria-label="缓存命中分布" hidden></div>
+        <p class="legend"></p>
+        <form>
+          <label>容量 <input type="number" min="0" max="1048576" step="1" required> MiB</label>
+          <button>应用</button>
+        </form>
+      </article>
+      <article class="card samples" data-cache="psfxlMemoryCacheSizeMB">
+        <h2>PSFXL 样本 <small>L2 · 内存</small></h2>
+        <p class="usage">—</p>
+        <progress aria-label="PSFXL 原始样本内存占用" max="1"></progress>
+        <dl class="stats"></dl>
+        <div class="hits" role="img" aria-label="缓存命中分布" hidden></div>
+        <p class="legend"></p>
+        <form>
+          <label>容量 <input type="number" min="0" max="1048576" step="1" required> MiB</label>
+          <button>应用</button>
+        </form>
+      </article>
+      <article class="card disk" data-cache="psfxlCacheSizeMB">
+        <h2>PSFXL 样本 <small>L3 · 磁盘</small></h2>
+        <p class="usage">—</p>
+        <progress aria-label="SHM 模拟样本磁盘占用" max="1"></progress>
+        <dl class="stats"></dl>
+        <div class="hits" role="img" aria-label="缓存命中分布" hidden></div>
+        <p class="legend"></p>
+        <form>
+          <label>容量 <input type="number" min="0" max="1048576" step="1" required> MiB</label>
+          <button>应用</button>
+        </form>
+      </article>
+    </section>
+    <p id="psfxl-source" class="help"></p>
+    <table id="encodings" class="card" hidden>
+      <caption>解码事件内存分布</caption>
+      <thead><tr><th scope="col">信号类型</th><th scope="col">占用</th><th scope="col">条目</th><th scope="col">命中</th><th scope="col">未命中</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="help">容量按波形会话计算。应用后立即生效，设为 0 可关闭对应缓存。</p>
+    <p id="feedback" role="status"></p>
+    <section class="card history">
+      <div class="chart-header">
+        <h2>近 2 分钟占用率</h2>
+        <div class="chart-legend">
+          <span class="memory">解码事件</span>
+          <span class="samples">PSFXL 内存</span>
+          <span class="disk">PSFXL 磁盘</span>
+        </div>
+      </div>
+      <canvas id="history" role="img" aria-label="解码事件和 SHM 模拟样本占用率趋势"></canvas>
+    </section>
+    <section class="card project-usage" aria-labelledby="project-usage-title">
+      <h2 id="project-usage-title">各波形项目的缓存占用</h2>
+      <p id="project-summary">当前 VS Code 窗口</p>
+      <div class="project-table">
+        <table id="projects" hidden>
+          <thead><tr><th scope="col">波形项目</th><th scope="col">会话</th><th scope="col">内存合计</th><th scope="col">L1 解码事件</th><th scope="col">L2 样本内存</th><th scope="col">L3 样本磁盘</th></tr></thead>
+          <tbody></tbody>
+          <tfoot></tfoot>
+        </table>
+      </div>
+    </section>
+  </main>
+  <script nonce="{{nonce}}" src="{{script}}"></script>
+</body>
+</html>

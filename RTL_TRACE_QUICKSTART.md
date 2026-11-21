@@ -74,15 +74,21 @@ jq -er '.report' context.json > trace-report.md
 
 大图的 `mermaidPages` 和 `temporalMermaidPages` 返回全部图页。需要继续回溯时，静态结果的 `staticCoverage.stops` 和时间图的 `context.temporalTrace.gaps` 给出停止原因以及可用的续查入口。Trace Explorer 对应入口是 **Continue from**。 [预算、分页与续查参数](COMMANDS.md#rtl-追踪与波形证据)
 
-在界面可选择「追踪 → 自动续查 A 游标的上游」，一次跟进最多四个时间图前沿。MCP 请求可用 `followContinuations` 控制续查数量，`detail: "full"` 将续查总览和证据加入同一份报告。 [自动续查输出](COMMANDS.md#rtl-追踪与波形证据)
+在界面的「追踪」菜单中可自动续查上游驱动、下游负载或 A 游标的上游。每批最多查询 64 段，续查时限为 100 秒。达到预算或在续查期间取消后，Trace Explorer 保留已得到的图和待查入口，可通过 **Continue next batch** 继续。MCP 请求也可用 `followContinuations` 指定较小的续查数量，`detail: "full"` 将续查总览和证据加入同一份报告。 [自动续查输出](COMMANDS.md#rtl-追踪与波形证据)
 
 在 Trace Explorer 的 **Combined static dependencies** 或 **Combined time graph** 中，**Continue next batch** 将下一批结果加入原图，并打开更新后的详细报告。
 
-MCP 结果含 `continuationCursor` 时，将它交给 `wave_trace_resume` 可查询下一批上游，并把新证据接到同一张图上。后续使用最新响应的游标。 [跨请求续查](COMMANDS.md#rtl-追踪与波形证据)
+重新打开工作区后，可在保存的离线合并图上使用 **Continue next batch**。续查会先核验波形、RTL、编译配置、设计数据库及使用过的执行记录。输入变化时仍可查看保存的图，并从当前输入开始一次新追踪。在线续查对应原仿真会话。
+
+MCP 结果含 `continuationCursor` 时，将它交给 `wave_trace_resume` 可查询下一批上游，并把新证据接到同一张图上。后续使用当前 MCP 会话中最新响应的游标。 [跨请求续查](COMMANDS.md#rtl-追踪与波形证据)
 
 MCP 可从单个信号设置 `followAllContinuations: true` 自动追踪可解析路径。静态查询用 `wave_trace_drivers` 或 `wave_trace_loads`，离线时间因果用 `wave_trace_context`，在线仿真用 `wave_live_trace`。达到单次预算时可用 `wave_trace_resume` 继续。分页图的 `frontier`、`queryFailures` 和 `gaps` 分别列出剩余入口、失败查询与证据缺口。
 
-大型图和报告可用 `output: "paged"` 生成快照，再用 `wave_trace_graph_page` 分页取回。加上 `format: "mermaid"` 和 `detail: "full"` 可读取对应的图源和完整报告。 [图快照分页](COMMANDS.md#rtl-追踪与波形证据)
+合并时间图的节点保留可用的 `declaration` 和 `waveformSignal`。从 Trace Explorer 或本次追踪原理图选中续查节点，可跳到其 RTL 声明或加入对应的波形。只有已绑定到参考波形的节点提供加入波形操作。
+
+大型图和报告可用 `output: "paged"` 生成快照。之后用 `wave_trace_graph_page` 分页读取 `mermaid` 或 `report`，也可以在创建快照时用 `format: "mermaid"` 和 `detail: "full"` 预先生成。只要图游标仍有效，续查结束后仍可导出图表和完整报告。 [图快照分页](COMMANDS.md#rtl-追踪与波形证据)
+
+在大型时间图的 `nodes` 分页找到关注的上游节点后，将原图游标和节点编号交给 `wave_trace_graph_path`。默认提取每个选定节点到根的一条最短路径。设为 `mode: "all"` 可保留原快照中这些节点通往追踪根的所有已记录分支。用局部快照的游标分页导出 Mermaid 和详细报告。 [路径提取](COMMANDS.md#rtl-追踪与波形证据)
 
 ## 回放与在线追踪
 

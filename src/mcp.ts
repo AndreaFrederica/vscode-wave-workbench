@@ -199,7 +199,7 @@ async function connectToWorkbench(
     ? /^([1-9]\d*)(?:-([a-f0-9]{32}))?\.pipe$/
     : /^([1-9]\d*)\.sock$/;
   const cursorField =
-    name === "wave_trace_graph_page"
+    name === "wave_trace_graph_page" || name === "wave_trace_graph_path"
       ? "graphCursor"
       : name === "wave_trace_resume"
         ? "continuationCursor"

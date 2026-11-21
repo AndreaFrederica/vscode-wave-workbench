@@ -80,10 +80,10 @@ const pagedTraceProperties = {
   },
   followContinuations: {
     type: "integer",
-    minimum: 1,
+    minimum: 0,
     maximum: 8,
     description:
-      "Automatically query up to this many distinct signals from the static frontier.",
+      "Automatically query up to this many distinct signals from the static frontier. Use zero to inspect the frontier before querying it.",
   },
   pageCursor: {
     type: "string",
@@ -91,14 +91,27 @@ const pagedTraceProperties = {
   },
 };
 const temporalLimits = {
-  maxTemporalNodes: { type: "integer", minimum: 1, maximum: 4096 },
-  maxTemporalEdges: { type: "integer", minimum: 1, maximum: 16384 },
-  followContinuations: {
+  changeOrder: {
     type: "integer",
     minimum: 1,
+    description:
+      "One-based order of the selected signal change at the requested tick.",
+  },
+  maxTemporalNodes: { type: "integer", minimum: 1, maximum: 4096 },
+  maxTemporalEdges: { type: "integer", minimum: 1, maximum: 16384 },
+  maxTemporalGaps: {
+    type: "integer",
+    minimum: 1,
+    maximum: 16384,
+    description:
+      "Maximum gap records per time graph segment. Defaults to the edge budget and prioritizes distinct continuation requests.",
+  },
+  followContinuations: {
+    type: "integer",
+    minimum: 0,
     maximum: 8,
     description:
-      "Automatically query up to this many distinct upstream transitions from the temporal frontier.",
+      "Automatically query up to this many upstream transitions. Use zero to inspect the temporal frontier before querying it.",
   },
   output: {
     type: "string",
@@ -467,7 +480,7 @@ export const toolDefinitions = [
       captureOperands: {
         type: "boolean",
         description:
-          "For VCS, add operand capture to eligible fixed-target NBA statements.",
+          "For VCS, capture operands at eligible fixed-target blocking and nonblocking assignments.",
       },
       captureGuards: {
         type: "boolean",
@@ -477,7 +490,7 @@ export const toolDefinitions = [
       captureGuardEntry: {
         type: "boolean",
         description:
-          "For VCS array-word maps, also capture eligible guard operands on entry to a taken if block.",
+          "For VCS, capture local operands at eligible if, else or case entries and wait resumptions for fixed-target or array-word NBAs.",
       },
     },
     ["instance", "signal"],
@@ -526,12 +539,6 @@ export const toolDefinitions = [
         type: "string",
         description: "Observation tick as a decimal string.",
       },
-      changeOrder: {
-        type: "integer",
-        minimum: 1,
-        description:
-          "One-based order of the selected signal change at this tick.",
-      },
       historyStart: {
         type: "string",
         description:
@@ -553,8 +560,21 @@ export const toolDefinitions = [
         description:
           "Continuation cursor returned by a static, waveform, or live trace.",
       },
-      followContinuations: temporalLimits.followContinuations,
+      followContinuations: {
+        ...temporalLimits.followContinuations,
+        minimum: 1,
+        description:
+          "Automatically query up to this many remaining dependencies.",
+      },
       followAllContinuations,
+      frontierIndices: {
+        type: "array",
+        minItems: 1,
+        maxItems: 8,
+        items: { type: "integer", minimum: 0 },
+        description:
+          "Run these zero-based entries of the current trace frontier in the specified order. Use instead of an automatic continuation budget.",
+      },
       format: traceProperties.format,
       detail: traceProperties.detail,
       output: {
@@ -568,7 +588,7 @@ export const toolDefinitions = [
   ),
   tool(
     "wave_trace_graph_page",
-    "Read a page of an existing dependency graph snapshot.",
+    "Read a page of a dependency graph snapshot, including Mermaid or Markdown generated from the saved graph on request.",
     {
       graphCursor: {
         type: "string",
@@ -580,6 +600,7 @@ export const toolDefinitions = [
           "signals",
           "assignments",
           "feedbackEdges",
+          "bitEdges",
           "nodes",
           "edges",
           "gaps",
@@ -594,6 +615,42 @@ export const toolDefinitions = [
       limit: { type: "integer", minimum: 1, maximum: 128 },
     },
     ["graphCursor", "section"],
+  ),
+  tool(
+    "wave_trace_graph_path",
+    "Extract dependency paths from selected signals or time nodes to traced roots, with optional Mermaid and Markdown.",
+    {
+      graphCursor: {
+        type: "string",
+        description:
+          "Cursor of a paged RTL trace graph or a previously selected time path.",
+      },
+      nodeIds: {
+        type: "array",
+        items: { type: "integer", minimum: 0 },
+        minItems: 1,
+        maxItems: 16,
+        description:
+          "Signal IDs from the static signals section or zero-based indices from the temporal nodes section.",
+      },
+      nodeSelectors: {
+        type: "array",
+        items: { type: "object" },
+        minItems: 1,
+        maxItems: 16,
+        description:
+          "Match a static declaration by full signal path. Add an integer bit to each selector for recorded bit dependencies. For a time graph, supply a decimal tick and optionally changeOrder or callbackOrdinal.",
+      },
+      mode: {
+        type: "string",
+        enum: ["shortest", "all"],
+        description:
+          "Return one shortest path per selected node by default, or every existing branch to a traced root.",
+      },
+      format: traceProperties.format,
+      detail: traceProperties.detail,
+    },
+    ["graphCursor"],
   ),
   tool(
     "wave_clip",

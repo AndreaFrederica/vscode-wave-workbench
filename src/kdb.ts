@@ -28,6 +28,14 @@ export interface DesignGenerateLabel {
   file: string;
   line: number;
   column: number;
+  unnamed?: boolean;
+}
+
+export interface DesignGenerateScope {
+  fullname: string;
+  file: string;
+  line: number;
+  column: number;
 }
 
 export interface DesignHierarchicalAccess {
@@ -76,6 +84,7 @@ export interface DesignSession {
     instance: string,
   ): Promise<BackendProtocol["kdbGenericInterfaceTypes"]["result"]>;
   generateLabels?(instance: string): readonly DesignGenerateLabel[];
+  generateScopes?(instance: string): readonly DesignGenerateScope[];
   hierarchicalAccesses?(instance: string): readonly DesignHierarchicalAccess[];
   hierarchicalConsumers?(
     instance: string,

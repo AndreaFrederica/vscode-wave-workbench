@@ -1,0 +1,65 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-width: 0;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  color: var(--vscode-panel-foreground, var(--vscode-foreground));
+  background: var(--vscode-panel-background, var(--vscode-editor-background));
+  font: var(--vscode-font-size, 13px) var(--vscode-font-family, sans-serif);
+}
+header, .repl-input { display: flex; align-items: center; gap: 8px; padding: 5px 10px; }
+header { flex-wrap: wrap; border-bottom: 1px solid var(--vscode-panel-border, transparent); }
+header label { white-space: nowrap; color: var(--vscode-descriptionForeground); }
+#session, #filter {
+  min-width: 0;
+  padding: 3px 6px;
+  font: inherit;
+}
+#session {
+  flex: 1 0 100px;
+  max-width: 280px;
+  color: var(--vscode-dropdown-foreground, inherit);
+  background: var(--vscode-dropdown-background, transparent);
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+}
+#filter {
+  flex: 1 0 100px;
+  max-width: 220px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+}
+#filter::placeholder { color: var(--vscode-input-placeholderForeground); }
+
+button {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 2px;
+  font: inherit;
+  padding: 3px 8px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
+button:disabled { opacity: .55; cursor: default; }
+:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+#transcript, #prompt {
+  font-family: var(--console-font-family, var(--vscode-editor-font-family, monospace));
+  font-size: var(--console-font-size, var(--vscode-editor-font-size, 13px));
+  line-height: var(--console-line-height, 1.5);
+}
+#transcript { overflow: auto; overflow-anchor: none; padding: 5px 10px; }
+.entry { margin: 0 0 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.entry.command { color: var(--vscode-debugConsole-sourceForeground, var(--vscode-descriptionForeground)); margin-top: 5px; }
+.entry.output { color: var(--vscode-debugConsole-infoForeground, inherit); }
+.entry.error { color: var(--vscode-debugConsole-errorForeground, var(--vscode-errorForeground)); }
+.entry summary { cursor: pointer; }
+.entry pre { margin: 2px 0 4px 14px; font: inherit; white-space: pre-wrap; }
+.empty { color: var(--vscode-descriptionForeground); }
+
+.repl-input { align-items: flex-start; border-top: 1px solid var(--vscode-panel-border, transparent); }
+#prompt { color: var(--vscode-debugConsoleInputIcon-foreground, var(--vscode-textLink-foreground)); }
+#command { flex: 1; min-width: 0; height: 22px; }

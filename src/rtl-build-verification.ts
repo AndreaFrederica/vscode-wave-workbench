@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { VerilatorArtifacts } from "./kdb";
 import { waveformHash } from "./rtl-execution";
-import { scaleSeconds } from "./shared/time";
+import { normalizeRtlTimescale, scaleSeconds } from "./shared/time";
 import type { VideTrace } from "./rtl-trace";
 
 export interface TraceRuntimeInputs {
@@ -14,6 +14,18 @@ export interface TraceRuntimeInputs {
   plusargs?: readonly string[];
   files?: readonly { path: string; sha256?: string }[];
 }
+
+type PliFile = { path: string; sha256?: string };
+type VcsPli = { table: PliFile; library?: PliFile; calls?: string[] };
+export const vcsPliExecutionGap =
+  "External VCS PLI callback execution was not verified.";
+export type VcsPliVerification = {
+  table: PliFile & {
+    identity: "matched" | "mismatched" | "missing" | "unverified";
+  };
+  library?: VcsPliVerification["table"];
+  calls?: string[];
+};
 
 interface BuildManifestData {
   schemaVersion: 1;
@@ -28,9 +40,13 @@ interface BuildManifestData {
   library_maps?: string[];
   source_libraries?: { path: string; name: string }[];
   files: { path: string; sha256: string }[];
+  files_complete?: boolean;
+  vcs_pli?: VcsPli[];
+  vcs_trace_library?: PliFile;
   include_dirs: string[];
   top_modules: string[];
   parameter_overrides?: string[];
+  default_timescale?: string;
   defines: string[];
   unsupported?: string[];
   runtime?: {
@@ -61,6 +77,12 @@ const validFiles = (files: unknown): files is BuildManifestData["files"] =>
 
 function isManifest(value: unknown): value is BuildManifestData {
   const manifest = value as BuildManifestData;
+  const validPliFile = (file: PliFile | undefined) =>
+    !!file &&
+    typeof file.path === "string" &&
+    file.path.length > 0 &&
+    (file.sha256 === undefined ||
+      (typeof file.sha256 === "string" && hash.test(file.sha256)));
   return (
     !!manifest &&
     manifest.schemaVersion === 1 &&
@@ -116,10 +138,34 @@ function isManifest(value: unknown): value is BuildManifestData {
     validStrings(manifest.top_modules) &&
     (manifest.parameter_overrides === undefined ||
       validStrings(manifest.parameter_overrides)) &&
+    (manifest.default_timescale === undefined ||
+      (typeof manifest.default_timescale === "string" &&
+        normalizeRtlTimescale(manifest.default_timescale) !== undefined)) &&
     validStrings(manifest.defines) &&
     (manifest.unsupported === undefined ||
       validStrings(manifest.unsupported)) &&
+    (manifest.files_complete === undefined ||
+      typeof manifest.files_complete === "boolean") &&
     validFiles(manifest.files) &&
+    (manifest.vcs_trace_library === undefined ||
+      validPliFile(manifest.vcs_trace_library)) &&
+    (manifest.vcs_pli === undefined ||
+      (Array.isArray(manifest.vcs_pli) &&
+        manifest.vcs_pli.length <= 128 &&
+        manifest.vcs_pli.every(
+          (entry) =>
+            entry &&
+            validPliFile(entry.table) &&
+            (entry.library === undefined || validPliFile(entry.library)) &&
+            (entry.calls === undefined ||
+              (Array.isArray(entry.calls) &&
+                entry.calls.length <= 512 &&
+                entry.calls.every(
+                  (name) =>
+                    typeof name === "string" &&
+                    /^\$[A-Za-z_][\w$]*$/.test(name),
+                ))),
+        ))) &&
     (manifest.runtime === undefined ||
       (!!manifest.runtime &&
         typeof manifest.runtime.workingDirectory === "string" &&
@@ -147,6 +193,9 @@ export async function readTraceBuildManifest(
   return {
     ...input,
     filename,
+    default_timescale: input.default_timescale
+      ? normalizeRtlTimescale(input.default_timescale)
+      : undefined,
     roots: input.roots.map(expectedPath),
     compilation_units: input.compilation_units?.map((unit) =>
       unit.map(expectedPath),
@@ -165,6 +214,15 @@ export async function readTraceBuildManifest(
     files: input.files.map((file) => ({
       ...file,
       path: expectedPath(file.path),
+    })),
+    vcs_trace_library: input.vcs_trace_library && {
+      ...input.vcs_trace_library,
+      path: expectedPath(input.vcs_trace_library.path),
+    },
+    vcs_pli: input.vcs_pli?.map(({ table, library, calls }) => ({
+      table: { ...table, path: expectedPath(table.path) },
+      library: library && { ...library, path: expectedPath(library.path) },
+      calls,
     })),
     runtime:
       input.runtime && workingDirectory
@@ -211,6 +269,40 @@ export function verilatorArtifactMismatches(
   return differences;
 }
 
+async function verifyVcsLibraryFile(
+  file: PliFile,
+): Promise<VcsPliVerification["table"]> {
+  let identity: VcsPliVerification["table"]["identity"] = "unverified";
+  try {
+    const attributes = await stat(file.path);
+    if (
+      file.sha256 &&
+      attributes.isFile() &&
+      attributes.size <= 128 * 1024 * 1024
+    )
+      identity =
+        (await waveformHash(file.path)) === file.sha256
+          ? "matched"
+          : "mismatched";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      identity = "missing";
+  }
+  return { ...file, identity };
+}
+
+async function verifyVcsPli(
+  configured: readonly VcsPli[],
+): Promise<VcsPliVerification[]> {
+  return Promise.all(
+    configured.map(async ({ table, library, calls }) => ({
+      table: await verifyVcsLibraryFile(table),
+      ...(library ? { library: await verifyVcsLibraryFile(library) } : {}),
+      ...(calls?.length ? { calls } : {}),
+    })),
+  );
+}
+
 export async function verifyTraceBuild(
   manifest: TraceBuildManifest,
   waveform: string,
@@ -220,6 +312,12 @@ export async function verifyTraceBuild(
   verilatorArtifacts?: VerilatorArtifacts,
 ) {
   const limitations = [...compilationLimitations];
+  const filesComplete =
+    manifest.files_complete ??
+    !manifest.unsupported?.includes(
+      "Header hashes unavailable from VCS rebuild metadata",
+    );
+  if (!filesComplete) limitations.push("Incomplete build file hash inventory");
   const mismatches = verilatorArtifactMismatches(
     manifest.verilatorArtifacts,
     verilatorArtifacts,
@@ -247,6 +345,12 @@ export async function verifyTraceBuild(
       !same(actual.parameterOverrides ?? [], manifest.parameter_overrides ?? [])
     )
       mismatches.push("Parameter overrides");
+    if (manifest.default_timescale !== undefined) {
+      if (actual.defaultTimescale !== manifest.default_timescale)
+        mismatches.push("Default RTL timescale");
+    } else if (actual.defaultTimescale !== undefined) {
+      limitations.push("Build manifest omits the default RTL timescale.");
+    }
     const rootPaths = await Promise.all(
       actual.roots.map((uri) => canonical(fileURLToPath(uri))),
     );
@@ -337,19 +441,25 @@ export async function verifyTraceBuild(
       manifest.include_dirs.map(canonical),
     );
     if (!same(includePaths, expectedIncludes)) mismatches.push("Include paths");
-    const actualFiles = await Promise.all(
-      actual.files.map((uri) => canonical(fileURLToPath(uri))),
+    const actualFiles = new Set(
+      await Promise.all(
+        actual.files.map((uri) => canonical(fileURLToPath(uri))),
+      ),
     );
-    const expectedFiles = await Promise.all(
-      manifest.files.map(({ path }) => canonical(path)),
+    const expectedFiles = new Set(
+      await Promise.all(manifest.files.map(({ path }) => canonical(path))),
     );
     if (
-      !same(
-        [...new Set(actualFiles)].sort(),
-        [...new Set(expectedFiles)].sort(),
-      )
+      [...expectedFiles].some((file) => !actualFiles.has(file)) ||
+      (filesComplete && actualFiles.size !== expectedFiles.size)
     )
       mismatches.push("Compilation and include file set");
+    if (!filesComplete) {
+      for (const file of [...actualFiles].sort()) {
+        if (!expectedFiles.has(file))
+          limitations.push("No build hash for compilation file " + file);
+      }
+    }
   }
 
   for (const file of manifest.files) {
@@ -372,12 +482,27 @@ export async function verifyTraceBuild(
       mismatches.push("Missing source " + filename);
     }
   }
+  const vcsPli = await verifyVcsPli(manifest.vcs_pli ?? []);
+  if (vcsPli.length) limitations.push(vcsPliExecutionGap);
+  const vcsTraceLibrary =
+    manifest.vcs_trace_library &&
+    (await verifyVcsLibraryFile(manifest.vcs_trace_library));
+  if (vcsTraceLibrary && vcsTraceLibrary.identity !== "matched")
+    limitations.push(
+      `VCS trace library identity ${vcsTraceLibrary.identity}: ${vcsTraceLibrary.path}`,
+    );
   const status: "matched" | "mismatched" | "unverified" = mismatches.length
     ? "mismatched"
     : limitations.length
       ? "unverified"
       : "matched";
-  return { status, mismatches, limitations: [...new Set(limitations)] };
+  return {
+    status,
+    mismatches,
+    limitations: [...new Set(limitations)],
+    ...(vcsPli.length ? { vcsPli } : {}),
+    ...(vcsTraceLibrary ? { vcsTraceLibrary } : {}),
+  };
 }
 
 export function verifyLiveTraceBuild(
@@ -420,6 +545,19 @@ export function verifyLiveTraceBuild(
       "Cannot compare the live harness and waveform tick units.",
     );
   }
+  // An instrumented subset can be compared event by event even when other
+  // PLI callbacks remain outside the capture scope.
+  const scopedPliReplay =
+    !!manifest?.runtime?.plusargs &&
+    !!manifest.runtime.files &&
+    build?.vcsTraceLibrary?.identity === "matched" &&
+    !!build.vcsPli?.length &&
+    build.vcsPli.every(
+      ({ table, library }) =>
+        table.identity === "matched" && library?.identity === "matched",
+    ) &&
+    limitations.length === 1 &&
+    limitations[0] === vcsPliExecutionGap;
   return {
     status: mismatches.length
       ? ("mismatched" as const)
@@ -428,5 +566,11 @@ export function verifyLiveTraceBuild(
         : ("matched" as const),
     mismatches,
     limitations,
+    executionReplayEligible:
+      !mismatches.length && (!limitations.length || scopedPliReplay),
+    ...(build?.vcsPli ? { vcsPli: build.vcsPli } : {}),
+    ...(build?.vcsTraceLibrary
+      ? { vcsTraceLibrary: build.vcsTraceLibrary }
+      : {}),
   };
 }

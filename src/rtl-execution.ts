@@ -24,10 +24,36 @@ import {
   traceInteger,
 } from "./rtl-trace-values";
 import { createMermaidFlowchart } from "./trace-mermaid";
-import { codeOnly, vcsGuardEntry, vscOperandExpression } from "./rtl-selection";
+import {
+  codeOnly,
+  vcsCaseEntry,
+  vcsStandaloneWait,
+  vcsWaitEntry,
+  vcsWaitOperands,
+  vcsGuardEntry,
+  vscOperandExpression,
+} from "./rtl-selection";
+import { readReplayCache, writeReplayCache } from "./rtl-execution-cache";
 
 const tickPattern = /^(?:0|[1-9]\d{0,19})$/;
 const hashPattern = /^[a-f0-9]{64}$/;
+
+function modportProcessId(
+  owner: string,
+  sourceHash: string,
+  position: { line: number; character: number },
+) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        owner,
+        sourceHash,
+        position.line + 1,
+        position.character + 1,
+      ]),
+    )
+    .digest("hex");
+}
 
 export async function vcsExecutionStatements(
   trace: VideTrace,
@@ -60,6 +86,7 @@ export async function vcsExecutionStatements(
   >();
   const signals = new Map(trace.signals.map((entry) => [entry.id, entry]));
   const statements = [];
+  const modportSiteCounts = new Map<string, number>();
   for (const assignment of trace.assignments) {
     const { instance: owner, kind, location, process, targets } = assignment;
     const arrayIndex = assignment.targetElementIndex;
@@ -147,31 +174,29 @@ export async function vcsExecutionStatements(
         column: offset - starts[operatorLine] + 1,
       };
       const position = process.range.start;
+      const statementId = digest(
+        JSON.stringify([
+          instance,
+          signal,
+          kind,
+          hash,
+          source.line,
+          source.column,
+          modport.component,
+        ]),
+      );
+      modportSiteCounts.set(
+        statementId,
+        (modportSiteCounts.get(statementId) ?? 0) + 1,
+      );
       statements.push({
         kind,
         source,
         operator,
         modport,
         targetRange: assignment.targetRange,
-        processId: digest(
-          JSON.stringify([
-            modport.owner,
-            hash,
-            position.line + 1,
-            position.character + 1,
-          ]),
-        ),
-        statementId: digest(
-          JSON.stringify([
-            instance,
-            signal,
-            kind,
-            hash,
-            source.line,
-            source.column,
-            modport.component,
-          ]),
-        ),
+        processId: modportProcessId(modport.owner, hash, position),
+        statementId,
       });
       continue;
     }
@@ -204,13 +229,13 @@ export async function vcsExecutionStatements(
       suffix = suffix.slice(arraySelectionLength);
     }
     const selection = /^\s*\[\s*(-?\d+)\s*(?::\s*(-?\d+)\s*)?\]/.exec(suffix);
-    const dynamic =
-      kind === "nonblocking" && assignment.targetIndex
-        ? /^\s*\[\s*([A-Za-z_$][\w$]*)\s*(?:([+-]):\s*(\d+)\s*)?\]/.exec(suffix)
-        : undefined;
+    const dynamic = assignment.targetIndex
+      ? /^\s*\[\s*([A-Za-z_$][\w$]*)\s*(?:([+-]):\s*(\d+)\s*)?\]/.exec(suffix)
+      : undefined;
     const targetIndexedPart = dynamic?.[2]
       ? assignment.targetIndexedPart
       : undefined;
+    if (kind === "blocking" && dynamic?.[2]) continue;
     if (
       dynamic?.[2] &&
       (!targetIndexedPart ||
@@ -239,16 +264,20 @@ export async function vcsExecutionStatements(
     if (!code.startsWith(token, offset) || code[offset + token.length] === "=")
       continue;
     let sampleOperands: string[] | undefined;
-    const canCaptureGuards = assignment.guards?.some(
-      ({ expression }) =>
-        (captureGuardEntry && arrayElement) ||
-        (expression !== undefined && expression !== null),
-    );
+    const canCaptureGuards =
+      (captureGuardEntry &&
+        (!!assignment.caseEntries?.length ||
+          !!assignment.waitEntries?.length ||
+          !!assignment.standaloneWaitEntries?.length)) ||
+      assignment.guards?.some(
+        ({ expression }) =>
+          captureGuardEntry ||
+          (expression !== undefined && expression !== null),
+      );
     const guardNames =
-      kind === "nonblocking" &&
-      !dynamic &&
+      (kind === "blocking" || (kind === "nonblocking" && !dynamic)) &&
       canCaptureGuards &&
-      (captureGuards || (captureGuardEntry && arrayElement))
+      (captureGuards || captureGuardEntry)
         ? [
             ...new Set(
               assignment.inputs.flatMap(({ kind, signal, hierarchical }) => {
@@ -265,10 +294,18 @@ export async function vcsExecutionStatements(
             ),
           ]
         : [];
-    const guardEntries = [];
+    type Position = { line: number; column: number };
+    const guardEntries: {
+      first: Position;
+      last: Position;
+      names: string[];
+      takenWhenTrue?: false;
+      caseBody?: { first: Position; last: Position; defaultBranch: boolean };
+      wait?: true | "standalone";
+    }[] = [];
     if (
+      kind === "nonblocking" &&
       captureGuardEntry &&
-      arrayElement &&
       guardNames.length &&
       guardNames.length <= 8
     ) {
@@ -316,10 +353,129 @@ export async function vcsExecutionStatements(
             ...(!guard.takenWhenTrue ? { takenWhenTrue: false as const } : {}),
           });
       }
+      const position = ({
+        line,
+        character,
+      }: {
+        line: number;
+        character: number;
+      }) => ({ line: line + 1, column: character + 1 });
+      const offsetAt = ({
+        line,
+        character,
+      }: {
+        line: number;
+        character: number;
+      }) => starts[line] + character;
+      const waits = [
+        ...(assignment.waitEntries ?? []).map((condition) => ({
+          condition,
+          standalone: false,
+        })),
+        ...(assignment.standaloneWaitEntries ?? []).map((condition) => ({
+          condition,
+          standalone: true,
+        })),
+      ];
+      for (const { condition, standalone } of waits) {
+        if (condition.uri !== location.uri || !condition.range.end) continue;
+        const from = offsetAt(condition.range.start);
+        const to = offsetAt(condition.range.end);
+        const operands = vcsWaitOperands(text.slice(from, to));
+        if (!operands) continue;
+        const bound = new Set(
+          assignment.inputs.flatMap((input) => {
+            const signal = signals.get(input.signal);
+            const at = offsetAt(input.location.range.start);
+            return input.kind === "control" &&
+              !input.hierarchical &&
+              input.location.uri === condition.uri &&
+              at >= from &&
+              at < to &&
+              signal?.instance === owner &&
+              !signal.parameterValue &&
+              code.slice(at, at + signal.name.length) === signal.name
+              ? [signal.name]
+              : [];
+          }),
+        );
+        const first = position(condition.range.start);
+        if (
+          operands.names.some(
+            (name) =>
+              !bound.has(name) ||
+              !guardNames.includes(name) ||
+              ("w" + first.line + "_" + first.column + "_" + name).length > 64,
+          ) ||
+          !(standalone
+            ? vcsStandaloneWait(code, from, to, start)
+            : vcsWaitEntry(code, from, to, start))
+        )
+          continue;
+        guardEntries.push({
+          first,
+          last: position(condition.range.end),
+          names: operands.names,
+          wait: standalone ? "standalone" : true,
+        });
+      }
+      for (const { selector, body, defaultBranch } of assignment.caseEntries ??
+        []) {
+        if (
+          selector.uri !== location.uri ||
+          body.uri !== location.uri ||
+          !selector.range.end ||
+          !body.range.end
+        )
+          continue;
+        const from = offsetAt(selector.range.start);
+        const to = offsetAt(selector.range.end);
+        const name = code.slice(from, to);
+        const onSelector = assignment.inputs.some(
+          (input) =>
+            input.kind === "control" &&
+            !input.hierarchical &&
+            input.location.uri === selector.uri &&
+            offsetAt(input.location.range.start) === from &&
+            signals.get(input.signal)?.name === name,
+        );
+        const first = position(selector.range.start);
+        if (
+          !onSelector ||
+          !guardNames.includes(name) ||
+          (
+            "c" +
+            first.line +
+            "_" +
+            first.column +
+            (defaultBranch ? "d_" : "_") +
+            name
+          ).length > 64 ||
+          !vcsCaseEntry(
+            code,
+            from,
+            to,
+            offsetAt(body.range.start),
+            offsetAt(body.range.end),
+            start,
+            text,
+          )
+        )
+          continue;
+        guardEntries.push({
+          first,
+          last: position(selector.range.end),
+          names: [name],
+          caseBody: {
+            first: position(body.range.start),
+            last: position(body.range.end),
+            defaultBranch,
+          },
+        });
+      }
     }
     if (
       captureOperands &&
-      kind === "nonblocking" &&
       !dynamic &&
       !arrayElement &&
       assignment.value &&
@@ -378,7 +534,8 @@ export async function vcsExecutionStatements(
       ...(targetIndexedPart ? { targetIndexedPart } : {}),
       ...(sampleOperands ? { sampleOperands } : {}),
       ...(guardsFit ? { sampleGuards: guardNames } : {}),
-      ...(guardEntries.length &&
+      ...(guardsFit &&
+      guardEntries.length &&
       guardEntries.reduce((count, entry) => count + entry.names.length, 0) <= 8
         ? { guardEntries }
         : {}),
@@ -402,7 +559,15 @@ export async function vcsExecutionStatements(
       ),
     });
   }
-  return statements;
+  return statements.map((statement) => {
+    const { modport, statementId } = statement;
+    return modport && modportSiteCounts.get(statementId)! > 1
+      ? {
+          ...statement,
+          statementId: digest(JSON.stringify([statementId, modport.owner])),
+        }
+      : statement;
+  });
 }
 type EventKind =
   | "process-trigger"
@@ -411,10 +576,11 @@ type EventKind =
   | "assignment-evaluated"
   | "assignment-committed"
   | "assignment-unobserved"
+  | "assignment-no-target"
   | "assignment-superseded"
   | "signal-value-changed";
 
-type WriteKind = "blocking" | "nonblocking";
+type WriteKind = "blocking" | "nonblocking" | "subroutineCall";
 
 type ExternalStep = {
   statementId: string;
@@ -433,14 +599,18 @@ export interface ExecutionEvent {
   signal?: string;
   targetRange?: [number, number];
   targetPackedRange?: [number, number];
+  attemptedTargetRange?: [number, number];
   value?: string;
   writeKind?: WriteKind;
   timing?: "end-of-slot" | "simulator-commit";
   evaluationOrdinal?: number;
+  valueChangeOrdinal?: number;
   replacementOrdinal?: number;
   externalSteps?: ExternalStep[];
   operandValues?: Record<string, string>;
   guardEntryValues?: Record<string, string>;
+  guardEntryTicks?: Record<string, string>;
+  guardEntryNextOrdinals?: Record<string, number>;
 }
 
 function validExecutionRange(value: unknown): value is [number, number] {
@@ -464,6 +634,43 @@ function rangeWithin(
     (range[0] - layout[0]) * direction >= 0 &&
     (range[1] - range[0]) * direction >= 0 &&
     (layout[1] - range[1]) * direction >= 0
+  );
+}
+
+function isClippedCommit(event: ExecutionEvent) {
+  const {
+    attemptedTargetRange: attempted,
+    targetPackedRange: layout,
+    targetRange: written,
+  } = event;
+  if (
+    event.kind !== "assignment-committed" ||
+    event.timing !== "simulator-commit" ||
+    !validExecutionRange(attempted) ||
+    !layout ||
+    !written ||
+    event.value === undefined
+  )
+    return false;
+  const clamp = (bit: number) =>
+    Math.min(Math.max(bit, Math.min(...layout)), Math.max(...layout));
+  return (
+    (attempted[1] - attempted[0]) * (layout[0] <= layout[1] ? 1 : -1) > 0 &&
+    Math.min(...attempted) <= Math.max(...layout) &&
+    Math.max(...attempted) >= Math.min(...layout) &&
+    attempted.some((bit, index) => bit !== written[index]) &&
+    written.every((bit, index) => bit === clamp(attempted[index]))
+  );
+}
+
+function unobservedWriteMayAffect(
+  range: ExecutionEvent["targetRange"],
+  bit?: number,
+) {
+  return (
+    bit === undefined ||
+    !range ||
+    (bit >= Math.min(...range) && bit <= Math.max(...range))
   );
 }
 
@@ -579,14 +786,89 @@ type ReplaySignal = {
   truncated: boolean;
 };
 
-const replayIndex = new Map<
-  string,
-  {
-    fingerprint: string;
-    header: ExecutionHeader;
-    checkpoints: ReplayCheckpoint[];
+interface ReplayIndexEntry {
+  fingerprint: string;
+  header: ExecutionHeader;
+  checkpoints: ReplayCheckpoint[];
+}
+
+const replayIndex = new Map<string, ReplayIndexEntry>();
+
+async function loadReplayIndex(
+  key: string,
+  fingerprint: string,
+  size: bigint,
+  targets: readonly ExecutionSignal[],
+): Promise<ReplayIndexEntry | undefined> {
+  const saved = (await readReplayCache(key)) as
+    | (Omit<ReplayIndexEntry, "checkpoints"> & {
+        checkpoints: (Omit<ReplayCheckpoint, "tick"> & { tick: string })[];
+      })
+    | undefined;
+  if (
+    saved?.fingerprint !== fingerprint ||
+    !isHeader(saved.header) ||
+    !Array.isArray(saved.checkpoints) ||
+    saved.checkpoints.length > 128
+  )
+    return;
+  const checkpoints: ReplayCheckpoint[] = [];
+  for (const checkpoint of saved.checkpoints) {
+    const previous = checkpoints.at(-1);
+    if (
+      !checkpoint ||
+      typeof checkpoint.tick !== "string" ||
+      !tickPattern.test(checkpoint.tick) ||
+      !Number.isSafeInteger(checkpoint.offset) ||
+      checkpoint.offset <= (previous?.offset ?? 0) ||
+      BigInt(checkpoint.offset) > size ||
+      !Number.isSafeInteger(checkpoint.ordinal) ||
+      checkpoint.ordinal <= (previous?.ordinal ?? -1) ||
+      typeof checkpoint.contiguous !== "boolean" ||
+      !Array.isArray(checkpoint.signals) ||
+      checkpoint.signals.length !== targets.length
+    )
+      return;
+    const tick = BigInt(checkpoint.tick);
+    if (previous && tick < previous.tick) return;
+    if (
+      !checkpoint.signals.every((signal, index) => {
+        if (
+          !signal ||
+          !Array.isArray(signal.unexpectedWriters) ||
+          !signal.unexpectedWriters.every(
+            (writer) => typeof writer === "string",
+          ) ||
+          (signal.lastUnobservedOrdinal !== undefined &&
+            (!Number.isSafeInteger(signal.lastUnobservedOrdinal) ||
+              signal.lastUnobservedOrdinal < 0 ||
+              signal.lastUnobservedOrdinal > checkpoint.ordinal))
+        )
+          return false;
+        const commit = signal.latestCommit;
+        return (
+          !commit ||
+          (isExecutionEvent(commit) &&
+            commit.kind === "assignment-committed" &&
+            commit.ordinal <= checkpoint.ordinal &&
+            BigInt(commit.tick) <= tick &&
+            commit.instance === targets[index].instance &&
+            commit.signal === targets[index].signal)
+        );
+      })
+    )
+      return;
+    checkpoints.push({ ...checkpoint, tick });
   }
->();
+  return { fingerprint, header: saved.header, checkpoints };
+}
+
+function rememberReplayIndex(key: string, entry: ReplayIndexEntry) {
+  replayIndex.delete(key);
+  replayIndex.set(key, entry);
+  if (replayIndex.size > 16)
+    replayIndex.delete(replayIndex.keys().next().value!);
+}
 
 const eventKinds = new Set<EventKind>([
   "process-trigger",
@@ -595,6 +877,7 @@ const eventKinds = new Set<EventKind>([
   "assignment-evaluated",
   "assignment-committed",
   "assignment-unobserved",
+  "assignment-no-target",
   "assignment-superseded",
   "signal-value-changed",
 ]);
@@ -709,7 +992,8 @@ function finishesEvaluation(event: ExecutionEvent) {
   return (
     event.kind === "assignment-committed" ||
     event.kind === "assignment-superseded" ||
-    event.kind === "assignment-unobserved"
+    event.kind === "assignment-unobserved" ||
+    event.kind === "assignment-no-target"
   );
 }
 
@@ -761,6 +1045,20 @@ export function isExecutionEvent(value: unknown): value is ExecutionEvent {
       !rangeWithin(event.targetRange, event.targetPackedRange))
   )
     return false;
+  if (event.attemptedTargetRange !== undefined && !isClippedCommit(event))
+    return false;
+  if (
+    event.valueChangeOrdinal !== undefined &&
+    (event.kind !== "assignment-committed" ||
+      event.timing !== "simulator-commit" ||
+      event.writeKind !== "blocking" ||
+      typeof event.value !== "string" ||
+      !Number.isSafeInteger(event.valueChangeOrdinal) ||
+      !Number.isSafeInteger(event.evaluationOrdinal) ||
+      event.valueChangeOrdinal <= event.evaluationOrdinal! ||
+      event.valueChangeOrdinal >= event.ordinal)
+  )
+    return false;
   for (const [field, values] of [
     ["operands", event.operandValues],
     ["guards", event.guardEntryValues],
@@ -781,9 +1079,54 @@ export function isExecutionEvent(value: unknown): value is ExecutionEvent {
         ([name, bits]) =>
           /^[A-Za-z_][\w$]{0,63}$/.test(name) &&
           (field !== "guards" ||
-            /^g[1-9]\d*_[1-9]\d*f?_[A-Za-z_][\w$]*$/.test(name)) &&
+            /^(?:g[1-9]\d*_[1-9]\d*f?|c[1-9]\d*_[1-9]\d*d?|[wp][1-9]\d*_[1-9]\d*)_[A-Za-z_][\w$]*$/.test(
+              name,
+            )) &&
           typeof bits === "string" &&
           /^[01xz]{1,4096}$/i.test(bits),
+      )
+    )
+      return false;
+  }
+  if (event.guardEntryTicks !== undefined) {
+    if (
+      !event.guardEntryValues ||
+      !event.guardEntryTicks ||
+      typeof event.guardEntryTicks !== "object" ||
+      Array.isArray(event.guardEntryTicks)
+    )
+      return false;
+    const entries = Object.entries(event.guardEntryTicks);
+    if (
+      entries.length !== Object.keys(event.guardEntryValues).length ||
+      !entries.every(
+        ([name, tick]) =>
+          Object.hasOwn(event.guardEntryValues!, name) &&
+          typeof tick === "string" &&
+          tickPattern.test(tick) &&
+          BigInt(tick) <= BigInt(event.tick),
+      )
+    )
+      return false;
+  }
+  if (event.guardEntryNextOrdinals !== undefined) {
+    const marks = event.guardEntryNextOrdinals;
+    if (
+      !event.guardEntryTicks ||
+      !marks ||
+      typeof marks !== "object" ||
+      Array.isArray(marks)
+    )
+      return false;
+    const entries = Object.entries(marks);
+    if (
+      entries.length !== Object.keys(event.guardEntryTicks).length ||
+      !entries.every(
+        ([key, next]) =>
+          Object.hasOwn(event.guardEntryTicks!, key) &&
+          Number.isSafeInteger(next) &&
+          next >= 0 &&
+          next <= event.ordinal,
       )
     )
       return false;
@@ -845,12 +1188,20 @@ export function isExecutionEvent(value: unknown): value is ExecutionEvent {
         event.externalSteps.every(isExternalStep))) &&
     (event.writeKind === undefined ||
       event.writeKind === "blocking" ||
-      event.writeKind === "nonblocking") &&
+      event.writeKind === "nonblocking" ||
+      event.writeKind === "subroutineCall") &&
+    (event.writeKind !== "subroutineCall" ||
+      ((event.kind === "assignment-evaluated" ||
+        event.kind === "assignment-committed" ||
+        event.kind === "assignment-unobserved") &&
+        event.timing === undefined &&
+        event.targetRange === undefined)) &&
     (event.timing === undefined ||
       (event.kind === "assignment-committed" &&
         (event.timing === "end-of-slot" ||
           (event.timing === "simulator-commit" &&
-            event.writeKind === "nonblocking")))) &&
+            (event.writeKind === "nonblocking" ||
+              event.writeKind === "blocking"))))) &&
     (event.kind === "assignment-superseded"
       ? event.writeKind === "nonblocking" &&
         event.value === undefined &&
@@ -859,7 +1210,13 @@ export function isExecutionEvent(value: unknown): value is ExecutionEvent {
         event.replacementOrdinal! < event.ordinal
       : event.replacementOrdinal === undefined) &&
     (event.kind !== "assignment-unobserved" ||
-      ((event.writeKind === "blocking" || event.writeKind === "nonblocking") &&
+      ((event.writeKind === "blocking" ||
+        event.writeKind === "nonblocking" ||
+        event.writeKind === "subroutineCall") &&
+        event.value === undefined)) &&
+    (event.kind !== "assignment-no-target" ||
+      ((event.writeKind === "nonblocking" || event.writeKind === "blocking") &&
+        event.targetRange === undefined &&
         event.value === undefined)) &&
     (!finishesEvaluation(event) ||
       (Number.isSafeInteger(event.evaluationOrdinal) &&
@@ -998,7 +1355,17 @@ export function reconcileRecordedWordHistory(
   const history = callbackSamples.filter(
     ({ tick }) => BigInt(tick) >= BigInt(start),
   );
-  const normalizedInitial = normalizeBits(observation.initial?.value, width);
+  const firstWaveformSample = observation.history[0];
+  const seed =
+    !observation.initial &&
+    firstWaveformSample?.tick === start &&
+    history[0]?.tick !== start
+      ? firstWaveformSample
+      : undefined;
+  const normalizedInitial = normalizeBits(
+    observation.initial?.value ?? seed?.value,
+    width,
+  );
   if (
     (initial && initial.value !== normalizedInitial) ||
     (!initial && observation.initial && recording.start !== start)
@@ -1062,10 +1429,120 @@ export function reconcileRecordedWordHistory(
     ]),
   );
   return {
-    history: history.map(({ tick, value }) => ({ tick, value })),
+    history: [
+      ...(seed ? [seed] : []),
+      ...history.map(({ tick, value }) => ({ tick, value })),
+    ],
     changes,
     restoredTicks,
+    initialValue: normalizedInitial,
   };
+}
+
+function applyWholeCommit(
+  { targetRange, value }: ExecutionEvent,
+  width: number,
+  layout?: readonly [number, number],
+  previous?: string,
+) {
+  if (!targetRange) return normalizeBits(value, width);
+  if (!layout || !previous || !value || !rangeWithin(targetRange, layout))
+    return;
+  const offset = Math.abs(targetRange[0] - layout[0]);
+  return (
+    previous.slice(0, offset) +
+    value.toLowerCase() +
+    previous.slice(offset + value.length)
+  );
+}
+
+function committedHistoryMatches(
+  observation: Awaited<
+    ReturnType<typeof readTraceObservations>
+  >["observations"][number],
+  recording: Awaited<ReturnType<typeof readExecutionEvidence>>,
+  refined: NonNullable<ReturnType<typeof reconcileRecordedWordHistory>>,
+) {
+  const outcomes = recording.events.filter(
+    ({ tick, kind }) =>
+      refined.restoredTicks.has(tick) &&
+      (kind === "assignment-committed" || kind === "assignment-unobserved"),
+  );
+  if (!outcomes.some(({ kind }) => kind === "assignment-committed"))
+    return true;
+  if (!recording.coverage || !hasWriteEventCoverage(recording.coverage))
+    return false;
+  const sampled = new Map<string, string | undefined>();
+  let previous = refined.initialValue;
+  for (const { tick, value } of refined.history) {
+    if (!sampled.has(tick)) sampled.set(tick, previous);
+    previous = normalizeBits(value, observation.width);
+  }
+  const mixedTicks = new Set(
+    outcomes
+      .filter(({ kind }) => kind === "assignment-unobserved")
+      .map(({ tick }) => tick),
+  );
+  const callbacks = new Map(
+    recording.events
+      .filter(({ kind }) => kind === "signal-value-changed")
+      .map((event) => [event.ordinal, event]),
+  );
+  const anchored = new Set<number>();
+  const observed = new Map<string, string[]>();
+  for (const event of outcomes) {
+    const mixed = mixedTicks.has(event.tick);
+    if (mixed && event.kind === "assignment-unobserved") continue;
+    if (mixed || event.valueChangeOrdinal !== undefined) {
+      const changes = refined.changes.get(event.tick) ?? [];
+      const callback = callbacks.get(event.valueChangeOrdinal!);
+      const index = callback
+        ? changes.findIndex(({ ordinal }) => ordinal === callback.ordinal)
+        : -1;
+      if (
+        index < 0 ||
+        !callback ||
+        anchored.has(callback.ordinal) ||
+        !callbackCommitMatches(
+          event,
+          callback,
+          changes[index - 1]?.value ?? sampled.get(event.tick),
+          observation.range,
+        )
+      )
+        return false;
+      anchored.add(callback.ordinal);
+      if (mixed) continue;
+    }
+    if (
+      event.kind !== "assignment-committed" ||
+      (event.writeKind === "nonblocking" && event.timing !== "simulator-commit")
+    )
+      return false;
+    const prior = sampled.get(event.tick);
+    if (prior === undefined) return false;
+    const value = applyWholeCommit(
+      event,
+      observation.width,
+      observation.range,
+      prior,
+    );
+    if (value === undefined) return false;
+    sampled.set(event.tick, value);
+    if (value === prior) continue;
+    const values = observed.get(event.tick) ?? [];
+    values.push(value);
+    observed.set(event.tick, values);
+  }
+  return [...new Set(outcomes.map(({ tick }) => tick))].every((tick) => {
+    if (mixedTicks.has(tick)) return true;
+    const reconstructed = observed.get(tick) ?? [];
+    const recorded = refined.changes.get(tick) ?? [];
+    return (
+      reconstructed.length === recorded.length &&
+      recorded.every(({ value }, index) => value === reconstructed[index])
+    );
+  });
 }
 
 export function restoreRecordedSignalHistory(
@@ -1098,14 +1575,7 @@ export function restoreRecordedSignalHistory(
       evidence.historyEnd,
     );
     if (!refined) return item;
-    // Commit replay owns slots with a recorded commit for this signal.
-    if (
-      recording.events.some(
-        ({ tick, kind }) =>
-          kind === "assignment-committed" && refined.restoredTicks.has(tick),
-      )
-    )
-      return item;
+    if (!committedHistoryMatches(whole, recording, refined)) return item;
     function withHistory(
       observation: typeof item,
       history: typeof refined.history,
@@ -1552,7 +2022,15 @@ export async function readExecutionEvidenceBatch(
   const upper = BigInt(end);
   const fingerprint = hashFingerprint(info);
   const indexKey = JSON.stringify([source, targets]);
-  const stored = replayIndex.get(indexKey);
+  const remembered = replayIndex.get(indexKey);
+  const stored =
+    remembered?.fingerprint === fingerprint
+      ? remembered
+      : lower > 0n && info.size >= 256n * 1024n
+        ? await loadReplayIndex(indexKey, fingerprint, info.size, targets)
+        : undefined;
+  if (stored) rememberReplayIndex(indexKey, stored);
+  operation?.throwIfAborted();
   const checkpoint =
     stored?.fingerprint === fingerprint
       ? stored.checkpoints.findLast((entry) => entry.tick < lower)
@@ -1755,6 +2233,10 @@ export async function readExecutionEvidenceBatch(
           throw Error("Too many pending execution evaluations for one signal.");
       } else if (finishesEvaluation(data)) {
         const evaluation = evaluations.get(data.evaluationOrdinal!);
+        const expectedRange = data.attemptedTargetRange ?? data.targetRange;
+        const expectedValue = data.attemptedTargetRange
+          ? evaluation?.value?.slice(-data.value!.length)
+          : evaluation?.value;
         if (data.kind === "assignment-superseded") {
           const replacement = evaluations.get(data.replacementOrdinal!);
           if (
@@ -1774,12 +2256,17 @@ export async function readExecutionEvidenceBatch(
             evaluation.processId !== data.processId ||
             evaluation.signal !== data.signal ||
             evaluation.writeKind !== data.writeKind ||
-            evaluation.targetRange?.[0] !== data.targetRange?.[0] ||
-            evaluation.targetRange?.[1] !== data.targetRange?.[1] ||
-            (data.writeKind === "blocking" && evaluation.tick !== data.tick) ||
+            evaluation.targetRange?.[0] !== expectedRange?.[0] ||
+            evaluation.targetRange?.[1] !== expectedRange?.[1] ||
+            (data.attemptedTargetRange !== undefined &&
+              (expectedValue === undefined || evaluation.tick !== data.tick)) ||
+            ((data.writeKind === "blocking" ||
+              data.writeKind === "subroutineCall" ||
+              data.kind === "assignment-no-target") &&
+              evaluation.tick !== data.tick) ||
             (data.value !== undefined &&
-              evaluation.value !== undefined &&
-              data.value.toLowerCase() !== evaluation.value.toLowerCase()))
+              expectedValue !== undefined &&
+              data.value.toLowerCase() !== expectedValue.toLowerCase()))
         ) {
           throw Error("Execution outcome does not match its evaluation.");
         }
@@ -1823,15 +2310,21 @@ export async function readExecutionEvidenceBatch(
       ),
     );
     for (const entry of checkpoints) merged.set(entry.offset, entry);
-    replayIndex.set(indexKey, {
+    const entry = {
       fingerprint,
       header,
       checkpoints: [...merged.values()]
         .sort((a, b) => a.offset - b.offset)
         .slice(-128),
+    };
+    rememberReplayIndex(indexKey, entry);
+    await writeReplayCache(indexKey, {
+      ...entry,
+      checkpoints: entry.checkpoints.map((item) => ({
+        ...item,
+        tick: item.tick.toString(),
+      })),
     });
-    if (replayIndex.size > 16)
-      replayIndex.delete(replayIndex.keys().next().value!);
   }
   const sourceIdentities = new Map<string, Promise<SourceIdentity>>();
   operation?.throwIfAborted();
@@ -1979,11 +2472,17 @@ export function executionEventLines(events: readonly ResolvedEvent[]) {
         (site ? " · " + clean(event.statementId) : "") +
         (event.writeKind ? " · " + event.writeKind : "") +
         (event.targetRange ? " · Target " + event.targetRange.join(":") : "") +
+        (event.attemptedTargetRange
+          ? " · Attempted target " + event.attemptedTargetRange.join(":")
+          : "") +
         (event.timing ? " · " + event.timing : "") +
         (event.value === undefined ? "" : " · " + event.value) +
         (event.evaluationOrdinal === undefined
           ? ""
           : " · Evaluation " + event.evaluationOrdinal) +
+        (event.valueChangeOrdinal === undefined
+          ? ""
+          : " · Value-change callback " + event.valueChangeOrdinal) +
         (event.replacementOrdinal === undefined
           ? ""
           : " · Replacement " + event.replacementOrdinal) +
@@ -2122,6 +2621,10 @@ export function linkExecutionAssignments(
   );
   const latest = evidence.cursor?.latestCommit;
   if (latest) events.set(latest.ordinal, latest);
+  const claimedCallbacks = new Map<number, number>();
+  for (const { valueChangeOrdinal: callback } of events.values())
+    if (callback !== undefined)
+      claimedCallbacks.set(callback, (claimedCallbacks.get(callback) ?? 0) + 1);
   const links = [];
   for (const event of events.values()) {
     const source = event.source;
@@ -2133,17 +2636,41 @@ export function linkExecutionAssignments(
       (event.kind !== "assignment-evaluated" && !finishesEvaluation(event))
     )
       continue;
+    if (event.valueChangeOrdinal !== undefined) {
+      const callback = events.get(event.valueChangeOrdinal);
+      if (
+        !callback ||
+        claimedCallbacks.get(callback.ordinal) !== 1 ||
+        !matchesCommitCallback(event, callback)
+      )
+        continue;
+    }
     const key = JSON.stringify([source.file, source.line, source.column]);
+    const targetRange = event.attemptedTargetRange ?? event.targetRange;
     const matches = assignments.get(key)?.filter((id) => {
       const assignment = trace.assignments[id];
+      if (
+        assignment.hierarchicalTargets?.[0]?.interfaceComponent &&
+        source.sha256 &&
+        event.processId &&
+        assignment.instance &&
+        assignment.process &&
+        event.processId !==
+          modportProcessId(
+            assignment.instance,
+            source.sha256,
+            assignment.process.range.start,
+          )
+      )
+        return false;
       return (
         (!event.writeKind || assignment.kind === event.writeKind) &&
-        (!event.targetRange ||
+        (!targetRange ||
           (assignment.targetIndex !== undefined &&
-            Math.abs(event.targetRange[0] - event.targetRange[1]) + 1 ===
+            Math.abs(targetRange[0] - targetRange[1]) + 1 ===
               (assignment.targetIndexedPart?.width ?? 1)) ||
-          (assignment.targetRange?.[0] === event.targetRange[0] &&
-            assignment.targetRange?.[1] === event.targetRange[1]))
+          (assignment.targetRange?.[0] === targetRange[0] &&
+            assignment.targetRange?.[1] === targetRange[1]))
       );
     });
     if (matches?.length === 1)
@@ -2189,6 +2716,11 @@ export function correlateExecutionTransitions(
   options: { compareCursor?: boolean; bit?: number; word?: boolean } = {},
 ) {
   let observation = evidence.observations.find(({ signal }) => signal === root);
+  const wholeObservation = observation?.projected
+    ? evidence.wholeRoot?.signal === root
+      ? evidence.wholeRoot
+      : undefined
+    : observation;
   const bit = options.bit ?? observation?.bit;
   if (observation?.status === "unavailable") observation = undefined;
   if (observation && bit !== undefined && !observation.projected) {
@@ -2221,15 +2753,21 @@ export function correlateExecutionTransitions(
     string,
     Array<{ id: number; orderAtTick?: number; value?: string }>
   >();
+  const initialNodes = new Map<string, { id: number; value?: string }>();
   for (const [id, point] of temporal.nodes.entries()) {
     if (point.signal !== root || point.bit !== bit || point.sampleOnly)
       continue;
+    if (point.initialSample) {
+      initialNodes.set(point.tick, { id, value: point.value });
+      continue;
+    }
     const nodes = nodesByTick.get(point.tick) ?? [];
     if (!point.executionOnly)
       nodes.push({ id, orderAtTick: point.orderAtTick, value: point.value });
     nodesByTick.set(point.tick, nodes);
   }
   const ticks = new Set(nodesByTick.keys());
+  for (const tick of initialNodes.keys()) ticks.add(tick);
   if (options.compareCursor !== false) ticks.add(evidence.tick);
   const assignmentsByOrdinal = new Map(
     assignments.map(({ ordinal, assignment }) => [ordinal, assignment]),
@@ -2240,10 +2778,7 @@ export function correlateExecutionTransitions(
       .filter(
         ({ kind, targetRange }) =>
           kind === "assignment-unobserved" &&
-          (bit === undefined ||
-            !targetRange ||
-            (bit >= Math.min(...targetRange) &&
-              bit <= Math.max(...targetRange))),
+          unobservedWriteMayAffect(targetRange, bit),
       )
       .map(({ tick }) => tick),
   );
@@ -2254,15 +2789,28 @@ export function correlateExecutionTransitions(
     const commits = execution.events.filter(
       (event) => event.tick === tick && event.kind === "assignment-committed",
     );
-    const callbacks = commits.length
-      ? []
-      : execution.events.filter(
+    const anchoredCommits = commits.filter(
+      ({ valueChangeOrdinal }) => valueChangeOrdinal !== undefined,
+    );
+    const useCallbacks =
+      commits.length === 0 ||
+      (!options.word &&
+        unobservedTicks.has(tick) &&
+        commits.some(
           (event) =>
-            event.tick === tick && event.kind === "signal-value-changed",
-        );
+            event.writeKind === "blocking" &&
+            event.timing === "simulator-commit",
+        ));
     const observationCoverage = execution.observationCoverage;
+    const callbacks =
+      useCallbacks || anchoredCommits.length || observationCoverage
+        ? execution.events.filter(
+            (event) =>
+              event.tick === tick && event.kind === "signal-value-changed",
+          )
+        : [];
     const callbackMode =
-      callbacks.length > 0 || (!commits.length && !!observationCoverage);
+      useCallbacks && (callbacks.length > 0 || !!observationCoverage);
     const sampled =
       tick === evidence.tick ? observation?.cursorSamples : undefined;
     const prior = sampled
@@ -2301,6 +2849,116 @@ export function correlateExecutionTransitions(
       commitOrdinals: commits.map(({ ordinal }) => ordinal),
     };
     const coverage = execution.coverage.declared;
+    const startup = initialNodes.get(tick);
+    if (
+      startup &&
+      tick === "0" &&
+      !nodes.length &&
+      !prior &&
+      observation &&
+      !(sampled ? sampled.truncated : observation.historyTruncated) &&
+      samples.length &&
+      observed !== undefined &&
+      startup.value === observed &&
+      samples.every(({ value }) => normalizeBits(value, width) === observed) &&
+      execution.waveformMatch === "verified" &&
+      !execution.truncated &&
+      execution.start === "0" &&
+      coverage?.start === "0" &&
+      commitWindowVerified &&
+      !unobservedTicks.has(tick)
+    ) {
+      const startupCallbacks = execution.events.filter(
+        (event) => event.tick === tick && event.kind === "signal-value-changed",
+      );
+      const matchedStartupAssignment = (commit: ResolvedEvent) => {
+        const assignment = assignmentsByOrdinal.get(commit.ordinal);
+        if (
+          assignment === undefined ||
+          commit.valueChangeOrdinal !== undefined ||
+          (commit.writeKind !== "blocking" &&
+            !(
+              commit.writeKind === "nonblocking" &&
+              commit.timing === "simulator-commit"
+            )) ||
+          commit.evaluationOrdinal === undefined ||
+          assignmentsByOrdinal.get(commit.evaluationOrdinal) !== assignment ||
+          !execution.events.some(
+            (event) =>
+              event.kind === "assignment-evaluated" &&
+              event.tick === tick &&
+              event.ordinal === commit.evaluationOrdinal &&
+              event.ordinal < commit.ordinal,
+          )
+        )
+          return;
+        return assignment;
+      };
+      const orderedStartupCallbacks =
+        observationCoverage?.start === "0" &&
+        observationCoverage.gaps.every((gap) => gap === "outsideCoverage");
+      const commit =
+        commits.length === 1 &&
+        startupCallbacks.every(
+          (event) => committedSelectionValue(event, observation) === observed,
+        )
+          ? commits[0]
+          : bit !== undefined &&
+              observation.projected &&
+              orderedStartupCallbacks
+            ? startupBitCommit(
+                commits,
+                startupCallbacks,
+                observation,
+                bit,
+                observed,
+              )
+            : undefined;
+      const assignment = commit && matchedStartupAssignment(commit);
+      if (
+        commit &&
+        assignment !== undefined &&
+        committedSelectionValue(commit, observation) === observed
+      ) {
+        comparisons.push({
+          ...base,
+          status: "initialSampleMatched" as const,
+          links: [{ node: startup.id, ordinal: commit.ordinal, assignment }],
+        });
+        continue;
+      }
+      const layout = observation.range;
+      if (
+        orderedStartupCallbacks &&
+        !observation.projected &&
+        layout &&
+        width === Math.abs(layout[0] - layout[1]) + 1 &&
+        commits.some(({ targetRange }) => targetRange !== undefined)
+      ) {
+        const bitLinks = Array.from(observed).flatMap((value, offset) => {
+          const bit = layout[0] + offset * (layout[0] <= layout[1] ? 1 : -1);
+          const commit = startupBitCommit(
+            commits,
+            startupCallbacks,
+            { range: layout, bit, projected: true, width: 1 },
+            bit,
+            value,
+          );
+          const assignment = commit && matchedStartupAssignment(commit);
+          return commit && assignment !== undefined
+            ? [{ offset, ordinal: commit.ordinal, assignment }]
+            : [];
+        });
+        if (bitLinks.length) {
+          comparisons.push({
+            ...base,
+            status: "initialPackedSampleMatched" as const,
+            startupPacked: { node: startup.id, layout, bitLinks },
+          });
+          continue;
+        }
+      }
+    }
     const callbackOrdinals = callbacks.map(({ ordinal }) => ordinal);
     const completeCallbacks = observationCoverage
       ? BigInt(tick) >= BigInt(observationCoverage.start) &&
@@ -2345,24 +3003,23 @@ export function correlateExecutionTransitions(
       previous: string | undefined,
     ) => {
       if (event.targetRange) {
-        if (!event.value || !previous || !observation.range) return undefined;
-        const [first, last] = event.targetRange;
-        const value = event.value.toLowerCase();
         if (observation.projected) {
-          if (bit === undefined) return undefined;
-          const projected = sliceTraceBits(value, event.targetRange, bit, bit);
+          if (
+            bit === undefined ||
+            !event.value ||
+            !previous ||
+            !observation.range
+          )
+            return undefined;
+          const projected = sliceTraceBits(
+            event.value.toLowerCase(),
+            event.targetRange,
+            bit,
+            bit,
+          );
           return projected ?? previous;
         }
-        if (
-          sliceTraceBits(previous, observation.range, first, last) === undefined
-        )
-          return undefined;
-        const offset = Math.abs(first - observation.range[0]);
-        return (
-          previous.slice(0, offset) +
-          value +
-          previous.slice(offset + value.length)
-        );
+        return applyWholeCommit(event, width, observation.range, previous);
       }
       if (!observation.projected)
         return normalizeBits(event.value, observation.width);
@@ -2379,15 +3036,21 @@ export function correlateExecutionTransitions(
         )
       );
     };
-    let previous = initial;
-    const changes = [];
-    let unknownValue = previous === undefined;
-    for (const event of callbackMode ? callbacks : commits) {
-      const value = recordedValue(event, previous);
-      if (value === undefined) unknownValue = true;
-      if (value !== previous) changes.push({ event, value });
-      previous = value;
+    function changesFrom(events: readonly ResolvedEvent[]) {
+      let previous = initial;
+      const changes = [];
+      let unknownValue = previous === undefined;
+      for (const event of events) {
+        const value = recordedValue(event, previous);
+        if (value === undefined) unknownValue = true;
+        if (value !== previous) changes.push({ event, value });
+        previous = value;
+      }
+      return { changes, unknownValue };
     }
+    const { changes, unknownValue } = changesFrom(
+      callbackMode ? callbacks : commits,
+    );
     if (partialWord) {
       const wordCallbacks = execution.events.filter(
         (event) => event.tick === tick && event.kind === "signal-value-changed",
@@ -2431,12 +3094,8 @@ export function correlateExecutionTransitions(
         };
         const excluded = Array.from(observed).flatMap((_, offset) => {
           const index = layout[0] + offset * (layout[0] <= layout[1] ? 1 : -1);
-          return touched.some(
-            ({ targetRange }) =>
-              !targetRange ||
-              !rangeWithin(targetRange, layout) ||
-              (index >= Math.min(...targetRange) &&
-                index <= Math.max(...targetRange)),
+          return touched.some(({ targetRange }) =>
+            unobservedWriteMayAffect(targetRange, index),
           ) ||
             sequenceAt(commitValues, offset) !==
               sequenceAt(observedValues, offset)
@@ -2478,11 +3137,49 @@ export function correlateExecutionTransitions(
               : [];
           })
         : [];
+    const callbackPrior = anchoredCommits.length
+      ? (wholeObservation?.history.findLast(
+          (event) => BigInt(event.tick) < BigInt(tick),
+        ) ?? wholeObservation?.initial)
+      : undefined;
+    const observedCommits =
+      anchoredCommits.length && completeCallbacks
+        ? verifiedObservedCommits(
+            anchoredCommits,
+            callbacks,
+            wholeObservation?.range,
+            callbackPrior?.value,
+          )
+        : new Map<number, ResolvedEvent>();
+    const unverifiedCommitCallbacks = new Set(
+      anchoredCommits.flatMap((event) =>
+        observedCommits.get(event.valueChangeOrdinal!) === event
+          ? []
+          : [event.ordinal],
+      ),
+    );
     if (callbackMode) {
+      const links =
+        matchedNodes.length &&
+        observedCommits.size &&
+        commitWindowVerified &&
+        coverage &&
+        BigInt(tick) >= BigInt(coverage.start)
+          ? matchObservedCommits(
+              observedCommits,
+              matchedNodes,
+              execution.events,
+              assignmentsByOrdinal,
+            )
+          : [];
       comparisons.push({
         ...base,
         callbackOrdinals,
         ...(matchedNodes.length ? { callbackLinks: matchedNodes } : {}),
+        ...(links.length ? { links } : {}),
+        ...(unverifiedCommitCallbacks.size
+          ? { unverifiedCommitCallbacks: [...unverifiedCommitCallbacks] }
+          : {}),
         recordedChangeValues: values,
         status: unknownValue
           ? ("incomplete" as const)
@@ -2499,6 +3196,9 @@ export function correlateExecutionTransitions(
         ...base,
         status: "sequenceDiffers" as const,
         recordedChangeValues: values,
+        ...(unverifiedCommitCallbacks.size
+          ? { unverifiedCommitCallbacks: [...unverifiedCommitCallbacks] }
+          : {}),
       });
     } else if (
       commits.some(
@@ -2509,14 +3209,60 @@ export function correlateExecutionTransitions(
     ) {
       comparisons.push({ ...base, status: "approximateCommitTiming" as const });
     } else {
+      const callbackSequence = completeCallbacks
+        ? changesFrom(callbacks)
+        : undefined;
+      const matchingCallbacks =
+        callbackSequence &&
+        !callbackSequence.unknownValue &&
+        callbackSequence.changes.length === waveformValues.length &&
+        callbackSequence.changes.every(
+          ({ value }, index) => value === waveformValues[index],
+        )
+          ? callbackSequence.changes
+          : undefined;
+      const commitEvents = new Map(
+        commits.map((event) => [event.ordinal, event]),
+      );
+      const callbackLinks = matchingCallbacks
+        ? nodes.flatMap((node) => {
+            const callback = matchingCallbacks[(node.orderAtTick ?? 1) - 1];
+            return callback &&
+              normalizeBits(node.value, width) === callback.value
+              ? [{ node: node.id, ordinal: callback.event.ordinal }]
+              : [];
+          })
+        : [];
+      const links = matchedNodes.flatMap(({ node, ordinal }) => {
+        const commit = commitEvents.get(ordinal)!;
+        if (commit.valueChangeOrdinal !== undefined) {
+          const order = temporal.nodes[node].orderAtTick ?? 1;
+          const callback = matchingCallbacks?.[order - 1]?.event;
+          const evaluatedAssignment = assignmentsByOrdinal.get(
+            commit.evaluationOrdinal!,
+          );
+          if (!callback || observedCommits.get(callback.ordinal) !== commit) {
+            unverifiedCommitCallbacks.add(ordinal);
+            return [];
+          }
+          if (
+            evaluatedAssignment === undefined ||
+            evaluatedAssignment !== assignmentsByOrdinal.get(ordinal)
+          )
+            return [];
+        }
+        return [
+          { node, ordinal, assignment: assignmentsByOrdinal.get(ordinal) },
+        ];
+      });
       comparisons.push({
         ...base,
         status: "matched" as const,
-        links: matchedNodes.map(({ node, ordinal }) => ({
-          node,
-          ordinal,
-          assignment: assignmentsByOrdinal.get(ordinal),
-        })),
+        links,
+        ...(callbackLinks.length ? { callbackOrdinals, callbackLinks } : {}),
+        ...(unverifiedCommitCallbacks.size
+          ? { unverifiedCommitCallbacks: [...unverifiedCommitCallbacks] }
+          : {}),
       });
     }
   }
@@ -2527,12 +3273,23 @@ export function annotateRecordedValueChanges(
   temporal: ReturnType<typeof buildTemporalTrace>,
   comparisons: readonly ExecutionTransitionComparison[],
 ) {
-  for (const { callbackLinks, restoredFromCallbacks } of comparisons) {
+  for (const { callbackLinks, links, restoredFromCallbacks } of comparisons) {
+    if (restoredFromCallbacks)
+      for (const { node } of links ?? [])
+        temporal.nodes[node].restoredFromCallbacks = true;
     for (const { node, ordinal } of callbackLinks ?? []) {
       temporal.nodes[node].valueChangeOrdinal = ordinal;
       if (restoredFromCallbacks)
         temporal.nodes[node].restoredFromCallbacks = true;
     }
+  }
+  for (const edge of temporal.edges) {
+    if (
+      edge.waitResumeCause === "orderedCallbacks" &&
+      edge.waitResumeCallbackOrdinal !== undefined
+    )
+      temporal.nodes[edge.source].valueChangeOrdinal ??=
+        edge.waitResumeCallbackOrdinal;
   }
   for (const edge of temporal.edges) {
     if (edge.timing !== "sameTickUnordered") continue;
@@ -2561,6 +3318,16 @@ export function preserveDumpedTransitionEvidence(
   return dumped.map((comparison) => {
     const restored = byTick.get(comparison.tick);
     if (
+      comparison.status === "sequenceDiffers" &&
+      restored?.status === "matched"
+    )
+      return {
+        ...restored,
+        waveformValues: comparison.waveformValues,
+        recordedChangeValues: restored.waveformValues,
+        restoredFromCallbacks: true,
+      };
+    if (
       comparison.status !== "valueChangesDiffer" ||
       restored?.status !== "valueChangesMatch" ||
       !restored.callbackLinks?.length
@@ -2570,6 +3337,7 @@ export function preserveDumpedTransitionEvidence(
       ...comparison,
       restoredFromCallbacks: true,
       callbackLinks: restored.callbackLinks,
+      ...(restored.links?.length ? { links: restored.links } : {}),
     };
   });
 }
@@ -2630,6 +3398,109 @@ function modportWriteValue(
     return value;
 }
 
+function callbackCommitMatches(
+  commit: ResolvedEvent,
+  callback: ResolvedEvent,
+  prior?: string,
+  layout?: readonly [number, number],
+) {
+  const value = callback.value?.toLowerCase();
+  const previous = prior?.toLowerCase();
+  const packed = commit.targetPackedRange;
+  if (
+    !matchesCommitCallback(commit, callback) ||
+    !value ||
+    !previous ||
+    previous === value ||
+    previous.length !== value.length ||
+    (packed && (!layout || packed[0] !== layout[0] || packed[1] !== layout[1]))
+  )
+    return false;
+  if (!commit.targetRange) return true;
+  return (
+    layout &&
+    value.length === Math.abs(layout[0] - layout[1]) + 1 &&
+    modportWriteValue(previous, value, layout, commit.targetRange) !== undefined
+  );
+}
+
+function matchesCommitCallback(commit: ResolvedEvent, callback: ResolvedEvent) {
+  if (
+    callback.kind !== "signal-value-changed" ||
+    commit.instance !== callback.instance ||
+    commit.signal !== callback.signal ||
+    commit.tick !== callback.tick ||
+    commit.valueChangeOrdinal !== callback.ordinal ||
+    callback.ordinal <= (commit.evaluationOrdinal ?? Infinity) ||
+    callback.ordinal >= commit.ordinal ||
+    !callback.value ||
+    !commit.value
+  )
+    return false;
+  const value = callback.value.toLowerCase();
+  const range = commit.targetRange;
+  const layout = commit.targetPackedRange;
+  const written = range
+    ? layout && value.length === Math.abs(layout[0] - layout[1]) + 1
+      ? sliceTraceBits(value, layout, ...range)
+      : undefined
+    : value;
+  return written === commit.value.toLowerCase();
+}
+
+function verifiedObservedCommits(
+  commits: readonly ResolvedEvent[],
+  callbacks: readonly ResolvedEvent[],
+  layout?: readonly [number, number],
+  initial?: string,
+) {
+  const anchored = new Map<number, ResolvedEvent | null>();
+  for (const commit of commits) {
+    const callback = commit.valueChangeOrdinal;
+    if (callback !== undefined)
+      anchored.set(callback, anchored.has(callback) ? null : commit);
+  }
+  const confirmed = new Map<number, ResolvedEvent>();
+  for (const [index, callback] of callbacks.entries()) {
+    const commit = anchored.get(callback.ordinal);
+    if (
+      commit &&
+      callbackCommitMatches(
+        commit,
+        callback,
+        callbacks[index - 1]?.value ?? initial,
+        layout,
+      )
+    )
+      confirmed.set(callback.ordinal, commit);
+  }
+  return confirmed;
+}
+
+function matchObservedCommits(
+  commits: ReadonlyMap<number, ResolvedEvent>,
+  nodes: readonly { node: number; ordinal: number }[],
+  events: readonly ResolvedEvent[],
+  assignments: ReadonlyMap<number, number>,
+) {
+  const byOrdinal = new Map(events.map((event) => [event.ordinal, event]));
+  return nodes.flatMap(({ node, ordinal }) => {
+    const commit = commits.get(ordinal);
+    if (!commit) return [];
+    const assignment = assignments.get(commit.ordinal);
+    const evaluationOrdinal = commit.evaluationOrdinal;
+    const evaluation = byOrdinal.get(evaluationOrdinal!);
+    if (
+      assignment === undefined ||
+      assignments.get(evaluationOrdinal!) !== assignment ||
+      evaluation?.kind !== "assignment-evaluated" ||
+      evaluation.tick !== commit.tick
+    )
+      return [];
+    return [{ node, ordinal: commit.ordinal, assignment }];
+  });
+}
+
 export function matchRecordedModportComponents(
   trace: VideTrace,
   evidence: Awaited<ReturnType<typeof readTraceObservations>>,
@@ -2642,14 +3513,21 @@ export function matchRecordedModportComponents(
   dirtySources: ReadonlySet<string>,
 ) {
   const matches = new Map<string, RecordedModportComponent>();
+  const overlapping = new Set<number>();
+  for (const { overlappingModportWrite, targets } of trace.assignments)
+    if (overlappingModportWrite && targets.length === 1)
+      overlapping.add(targets[0]);
+  if (!overlapping.size) return matches;
+
   const components = new Map<number, number[]>();
-  trace.assignments.forEach(({ overlappingModportWrite, targets }, id) => {
-    if (!overlappingModportWrite || targets.length !== 1) return;
-    const entries = components.get(targets[0]) ?? [];
-    entries.push(id);
-    components.set(targets[0], entries);
+  trace.assignments.forEach(({ targets }, id) => {
+    for (const target of targets) {
+      if (!overlapping.has(target)) continue;
+      const entries = components.get(target) ?? [];
+      entries.push(id);
+      components.set(target, entries);
+    }
   });
-  if (!components.size) return matches;
 
   const observations = new Map(
     evidence.observations.map((item) => [item.signal, item]),
@@ -2683,9 +3561,21 @@ export function matchRecordedModportComponents(
     }
     return evaluations.get(id)!;
   }
-  function windowSeed(id: number) {
-    if (recordings.get(id)?.start === evidence.historyStart)
-      return observations.get(id)?.initial?.value;
+  function windowSeed(id: number, firstCallbackTick?: string) {
+    if (recordings.get(id)?.start !== evidence.historyStart) return;
+    const observation = observations.get(id);
+    if (
+      observation?.initial &&
+      (firstCallbackTick === undefined ||
+        BigInt(observation.initial.tick) < BigInt(firstCallbackTick))
+    )
+      return observation.initial.value;
+    if (firstCallbackTick === undefined || observation?.historyTruncated)
+      return;
+    // A dump can contain its initial sample exactly at the window boundary.
+    return observation?.history?.findLast(
+      ({ tick }) => BigInt(tick) < BigInt(firstCallbackTick),
+    )?.value;
   }
   function changes(id: number) {
     if (callbacks.has(id)) return callbacks.get(id);
@@ -2735,7 +3625,7 @@ export function matchRecordedModportComponents(
     const candidates = new Map<number, number[]>();
     for (const { event, index } of callbacks) {
       const previous = (
-        targetChanges[index - 1]?.value ?? windowSeed(id)
+        targetChanges[index - 1]?.value ?? windowSeed(id, event.tick)
       )?.toLowerCase();
       const current = event.value?.toLowerCase();
       if (previous?.length !== target.width || current?.length !== target.width)
@@ -2781,7 +3671,8 @@ export function matchRecordedModportComponents(
         targetChanges?.findIndex((event) => event.ordinal === ordinal) ?? -1;
       if (!targetChanges || index < 0) continue;
       const previous = (
-        targetChanges[index - 1]?.value ?? windowSeed(point.signal)
+        targetChanges[index - 1]?.value ??
+        windowSeed(point.signal, targetChanges[index].tick)
       )?.toLowerCase();
       const current = targetChanges[index].value?.toLowerCase();
       if (
@@ -2796,37 +3687,41 @@ export function matchRecordedModportComponents(
       // each component without inferring the simulator's evaluation order.
       const group = candidates;
       if (group.length < 2) continue;
-      const first = trace.assignments[group[0]];
-      const source = first.location.uri;
-      if (
-        !source.startsWith("file:") ||
-        dirtySources.has(fileURLToPath(source))
-      )
-        continue;
-      const site = first.location.range.start;
       if (
         group.some((assignment) => {
           const candidate = trace.assignments[assignment];
-          const [operand] = candidate.inputs;
+          const dataInputs = candidate.inputs.filter(
+            ({ kind }) => kind === "data",
+          );
           const { location } = candidate;
           return (
             candidate.kind !== "blocking" ||
+            !candidate.overlappingModportWrite ||
             candidate.hasUnresolvedOperands ||
-            candidate.instance !== first.instance ||
-            location.uri !== source ||
-            location.range.start.line !== site.line ||
-            location.range.start.character !== site.character ||
+            candidate.targets.length !== 1 ||
+            !location.uri.startsWith("file:") ||
+            dirtySources.has(fileURLToPath(location.uri)) ||
             candidate.hierarchicalTargets?.length !== 1 ||
             !candidate.hierarchicalTargets[0].interfaceComponent ||
-            candidate.inputs.length !== 1 ||
-            operand?.kind !== "data" ||
-            operand.hierarchical ||
+            dataInputs.length !== 1 ||
+            dataInputs[0].hierarchical ||
             candidate.value?.op !== "slice" ||
             !candidate.targetRange
           );
         })
       )
         continue;
+      const first = trace.assignments[group[0]];
+      const site = first.location.range.start;
+      const multipleWriters = group.some((id) => {
+        const assignment = trace.assignments[id];
+        return (
+          assignment.instance !== first.instance ||
+          assignment.location.uri !== first.location.uri ||
+          assignment.location.range.start.line !== site.line ||
+          assignment.location.range.start.character !== site.character
+        );
+      });
       const sourceEvaluations = componentEvaluations(point.signal);
       const measured = new Map(
         group.map((assignment) => [
@@ -2846,6 +3741,7 @@ export function matchRecordedModportComponents(
         BigInt(coverage.checkedThrough) >= BigInt(point.tick) &&
         coverage.gaps.every((gap) => gap === "unobservedCommit") &&
         [...measured.values()].every((events) => events.length > 0);
+      if (multipleWriters && !measuredGroup) continue;
       const paired = measuredGroup
         ? pairedEvaluations(
             point.signal,
@@ -2856,13 +3752,14 @@ export function matchRecordedModportComponents(
             measured,
           ).get(ordinal)
         : undefined;
+      if (multipleWriters && paired === undefined) continue;
       let supported = true;
       const compatible: RecordedModportComponent[] = [];
       for (const assignment of group) {
         const candidate = trace.assignments[assignment];
         const range = candidate.targetRange!;
         if (bit !== undefined && !rangeWithin([bit, bit], range)) continue;
-        const [operand] = candidate.inputs;
+        const operand = candidate.inputs.find(({ kind }) => kind === "data")!;
         const next = modportWriteValue(previous, current, target.range, range);
         if (next === undefined) continue;
         const match = { assignment, ordinal, range };
@@ -2964,6 +3861,10 @@ export function executionTransitionReport(
   if (!comparisons.length) return "";
   const messages = {
     matched: "Recorded commits match the waveform changes.",
+    initialSampleMatched:
+      "A recorded commit supplies the initial waveform sample.",
+    initialPackedSampleMatched:
+      "Recorded commits account for bits in the initial packed sample.",
     partiallyMatched:
       "Recorded commits match the unaffected bits at the end of this time slot.",
     incomplete:
@@ -2992,9 +3893,11 @@ export function executionTransitionReport(
         commitOrdinals,
         callbackOrdinals,
         callbackLinks,
+        unverifiedCommitCallbacks,
         restoredFromCallbacks,
         recordedChangeValues,
         links,
+        startupPacked,
       }) => [
         "- Tick " + tick + " · " + messages[status],
         ...(restoredFromCallbacks
@@ -3017,6 +3920,12 @@ export function executionTransitionReport(
                 callbackOrdinals.join(", "),
             ]
           : []),
+        ...(unverifiedCommitCallbacks?.length
+          ? [
+              "  - Commit callbacks could not be verified · " +
+                unverifiedCommitCallbacks.join(", "),
+            ]
+          : []),
         ...(callbackLinks ?? []).map(
           ({ node, ordinal }) =>
             "  - Time graph node " +
@@ -3034,6 +3943,15 @@ export function executionTransitionReport(
               ? ""
               : " · RTL assignment " + (assignment + 1)),
         ),
+        ...(startupPacked
+          ? [
+              "  - Verified bits · " +
+                startupPacked.bitLinks.length +
+                " / " +
+                (Math.abs(startupPacked.layout[0] - startupPacked.layout[1]) +
+                  1),
+            ]
+          : []),
       ],
     ),
     "",
@@ -3073,6 +3991,46 @@ export function recordedWriters(
     unobserved.set(event.tick, pending);
   }
   for (const comparison of comparisons) {
+    const startup = comparison.startupPacked;
+    if (startup) {
+      const { node, layout, bitLinks } = startup;
+      const byCommit = new Map<
+        number,
+        { assignment: number; offsets: number[] }
+      >();
+      const unmatched = new Set(
+        Array.from(
+          { length: Math.abs(layout[0] - layout[1]) + 1 },
+          (_, offset) => offset,
+        ),
+      );
+      for (const { offset, ordinal, assignment } of bitLinks) {
+        const group = byCommit.get(ordinal) ?? { assignment, offsets: [] };
+        group.offsets.push(offset);
+        byCommit.set(ordinal, group);
+        unmatched.delete(offset);
+      }
+      const wordWriters = [...byCommit].map(
+        ([ordinal, { assignment, offsets }]) => {
+          const commit = byOrdinal.get(ordinal)!;
+          return {
+            ...recordedWriter(
+              assignment,
+              ordinal,
+              commit,
+              byOrdinal.get(commit.evaluationOrdinal!),
+              dirtySources,
+            ),
+            contributingRanges: packedOffsetRanges(layout, offsets),
+          };
+        },
+      );
+      writers.set(temporalTransitionKey(temporal.nodes[node]), {
+        wordWriters,
+        unresolved: packedOffsetRanges(layout, unmatched),
+      });
+      continue;
+    }
     const snapshot = comparison.wordSnapshot;
     const links = snapshot
       ? [
@@ -3128,18 +4086,8 @@ export function recordedWriters(
           );
         };
         const direction = layout[0] <= layout[1] ? 1 : -1;
-        const ranges = (selected: Iterable<number>) => {
-          const result: [number, number][] = [];
-          for (const offset of [...selected].sort(
-            (left, right) => left - right,
-          )) {
-            const bit = layout[0] + offset * direction;
-            const previous = result.at(-1);
-            if (previous && bit === previous[1] + direction) previous[1] = bit;
-            else result.push([bit, bit]);
-          }
-          return result;
-        };
+        const ranges = (selected: Iterable<number>) =>
+          packedOffsetRanges(layout, selected);
         for (
           let index = outcomes.length - 1;
           index >= 0 && remaining.size;
@@ -3151,11 +4099,18 @@ export function recordedWriters(
             currentTick = part.tick;
             // Unobserved outcomes can follow commits from the same slot. They
             // hide only the bits those writes could have reached.
-            for (const loss of unobserved.get(currentTick) ?? [])
-              for (const offset of offsets(loss.targetRange)) {
+            const losses = unobserved.get(currentTick) ?? [];
+            for (const offset of remaining) {
+              const bit = layout[0] + offset * direction;
+              if (
+                losses.some(({ targetRange }) =>
+                  unobservedWriteMayAffect(targetRange, bit),
+                )
+              ) {
                 remaining.delete(offset);
                 unresolved.add(offset);
               }
+            }
           }
           if (part.kind !== "assignment-committed") continue;
           const selected = offsets(part.targetRange);
@@ -3217,6 +4172,21 @@ export function recordedWriters(
   return writers;
 }
 
+function packedOffsetRanges(
+  layout: readonly [number, number],
+  offsets: Iterable<number>,
+) {
+  const direction = layout[0] <= layout[1] ? 1 : -1;
+  const ranges: [number, number][] = [];
+  for (const offset of [...offsets].sort((left, right) => left - right)) {
+    const bit = layout[0] + offset * direction;
+    const previous = ranges.at(-1);
+    if (previous && bit === previous[1] + direction) previous[1] = bit;
+    else ranges.push([bit, bit]);
+  }
+  return ranges;
+}
+
 function recordedWriter(
   assignment: number,
   ordinal: number,
@@ -3236,6 +4206,9 @@ function recordedWriter(
     assignment,
     commitOrdinal: ordinal,
     ...(commit?.targetRange ? { targetRange: commit.targetRange } : {}),
+    ...(commit?.attemptedTargetRange
+      ? { attemptedTargetRange: commit.attemptedTargetRange }
+      : {}),
     ...(evaluation
       ? {
           evaluation: {
@@ -3249,6 +4222,12 @@ function recordedWriter(
               : {}),
             ...(evaluation.guardEntryValues
               ? { guardEntryValues: evaluation.guardEntryValues }
+              : {}),
+            ...(evaluation.guardEntryTicks
+              ? { guardEntryTicks: evaluation.guardEntryTicks }
+              : {}),
+            ...(evaluation.guardEntryNextOrdinals
+              ? { guardEntryNextOrdinals: evaluation.guardEntryNextOrdinals }
               : {}),
             ...(externalSteps ? { externalSteps } : {}),
           },
@@ -3266,6 +4245,68 @@ export function hasWriteEventCoverage(
   );
 }
 
+function startupBitCommit(
+  commits: readonly ResolvedEvent[],
+  callbacks: readonly ResolvedEvent[],
+  observation: Parameters<typeof committedSelectionValue>[1],
+  bit: number,
+  observed: string,
+) {
+  const samples = callbacks.map((event) => ({
+    ordinal: event.ordinal,
+    value: committedSelectionValue(event, observation),
+  }));
+  if (samples.some(({ value }) => value === undefined)) return;
+  const previous = samples.findLastIndex(({ value }) => value !== observed);
+  const before = samples[previous];
+  const after = samples[previous + 1];
+  if (!before || !after) return;
+  const writes = commits.filter(({ targetRange }) =>
+    unobservedWriteMayAffect(targetRange, bit),
+  );
+  const prior = writes.findLast(({ ordinal }) => ordinal < before.ordinal);
+  if (prior && committedSelectionValue(prior, observation) !== before.value)
+    return;
+  let source: ResolvedEvent | undefined;
+  for (const write of writes) {
+    if (write.ordinal <= before.ordinal) continue;
+    // Blocking writes execute at their recorded probe. Later same-value writes
+    // do not explain the transition between the simulator's two callbacks.
+    if (write.writeKind !== "blocking") return;
+    const value = committedSelectionValue(write, observation);
+    if (value === observed) source ??= write;
+    else if (source || value !== before.value || write.ordinal >= after.ordinal)
+      return;
+  }
+  if (source && source.ordinal < after.ordinal) return source;
+}
+
+function committedSelectionValue(
+  commit: ResolvedEvent,
+  root: Pick<
+    Awaited<ReturnType<typeof readTraceObservations>>["observations"][number],
+    "bit" | "range" | "projected" | "width"
+  >,
+) {
+  const target = commit.targetRange;
+  const layout = root.range;
+  if (root.projected) {
+    if (root.bit === undefined || !layout) return;
+    const range = target ?? layout;
+    if (!rangeWithin(range, layout)) return;
+    const bits = normalizeBits(commit.value, Math.abs(range[0] - range[1]) + 1);
+    return bits && sliceTraceBits(bits, range, root.bit, root.bit);
+  }
+  if (
+    target &&
+    (layout
+      ? target[0] !== layout[0] || target[1] !== layout[1]
+      : root.width !== 1 || target[0] !== target[1])
+  )
+    return;
+  return normalizeBits(commit.value, root.width);
+}
+
 export function recordedCursorWrite(
   trace: VideTrace,
   evidence: Awaited<ReturnType<typeof readTraceObservations>>,
@@ -3280,6 +4321,7 @@ export function recordedCursorWrite(
     recording.truncated ||
     commit?.kind !== "assignment-committed" ||
     (commit.writeKind !== "blocking" &&
+      commit.writeKind !== "subroutineCall" &&
       !(
         commit.writeKind === "nonblocking" &&
         commit.timing === "simulator-commit"
@@ -3308,25 +4350,7 @@ export function recordedCursorWrite(
   )
     return;
 
-  const target = commit.targetRange;
-  const layout = root.range;
-  let value: string | undefined;
-  if (root.projected) {
-    if (root.bit === undefined || !layout) return;
-    const range = target ?? layout;
-    if (!rangeWithin(range, layout)) return;
-    const bits = normalizeBits(commit.value, Math.abs(range[0] - range[1]) + 1);
-    value = bits && sliceTraceBits(bits, range, root.bit, root.bit);
-  } else {
-    if (
-      target &&
-      (layout
-        ? target[0] !== layout[0] || target[1] !== layout[1]
-        : root.width !== 1 || target[0] !== target[1])
-    )
-      return;
-    value = normalizeBits(commit.value, root.width);
-  }
+  const value = committedSelectionValue(commit, root);
   if (value === undefined || root.value !== value) return;
 
   const assignment = links.find(
@@ -3438,7 +4462,18 @@ export function recordedOperandHistory(
       );
       if (
         !commit ||
-        BigInt(commit.tick) >= time ||
+        BigInt(commit.tick) > time ||
+        // An earlier blocking probe confirms store order in the startup slot.
+        // A callback alone or multiple writes cannot establish it here.
+        (commit.tick === tick &&
+          (tick !== "0" ||
+            commit.writeKind !== "blocking" ||
+            commits.some(
+              (other) =>
+                other !== commit &&
+                other.tick === tick &&
+                partValue(other) !== undefined,
+            ))) ||
         BigInt(commit.tick) < BigInt(declared.start) ||
         partValue(commit) !== captured
       )
@@ -3449,10 +4484,7 @@ export function recordedOperandHistory(
         possibleLosses.some(
           (loss) =>
             BigInt(loss.tick) >= BigInt(commit.tick) &&
-            (index === undefined ||
-              !loss.targetRange ||
-              (index >= Math.min(...loss.targetRange) &&
-                index <= Math.max(...loss.targetRange))),
+            unobservedWriteMayAffect(loss.targetRange, index),
         )
       )
         return;
@@ -3515,7 +4547,16 @@ export function executionMermaidPages(evidence: {
 }) {
   const graph = createMermaidFlowchart();
   const processSteps = new Map<string, ExecutionEvent>();
-  const visible = new Set(evidence.events.map(({ ordinal }) => ordinal));
+  const visible = new Map(
+    evidence.events.map((event) => [event.ordinal, event]),
+  );
+  const repeatedCallbacks = new Set<number>();
+  const claimedCallbacks = new Set<number>();
+  for (const { valueChangeOrdinal: callback } of evidence.events) {
+    if (callback === undefined) continue;
+    if (claimedCallbacks.has(callback)) repeatedCallbacks.add(callback);
+    claimedCallbacks.add(callback);
+  }
   let lastCommit: number | undefined;
   for (const event of evidence.events) {
     const label = [
@@ -3524,6 +4565,8 @@ export function executionMermaidPages(evidence: {
       event.kind,
       event.timing,
       event.targetRange && "[" + event.targetRange.join(":") + "]",
+      event.attemptedTargetRange &&
+        "attempted [" + event.attemptedTargetRange.join(":") + "]",
       event.signal && event.instance + "." + event.signal,
       event.kind !== "signal-value-changed" ? event.statementId : undefined,
       event.statementSite &&
@@ -3609,7 +4652,9 @@ export function executionMermaidPages(evidence: {
         node,
         event.kind === "assignment-unobserved"
           ? "outcome unobserved"
-          : undefined,
+          : event.kind === "assignment-no-target"
+            ? "no writable target bits"
+            : undefined,
       );
     }
     if (
@@ -3617,6 +4662,13 @@ export function executionMermaidPages(evidence: {
       visible.has(event.replacementOrdinal)
     )
       graph.edge("e" + event.replacementOrdinal, node, "supersedes", true);
+    const observed = visible.get(event.valueChangeOrdinal!);
+    if (
+      observed &&
+      !repeatedCallbacks.has(observed.ordinal) &&
+      matchesCommitCallback(event, observed)
+    )
+      graph.edge("e" + observed.ordinal, node, "observed commit", true);
     if (!finishesEvaluation(event)) processSteps.set(process, event);
     if (event.kind === "assignment-committed") {
       if (lastCommit !== undefined)

@@ -9,7 +9,11 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
   codeOnly,
+  vcsCaseEntry,
+  vcsStandaloneWait,
   vcsGuardEntry,
+  vcsWaitEntry,
+  vcsWaitOperands,
   vscOperandExpression,
 } from "../dist/rtl-selection.js";
 import {
@@ -160,7 +164,7 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
       if (
         sampleOperands !== undefined &&
         (!vcsNba ||
-          kind !== "nonblocking" ||
+          (kind !== "nonblocking" && kind !== "blocking") ||
           targetIndex !== undefined ||
           !Array.isArray(sampleOperands) ||
           !sampleOperands.length ||
@@ -172,13 +176,15 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
           ))
       )
         throw Error(
-          "VCS operand capture requires up to eight distinct local operands on a fixed NBA.",
+          "VCS operand capture requires up to eight distinct local operands on a fixed assignment.",
         );
       if (
         sampleGuards !== undefined &&
         (!vcsNba ||
-          kind !== "nonblocking" ||
-          targetIndex !== undefined ||
+          !(
+            (kind === "nonblocking" && targetIndex === undefined) ||
+            kind === "blocking"
+          ) ||
           !Array.isArray(sampleGuards) ||
           !sampleGuards.length ||
           new Set(sampleGuards).size !== sampleGuards.length ||
@@ -189,11 +195,11 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
           ))
       )
         throw Error(
-          "VCS guard capture requires up to eight distinct local operands on a fixed-target or array word NBA.",
+          "VCS guard capture requires up to eight distinct local operands on a supported assignment.",
         );
       if (
         guardEntries !== undefined &&
-        (!arrayElement ||
+        (kind !== "nonblocking" ||
           !sampleGuards ||
           !Array.isArray(guardEntries) ||
           !guardEntries.length ||
@@ -204,6 +210,14 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
               !entry.names.length ||
               (entry.takenWhenTrue !== undefined &&
                 typeof entry.takenWhenTrue !== "boolean") ||
+              (entry.caseBody !== undefined &&
+                (typeof entry.caseBody?.defaultBranch !== "boolean" ||
+                  entry.takenWhenTrue !== undefined ||
+                  entry.names.length !== 1)) ||
+              (entry.wait !== undefined &&
+                ((entry.wait !== true && entry.wait !== "standalone") ||
+                  entry.caseBody !== undefined ||
+                  entry.takenWhenTrue !== undefined)) ||
               new Set(entry.names).size !== entry.names.length ||
               entry.names.some((name) => !sampleGuards.includes(name)),
           ) ||
@@ -240,15 +254,16 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
       if (
         targetIndex !== undefined &&
         (!vcsNba ||
-          kind !== "nonblocking" ||
+          (kind !== "nonblocking" && kind !== "blocking") ||
           targetRange !== undefined ||
           typeof targetIndex !== "string" ||
           !identifier.test(targetIndex))
       )
-        throw Error("Dynamic packed targets require a simple VCS NBA index.");
+        throw Error("Dynamic packed targets require a simple VCS index.");
       if (
         targetIndexedPart !== undefined &&
-        (!targetIndex ||
+        (kind !== "nonblocking" ||
+          !targetIndex ||
           !targetIndexedPart ||
           !Number.isInteger(targetIndexedPart.width) ||
           targetIndexedPart.width < 1 ||
@@ -341,6 +356,7 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
           statementId,
           processId,
           kind,
+          modportWidth: modport.width,
           ...(targetRange ? { targetRange } : {}),
         });
         continue;
@@ -548,11 +564,20 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
         )
       )
         throw Error(
-          "Select a dynamic or array word NBA with a side-effect-free RHS.",
+          "Select a dynamic or array word assignment with a side-effect-free RHS.",
         );
       const sample = "wave_probe_" + site.slice(0, 16);
       if (lexical.includes(sample))
         throw Error("Probe variable already exists in " + filename);
+      const { bareCaptures, entryValues, standaloneWait } = vcsGuardCaptures(
+        guardEntries,
+        text,
+        lexical,
+        lineStarts,
+        start,
+        guardLocals,
+        filename,
+      );
       if (arraySelector !== undefined) {
         const existing = arrayWrites.get(start);
         const write = existing ?? {
@@ -576,55 +601,22 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
               ":" +
               source.line,
           );
-        const entryValues = [];
-        for (const entry of guardEntries ?? []) {
-          const first = offset(lineStarts, entry.first);
-          const last = offset(lineStarts, entry.last);
-          const takenWhenTrue = entry.takenWhenTrue !== false;
-          const branch = vcsGuardEntry(
-            lexical,
-            first,
-            last,
-            start,
-            takenWhenTrue,
-          );
-          if (!branch)
-            throw Error("VCS guard entry differs from its source map.");
-          const { at, bare } = branch;
-          const captures = new Map(
-            entry.names.map((name, index) => [
-              name,
-              "wave_guard_" + first + (takenWhenTrue ? "_" : "_else_") + index,
-            ]),
-          );
-          if (bare) write.guardLocals ??= new Map();
-          const previous = bare ? write.guardLocals : guardLocals.get(at);
+        if (bareCaptures.size) {
           if (
-            previous?.size &&
-            JSON.stringify([...previous]) !== JSON.stringify([...captures])
+            write.guardLocals &&
+            JSON.stringify([...write.guardLocals]) !==
+              JSON.stringify([...bareCaptures])
           )
             throw Error("Conflicting VCS guard entry operands.");
-          if (!previous?.size) {
-            if ([...captures.values()].some((local) => lexical.includes(local)))
-              throw Error(
-                "Guard capture variable already exists in " + filename,
-              );
-            if (bare) write.guardLocals = captures;
-            else guardLocals.set(at, captures);
-          }
-          for (const [name, local] of captures) {
-            const key =
-              "g" +
-              entry.first.line +
-              "_" +
-              entry.first.column +
-              (takenWhenTrue ? "_" : "f_") +
-              name;
-            if (key.length > 64)
-              throw Error("Guard entry capture name is too long.");
-            entryValues.push([key, local]);
-          }
+          write.guardLocals = bareCaptures;
         }
+        if (
+          existing &&
+          JSON.stringify(write.standaloneWait) !==
+            JSON.stringify(standaloneWait)
+        )
+          throw Error("Conflicting standalone wait mapping.");
+        write.standaloneWait = standaloneWait;
         write.variants.push({
           word,
           site,
@@ -645,7 +637,7 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
           !expression.names.every((name) => sampleOperands.includes(name))
         )
           throw Error(
-            "Operand capture requires a bitwise expression that reads each listed local once.",
+            "Operand capture requires a supported expression that reads each listed local once.",
           );
         for (const [index, name] of expression.names.entries())
           operandLocals.set(name, sample + "_operand_" + index);
@@ -656,6 +648,23 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
       for (const name of sampleGuards ?? [])
         if (!operandLocals.has(name))
           operandLocals.set(name, sample + "_operand_" + operandLocals.size);
+      const operandArguments = operandLocals.size
+        ? ", $sformatf(" +
+          JSON.stringify(
+            [...operandLocals.keys()].map((name) => name + "=%b").join(","),
+          ) +
+          ", " +
+          [...operandLocals.values()].join(", ") +
+          ")"
+        : "";
+      const sampledBlockingEvaluation =
+        "wave_workbench_probe::wave_workbench_blocking_evaluate_sampled(" +
+        JSON.stringify(site) +
+        ', $sformatf("%b", ' +
+        sample +
+        ")" +
+        operandArguments +
+        ");";
       const probe = (value, committed) =>
         "wave_workbench_probe::wave_workbench_write(" +
         JSON.stringify(site) +
@@ -668,6 +677,24 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
       const savedTarget = savedIndex
         ? signal + "[" + savedIndex + indexedSuffix + "]"
         : left;
+      const indexedBlocking = kind === "blocking" && !!savedIndex;
+      const indexedProbe = (value, committed) =>
+        "wave_workbench_probe::wave_workbench_blocking_write_index(" +
+        JSON.stringify(site) +
+        ', $sformatf("%b", ' +
+        value +
+        ")" +
+        ', $sformatf("%0d", ' +
+        savedIndex +
+        ")" +
+        ", $low(" +
+        signal +
+        "), $high(" +
+        signal +
+        "), " +
+        committed +
+        (committed || !operandLocals.size ? ', ""' : operandArguments) +
+        ");";
       let write = savedTarget + " " + token + " " + sample + ";";
       let nbaToken;
       if (kind === "nonblocking" && vcsNba) {
@@ -689,6 +716,7 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
       }
       const replacement = [
         "begin",
+        ...vcsGuardDeclarations(bareCaptures),
         ...(savedIndex
           ? [
               "automatic type(" +
@@ -744,49 +772,58 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
                 " = wave_workbench_probe::" +
                 (savedIndex
                   ? "wave_workbench_nba_evaluate_index"
-                  : operandLocals.size
-                    ? "wave_workbench_nba_evaluate_sampled"
-                    : "wave_workbench_nba_evaluate") +
+                  : entryValues.length
+                    ? "wave_workbench_nba_evaluate_guarded"
+                    : operandLocals.size
+                      ? "wave_workbench_nba_evaluate_sampled"
+                      : "wave_workbench_nba_evaluate") +
                 "(" +
                 JSON.stringify(site) +
                 ', $sformatf("%b", ' +
                 sample +
                 ")" +
                 (savedIndex ? ', $sformatf("%0d", ' + savedIndex + ")" : "") +
-                (operandLocals.size
-                  ? ", $sformatf(" +
-                    JSON.stringify(
-                      [...operandLocals.keys()]
-                        .map((name) => name + "=%b")
-                        .join(","),
-                    ) +
-                    ", " +
-                    [...operandLocals.values()].join(", ") +
-                    ")"
-                  : "") +
+                operandArguments +
+                vcsGuardArguments(entryValues) +
                 ");",
             ]
-          : [probe(sample, 0)]),
+          : [
+              indexedBlocking
+                ? indexedProbe(sample, 0)
+                : operandLocals.size
+                  ? sampledBlockingEvaluation
+                  : probe(sample, 0),
+            ]),
         write,
-        ...(kind === "blocking" ? [probe(left, 1)] : []),
+        ...(kind === "blocking"
+          ? [indexedBlocking ? indexedProbe(savedTarget, 1) : probe(left, 1)]
+          : []),
         "end",
       ].join(vcsNba ? " " : "\n");
-      edits.push({
-        start,
-        end: end + 1,
-        // Preserve subsequent KDB line numbers when the generated path is mapped to the original RTL.
-        replacement:
-          replacement +
-          (vcsNba
-            ? "\n".repeat(
-                text.slice(start, fileRead ? end : op).match(/\n/g)?.length ??
-                  0,
-              )
-            : ""),
-      });
+      edits.push(
+        wrapStandaloneWait(
+          text,
+          {
+            start,
+            end: end + 1,
+            // Preserve subsequent KDB line numbers when the generated path is mapped to the original RTL.
+            replacement:
+              replacement +
+              (vcsNba
+                ? "\n".repeat(
+                    text.slice(start, fileRead ? end : op).match(/\n/g)
+                      ?.length ?? 0,
+                  )
+                : ""),
+          },
+          standaloneWait,
+        ),
+      );
     }
     for (const write of arrayWrites.values())
-      edits.push(vcsArrayNbaEdit(write));
+      edits.push(
+        wrapStandaloneWait(text, vcsArrayNbaEdit(write), write.standaloneWait),
+      );
     for (const [key, group] of file.modports) {
       const start = offset(lineStarts, group.source);
       const operator = offset(lineStarts, group.operator);
@@ -808,6 +845,13 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
       const sample = "wave_probe_" + key.slice(0, 16);
       if (lexical.includes(sample))
         throw Error("Probe variable already exists in " + filename);
+      const covered = new Set();
+      for (const range of group.calls.values())
+        for (let bit = range[1]; bit <= range[0]; bit++) {
+          if (covered.has(bit))
+            throw Error("Overlapping modport RHS probe ranges.");
+          covered.add(bit);
+        }
       const calls = (complete) =>
         [...group.calls].map(
           ([site, range]) =>
@@ -914,9 +958,15 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
     for (const site of sites) {
       if (nbaTags.has(site.site)) site.nbaTag = nbaTags.get(site.site);
     }
+  const hasModports = sites.some(({ owner }) => owner);
   const probeMap =
     JSON.stringify(
-      { statements, sites, ...(vcsNba ? { vcsNba: true } : {}) },
+      {
+        statements,
+        sites,
+        ...(vcsNba ? { vcsNba: true } : {}),
+        ...(hasModports ? { vcsModportCallbacks: true } : {}),
+      },
       null,
       2,
     ) + "\n";
@@ -942,11 +992,13 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
         .join(", ") +
       " }\n"
     : "";
-  const probeOwners = sites.some(({ owner }) => owner)
-    ? "#define WAVE_WORKBENCH_VCS_PROBE_OWNERS { " +
+  const probeOwners = hasModports
+    ? "#define WAVE_WORKBENCH_VCS_MODPORT_CALLBACKS 1\n#define WAVE_WORKBENCH_VCS_PROBE_OWNERS { " +
       sites
         .map(({ owner }) => (owner ? JSON.stringify(owner) : "0"))
         .join(", ") +
+      " }\n#define WAVE_WORKBENCH_VCS_MODPORT_WIDTHS { " +
+      sites.map(({ modportWidth }) => modportWidth ?? 0).join(", ") +
       " }\n"
     : "";
   await Promise.all([
@@ -965,6 +1017,13 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
               '  import "DPI-C" context function longint unsigned wave_workbench_nba_evaluate(input string site, input string value);',
               '  import "DPI-C" context function longint unsigned wave_workbench_nba_evaluate_index(input string site, input string value, input string index_value);',
               ...(sites.some(
+                ({ kind, targetIndex }) => kind === "blocking" && targetIndex,
+              )
+                ? [
+                    '  import "DPI-C" context function void wave_workbench_blocking_write_index(input string site, input string value, input string index_value, input int low_index, input int high_index, input bit committed, input string operands);',
+                  ]
+                : []),
+              ...(sites.some(
                 ({ sampleOperands, sampleGuards }) =>
                   sampleOperands || sampleGuards,
               )
@@ -972,9 +1031,21 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
                     '  import "DPI-C" context function longint unsigned wave_workbench_nba_evaluate_sampled(input string site, input string value, input string operands);',
                   ]
                 : []),
+              ...(sites.some(
+                ({ kind, targetIndex, sampleOperands, sampleGuards }) =>
+                  kind === "blocking" &&
+                  !targetIndex &&
+                  (sampleOperands || sampleGuards),
+              )
+                ? [
+                    '  import "DPI-C" context function void wave_workbench_blocking_evaluate_sampled(input string site, input string value, input string operands);',
+                  ]
+                : []),
               ...(sites.some(({ guardEntries }) => guardEntries)
                 ? [
                     '  import "DPI-C" context function longint unsigned wave_workbench_nba_evaluate_guarded(input string site, input string value, input string operands, input string guards);',
+                    '  import "DPI-C" context function longint unsigned wave_workbench_guard_tick();',
+                    '  import "DPI-C" context function longint unsigned wave_workbench_guard_next_ordinal();',
                   ]
                 : []),
             ]
@@ -1069,36 +1140,173 @@ function groupVcsNbaTags(writes) {
     "_" +
     signal +
     (word === undefined ? "" : "_word_" + encode(word));
-  // A runtime selection or a whole-signal write can intersect any other write.
-  if (writes.some(({ targetRange }) => !targetRange)) return [[prefix, writes]];
-  const ranges = writes
-    .map((write) => ({
-      write,
-      low: Math.min(...write.targetRange),
-      high: Math.max(...write.targetRange),
-    }))
-    .sort((left, right) => left.low - right.low || left.high - right.high);
-  const groups = [];
-  for (const { write, low, high } of ranges) {
-    const group = groups.at(-1);
-    if (!group || low > group.high) groups.push({ low, high, writes: [write] });
-    else {
-      group.high = Math.max(group.high, high);
-      group.writes.push(write);
+  const groups = new Map();
+  // Reuse a tag for identical lvalues. Distinct selections can be observed
+  // independently, even when their evaluated target bits overlap.
+  for (const write of writes) {
+    let tag = prefix;
+    if (write.targetRange) {
+      const low = Math.min(...write.targetRange);
+      const high = Math.max(...write.targetRange);
+      tag += "_" + encode(low) + "_" + encode(high);
+    } else if (write.targetIndex) {
+      const part = write.targetIndexedPart;
+      const selection = [
+        write.targetIndex,
+        part?.width,
+        part?.ascendingIndices,
+      ];
+      tag += "_dynamic_" + digest(JSON.stringify(selection)).slice(0, 16);
     }
+    const group = groups.get(tag) ?? [];
+    group.push(write);
+    groups.set(tag, group);
   }
-  return groups.map(({ low, high, writes }) => [
-    prefix + "_" + encode(low) + "_" + encode(high),
-    writes,
-  ]);
+  return groups;
 }
 
 function vcsGuardDeclarations(captures) {
-  return Array.from(
-    captures ?? [],
+  return [...(captures ?? [])].flatMap(([name, local]) => [
+    "automatic type(" + name + ") " + local + " = " + name + ";",
+    "automatic longint unsigned " +
+      local +
+      "_tick = wave_workbench_probe::wave_workbench_guard_tick();",
+    `automatic longint unsigned ${local}_ordinal = wave_workbench_probe::wave_workbench_guard_next_ordinal();`,
+  ]);
+}
+
+function vcsGuardCaptures(
+  entries,
+  source,
+  lexical,
+  lineStarts,
+  assignment,
+  guardLocals,
+  filename,
+) {
+  const bareCaptures = new Map();
+  const entryValues = [];
+  let standaloneWait;
+  for (const entry of entries ?? []) {
+    const first = offset(lineStarts, entry.first);
+    const last = offset(lineStarts, entry.last);
+    const takenWhenTrue = entry.takenWhenTrue !== false;
+    const arm = entry.caseBody;
+    const waitOperands =
+      entry.wait && vcsWaitOperands(source.slice(first, last));
+    if (
+      entry.wait &&
+      (!waitOperands ||
+        waitOperands.names.length !== entry.names.length ||
+        waitOperands.names.some((name, index) => name !== entry.names[index]))
+    )
+      throw Error("VCS wait operands differ from its source map.");
+    const standalone =
+      entry.wait === "standalone" &&
+      vcsStandaloneWait(lexical, first, last, assignment);
+    const branch =
+      entry.wait === "standalone"
+        ? undefined
+        : entry.wait
+          ? vcsWaitEntry(lexical, first, last, assignment)
+          : arm
+            ? lexical.slice(first, last) === entry.names[0] &&
+              vcsCaseEntry(
+                lexical,
+                first,
+                last,
+                offset(lineStarts, arm.first),
+                offset(lineStarts, arm.last),
+                assignment,
+                source,
+              )
+            : vcsGuardEntry(lexical, first, last, assignment, takenWhenTrue);
+    if (!branch && !standalone)
+      throw Error("VCS guard entry differs from its source map.");
+    const captures = new Map(
+      entry.names.map((name, index) => [
+        name,
+        "wave_guard_" +
+          first +
+          (entry.wait
+            ? "_wait_"
+            : arm
+              ? "_case_"
+              : takenWhenTrue
+                ? "_"
+                : "_else_") +
+          index,
+      ]),
+    );
+    if (standalone) {
+      if (
+        standaloneWait ||
+        [...captures.values()].some((local) => lexical.includes(local))
+      )
+        throw Error("Conflicting standalone wait operands.");
+      standaloneWait = { ...standalone, captures: [...captures] };
+    }
+    const previous = standalone
+      ? undefined
+      : branch.bare
+        ? bareCaptures
+        : guardLocals.get(branch.at);
+    if (
+      previous?.size &&
+      JSON.stringify([...previous]) !== JSON.stringify([...captures])
+    )
+      throw Error("Conflicting VCS guard entry operands.");
+    if (!standalone && !previous?.size) {
+      if ([...captures.values()].some((local) => lexical.includes(local)))
+        throw Error("Guard capture variable already exists in " + filename);
+      if (branch.bare) {
+        for (const [name, local] of captures) bareCaptures.set(name, local);
+      } else guardLocals.set(branch.at, captures);
+    }
+    for (const [name, local] of captures) {
+      const key =
+        (entry.wait ? (waitOperands.compound ? "p" : "w") : arm ? "c" : "g") +
+        entry.first.line +
+        "_" +
+        entry.first.column +
+        (arm ? (arm.defaultBranch ? "d_" : "_") : takenWhenTrue ? "_" : "f_") +
+        name;
+      if (key.length > 64) throw Error("Guard entry capture name is too long.");
+      entryValues.push([key, local]);
+    }
+  }
+  return { bareCaptures, entryValues, standaloneWait };
+}
+
+function wrapStandaloneWait(text, edit, wait) {
+  if (!wait) return edit;
+  const declarations = wait.captures.map(
     ([name, local]) =>
-      "automatic type(" + name + ") " + local + " = " + name + ";",
+      `automatic type(${name}) ${local}; automatic longint unsigned ${local}_tick, ${local}_ordinal;`,
   );
+  const samples = wait.captures.map(
+    ([name, local]) =>
+      `${local} = ${name}; ${local}_tick = wave_workbench_probe::wave_workbench_guard_tick(); ${local}_ordinal = wave_workbench_probe::wave_workbench_guard_next_ordinal();`,
+  );
+  return {
+    start: wait.start,
+    end: edit.end,
+    replacement: `begin ${declarations.join(" ")} ${text.slice(wait.start, wait.semicolon)} begin ${samples.join(" ")} end${text.slice(wait.semicolon + 1, edit.start)}${edit.replacement} end`,
+  };
+}
+
+function vcsGuardArguments(entryValues) {
+  return entryValues.length
+    ? ", $sformatf(" +
+        JSON.stringify(
+          entryValues.map(([key]) => key + "=%b@%0d#%0d").join(","),
+        ) +
+        ", " +
+        entryValues
+          .flatMap(([, local]) => [local, local + "_tick", local + "_ordinal"])
+          .join(", ") +
+        ")"
+    : "";
 }
 
 function vcsArrayNbaEdit({
@@ -1143,13 +1351,6 @@ function vcsArrayNbaEdit({
           sampleGuards.join(", ") +
           ")"
         : "";
-      const guards = entryValues.length
-        ? ", $sformatf(" +
-          JSON.stringify(entryValues.map(([key]) => key + "=%b").join(",")) +
-          ", " +
-          entryValues.map(([, local]) => local).join(", ") +
-          ")"
-        : "";
       return (
         JSON.stringify(word) +
         ": begin automatic longint unsigned " +
@@ -1162,7 +1363,7 @@ function vcsArrayNbaEdit({
         value +
         ")" +
         operands +
-        guards +
+        vcsGuardArguments(entryValues) +
         "); if (" +
         ordinal +
         " != 0) { " +
@@ -1184,6 +1385,120 @@ function vcsArrayNbaEdit({
   return { start, end, replacement: replacement + "\n".repeat(precedingLines) };
 }
 
+async function generateVcsPli(configFile, output) {
+  const config = JSON.parse(await readFile(configFile, "utf8"));
+  if (
+    !Array.isArray(config.calls) ||
+    !config.calls.length ||
+    config.calls.length > 128
+  )
+    throw Error("Supply an array of VCS PLI call sites.");
+  const base = path.dirname(path.resolve(configFile));
+  async function source(location) {
+    const file = path.resolve(base, location.file);
+    const bytes = await readFile(file);
+    const lines = bytes.toString("utf8").split(/\r?\n/);
+    const { line, column } = location;
+    if (
+      !Number.isInteger(line) ||
+      line < 1 ||
+      line > lines.length ||
+      !Number.isInteger(column) ||
+      column < 1 ||
+      column > lines[line - 1].length
+    )
+      throw Error("Invalid PLI source location in " + file);
+    return {
+      file,
+      line,
+      column,
+      sha256: digest(bytes),
+      text: lines[line - 1].slice(column - 1),
+    };
+  }
+  const statements = Object.create(null);
+  for (const [id, location] of Object.entries(config.steps ?? {})) {
+    if (!/^[\w.-]{1,128}$/.test(id)) throw Error("Invalid PLI step ID.");
+    const { text, ...position } = await source(location);
+    statements[id] = position;
+  }
+  const sites = [];
+  const seen = new Set();
+  for (const {
+    site,
+    instance,
+    signal,
+    call,
+    location,
+    compiledFile,
+    compiledLine,
+  } of config.calls) {
+    if (
+      !/^[\w.-]{1,128}$/.test(site) ||
+      !instancePath.test(instance ?? "") ||
+      !identifier.test(signal ?? "") ||
+      !/^\$[A-Za-z_][\w$]*$/.test(call ?? "")
+    )
+      throw Error("Invalid VCS PLI call or target.");
+    const { text, ...position } = await source(location);
+    if (text.match(/^\$[A-Za-z_][\w$]*/)?.[0] !== call)
+      throw Error("Point the PLI probe at the original RTL call.");
+    const file = compiledFile ?? position.file;
+    const line = compiledLine ?? position.line;
+    const key = JSON.stringify([site, instance, file, line]);
+    if (
+      typeof file !== "string" ||
+      !file ||
+      /[\x00-\x1f]/.test(file) ||
+      !Number.isSafeInteger(line) ||
+      line < 1 ||
+      line > 2147483647 ||
+      seen.has(key)
+    )
+      throw Error("Invalid or ambiguous compiled PLI call location.");
+    seen.add(key);
+    const statementId = digest(JSON.stringify([instance, signal, position]));
+    const processId = digest(JSON.stringify([instance, position, call]));
+    if (Object.hasOwn(statements, statementId))
+      throw Error("Duplicate PLI statement ID.");
+    statements[statementId] = position;
+    sites.push({
+      site,
+      instance,
+      signal,
+      statementId,
+      processId,
+      kind: "subroutineCall",
+      file,
+      line,
+    });
+  }
+  const probeMap = JSON.stringify({ statements, sites }, null, 2) + "\n";
+  const cLiteral = (value) => JSON.stringify(value);
+  const header = [
+    "#define WAVE_WORKBENCH_PROBES_SHA256 " + cLiteral(digest(probeMap)),
+    "#define WAVE_WORKBENCH_VCS_PLI_SITES { " +
+      sites
+        .map(({ file, line }) => "{ " + cLiteral(file) + ", " + line + " }")
+        .join(", ") +
+      " }",
+    ...sites.map(
+      ({ site, instance, signal, statementId, processId, kind }) =>
+        "{ " +
+        [site, instance, signal, statementId, processId, kind]
+          .map(cLiteral)
+          .join(", ") +
+        " },",
+    ),
+    "",
+  ].join("\n");
+  await mkdir(output);
+  await Promise.all([
+    writeFile(path.join(output, "execution-probes.json"), probeMap),
+    writeFile(path.join(output, "wave_workbench_probes.h"), header),
+  ]);
+}
+
 function validateCoverage(coverage, sites) {
   if (
     !Array.isArray(coverage) ||
@@ -1193,7 +1508,8 @@ function validateCoverage(coverage, sites) {
     throw Error("Supply an array of execution coverage entries.");
   const targets = new Map();
   for (const site of sites) {
-    if (!["blocking", "nonblocking"].includes(site.kind)) continue;
+    if (!["blocking", "nonblocking", "subroutineCall"].includes(site.kind))
+      continue;
     const target = site.instance + "\0" + site.signal;
     const writers = targets.get(target) ?? new Set();
     writers.add(site.processId);
@@ -1358,6 +1674,8 @@ if (command === "generate" && [2, 3].includes(args.length))
   await generate(...args);
 else if (command === "generate-vcs-nba" && [2, 3].includes(args.length))
   await generate(args[0], args[1], args[2], true);
+else if (command === "generate-vcs-pli" && args.length === 2)
+  await generateVcsPli(...args);
 else if (command === "scheduler" && args.length === 3)
   await instrumentScheduler(...args);
 else if (command === "seal" && [5, 6].includes(args.length))
@@ -1378,5 +1696,5 @@ else if (command === "seal-vpi" && [3, 4, 5].includes(args.length))
   await sealVpi(...args);
 else
   throw Error(
-    "Usage: verilator-execution.mjs generate MAPS_JSON NEW_OUTPUT_DIRECTORY [EXTERNAL_JSON], generate-vcs-nba MAPS_JSON NEW_OUTPUT_DIRECTORY [EXTERNAL_JSON], scheduler PROBES_JSON MODEL_DIRECTORY NEW_MODEL_DIRECTORY, seal PROBES_JSON WAVEFORM SCALE RAW_JSONL NEW_OUTPUT_JSONL [COVERAGE_JSON], or seal-vpi WAVEFORM RAW_JSONL NEW_OUTPUT_JSONL [PROBES_JSON [COVERAGE_JSON] [--task-transfers TASK_PROBES_JSON]]",
+    "Usage: verilator-execution.mjs generate MAPS_JSON NEW_OUTPUT_DIRECTORY [EXTERNAL_JSON], generate-vcs-nba MAPS_JSON NEW_OUTPUT_DIRECTORY [EXTERNAL_JSON], generate-vcs-pli CALLS_JSON NEW_OUTPUT_DIRECTORY, scheduler PROBES_JSON MODEL_DIRECTORY NEW_MODEL_DIRECTORY, seal PROBES_JSON WAVEFORM SCALE RAW_JSONL NEW_OUTPUT_JSONL [COVERAGE_JSON], or seal-vpi WAVEFORM RAW_JSONL NEW_OUTPUT_JSONL [PROBES_JSON [COVERAGE_JSON] [--task-transfers TASK_PROBES_JSON]]",
   );

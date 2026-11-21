@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{csp}} 'unsafe-inline'; script-src 'nonce-{{nonce}}'; font-src {{csp}}; connect-src {{csp}}; worker-src blob:">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="{{editorCss}}">
+  <link rel="stylesheet" href="{{css}}">
+  <title>Tcl 控制台</title>
+</head>
+<body data-worker="{{worker}}">
+  <header>
+    <label for="session">波形会话</label>
+    <select id="session" disabled></select>
+    <input id="filter" type="search" aria-label="筛选输出" placeholder="筛选输出">
+    <button id="copy" type="button" disabled>复制输出</button>
+    <button id="clear" type="button" disabled>清空输出</button>
+  </header>
+  <div id="transcript" role="log" aria-label="Tcl 命令记录" tabindex="0"></div>
+  <div class="repl-input">
+    <span id="prompt" aria-hidden="true">›</span>
+    <div id="command"></div>
+    <button id="run" type="button" disabled>执行</button>
+  </div>
+  {{nls}}
+  <script nonce="{{nonce}}" src="{{script}}"></script>
+</body>
+</html>

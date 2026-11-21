@@ -30,7 +30,8 @@ export function staticGraphSnapshot(
 export function temporalGraphSnapshot(
   graph: ReturnType<typeof mergeTemporalContinuationGraph>,
 ) {
-  const { nodes, edges, gaps, assignmentSources, ...metadata } = graph;
+  const { nodes, edges, gaps, feedbackEdges, assignmentSources, ...metadata } =
+    graph;
   return {
     kind: "temporal" as const,
     metadata: {
@@ -44,6 +45,7 @@ export function temporalGraphSnapshot(
       nodes,
       edges,
       gaps,
+      feedbackEdges: feedbackEdges ?? [],
       assignmentSources: assignmentSources.flatMap((sources, segment) =>
         Object.entries(sources ?? {}).map(([assignment, source]) => ({
           segment,

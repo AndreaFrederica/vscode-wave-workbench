@@ -58,7 +58,50 @@ test("trace provenance compares waveform hashes, effective compilation and dirty
   const verify = (profile, open = new Map()) => verifyTraceBuild(loaded, waveform, profile, open);
   const verified = await verify(effective);
   assert.equal(verified.status, "matched");
+  const pli = [
+    { table: { path: "tasks.tab", sha256: digest("original") },
+      library: { path: "task.o", sha256: digest("original library") },
+      calls: ["$drive"] },
+    { table: { path: "missing.tab" } },
+  ];
+  await fs.writeFile(path.join(directory, "tasks.tab"), "original");
+  await fs.writeFile(path.join(directory, "task.o"), "changed library");
+  await fs.writeFile(manifest, JSON.stringify({ ...configuration, vcs_pli: pli }));
+  const loadedPli = await readTraceBuildManifest(manifest);
+  const checkedPli = await verifyTraceBuild(loadedPli, waveform, effective, new Map());
+  assert.equal(checkedPli.status, "unverified");
+  assert.deepEqual(checkedPli.mismatches, []);
+  assert.deepEqual(checkedPli.vcsPli.map(({ table, library }) => [table.identity, library?.identity]),
+    [["matched", "mismatched"], ["missing", undefined]]);
+  assert.deepEqual(checkedPli.vcsPli[0].calls, ["$drive"]);
   const harnessSha256 = digest("harness");
+  const traceLibrary = path.join(directory, "wave_vpi.so");
+  await fs.writeFile(path.join(directory, "task.o"), "original library");
+  await fs.writeFile(traceLibrary, "trace library");
+  await fs.writeFile(manifest, JSON.stringify({
+    ...configuration, harnessSha256, vcs_pli: [pli[0]],
+    vcs_trace_library: { path: "wave_vpi.so", sha256: digest("trace library") },
+    runtime: { workingDirectory: ".", plusargs: [], files: [] },
+  }));
+  const scopedManifest = await readTraceBuildManifest(manifest);
+  const verifyScopedBuild = (limitations = []) =>
+    verifyTraceBuild(scopedManifest, waveform, effective, new Map(), limitations);
+  const verifyScopedLive = (build, harness = harnessSha256, recorded = scopedManifest) =>
+    verifyLiveTraceBuild(recorded, build, harness, "1ps", "1ps", undefined, false);
+  const scoped = await verifyScopedBuild();
+  assert.equal(scoped.vcsTraceLibrary.path, traceLibrary);
+  assert.equal(verifyScopedLive(scoped).status, "unverified");
+  assert.equal(verifyScopedLive(scoped).executionReplayEligible, true);
+  assert.equal(verifyScopedLive(scoped, digest("other")).executionReplayEligible, false);
+  assert.equal(verifyScopedLive(scoped, harnessSha256, { ...scopedManifest, runtime: undefined }).executionReplayEligible, false);
+  assert.equal(verifyScopedLive(await verifyScopedBuild(["Unmapped VCS option"])).executionReplayEligible, false);
+  await fs.writeFile(path.join(directory, "task.o"), "changed library");
+  assert.equal(verifyScopedLive(await verifyScopedBuild()).executionReplayEligible, false);
+  await fs.writeFile(path.join(directory, "task.o"), "original library");
+  await fs.writeFile(traceLibrary, "changed recorder");
+  const changedRecorder = await verifyScopedBuild();
+  assert.equal(changedRecorder.vcsTraceLibrary.identity, "mismatched");
+  assert.equal(verifyScopedLive(changedRecorder).executionReplayEligible, false);
   await fs.writeFile(manifest, JSON.stringify({ ...configuration, harnessSha256 }));
   const liveBuild = await readTraceBuildManifest(manifest);
   assert.equal(liveBuild.harnessSha256, harnessSha256);
@@ -76,6 +119,18 @@ test("trace provenance compares waveform hashes, effective compilation and dirty
   assert.deepEqual((await verify({ ...effective, libraryFiles: [] })).mismatches, ["Ordered library files"]);
   assert.equal((await verify(undefined)).status, "unverified");
   assert.deepEqual((await verify({ ...effective, parameterOverrides: ["Mode=0"] })).mismatches, ["Parameter overrides"]);
+  const legacyTimescale = await verify({ ...effective, defaultTimescale: "1ns/1ps" });
+  assert.equal(legacyTimescale.status, "unverified");
+  assert.deepEqual(legacyTimescale.limitations, ["Build manifest omits the default RTL timescale."]);
+  await fs.writeFile(manifest, JSON.stringify({ ...configuration, default_timescale: "1 ns / 1 ps" }));
+  const withTimescale = await readTraceBuildManifest(manifest);
+  assert.equal(withTimescale.default_timescale, "1ns/1ps");
+  const verifyScale = (defaultTimescale) =>
+    verifyTraceBuild(withTimescale, waveform, { ...effective, defaultTimescale }, new Map());
+  assert.equal((await verifyScale("1ns/1ps")).status, "matched");
+  assert.deepEqual((await verifyScale("1ns/10ps")).mismatches, ["Default RTL timescale"]);
+  await fs.writeFile(manifest, JSON.stringify({ ...configuration, default_timescale: "1ps/1ns" }));
+  await assert.rejects(readTraceBuildManifest(manifest), /Unsupported trace build manifest/);
   const changed = await verify({ ...effective, defines: ["SIM=2"] }, new Map([[source, "module edited; endmodule\n"]]));
   assert.equal(changed.status, "mismatched");
   assert.ok(changed.mismatches.includes("Predefined macros"));
@@ -88,6 +143,29 @@ test("trace provenance compares waveform hashes, effective compilation and dirty
   assert.deepEqual((await verifyArtifacts(undefined)).mismatches, ["Missing Verilator elaboration tree"]);
   assert.deepEqual((await verifyArtifacts({ ...artifacts, treeSha256: digest("other") })).mismatches, ["Verilator elaboration tree SHA-256"]);
   assert.deepEqual((await verifyArtifacts({ ...artifacts, metadataSha256: digest("other") })).mismatches, ["Verilator elaboration metadata SHA-256"]);
+  const include = path.join(directory, "defs.svh");
+  await fs.writeFile(include, "`define IDENT 1\n");
+  const withInclude = { ...effective, files: [...effective.files, pathToFileURL(include).href] };
+  assert.deepEqual((await verify(withInclude)).mismatches, ["Compilation and include file set"]);
+  for (const coverage of [
+    { files_complete: false },
+    { unsupported: ["Header hashes unavailable from VCS rebuild metadata"] },
+  ]) {
+    await fs.writeFile(manifest, JSON.stringify({ ...configuration, ...coverage }));
+    const partial = await readTraceBuildManifest(manifest);
+    const check = (actual, open = new Map()) => verifyTraceBuild(partial, waveform, actual, open);
+    const incomplete = await check(withInclude);
+    assert.equal(incomplete.status, "unverified");
+    assert.deepEqual(incomplete.mismatches, []);
+    assert(incomplete.limitations.includes("No build hash for compilation file " + include));
+    assert.equal((await check(effective)).status, "unverified");
+    assert.deepEqual((await check({ ...withInclude, files: withInclude.files.filter(uri => uri !== sourceUri) })).mismatches, ["Compilation and include file set"]);
+    assert.deepEqual((await check({ ...withInclude, defines: ["SIM=0"] })).mismatches, ["Predefined macros"]);
+    assert.deepEqual((await check(withInclude, new Map([[source, "module edited; endmodule"]]))).mismatches,
+      ["Changed source " + source]);
+  }
+  await fs.writeFile(manifest, JSON.stringify({ ...configuration, files_complete: "false" }));
+  await assert.rejects(readTraceBuildManifest(manifest), /Unsupported trace build manifest/);
   await fs.writeFile(waveform, "changed");
   assert.deepEqual((await verify(effective)).mismatches, ["Waveform SHA-256"]);
   await assert.rejects(readAdjacentTraceBuildManifest(waveform), /belongs to a different waveform/);

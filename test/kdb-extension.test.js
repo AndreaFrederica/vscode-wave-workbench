@@ -24,27 +24,29 @@ test('extension host adapter: real FSDB + KDB opens declaration / instantiation 
   const vscode={EventEmitter,ConfigurationTarget:{Global:1,Workspace:2},
     Uri:{file:uri,joinPath:(base,...parts)=>uri(path.join(base.fsPath,...parts))},Position,Range,Selection:Range,ViewColumn:{Beside:2},
     env:{clipboard:{writeText:async text=>{clipboard=text;}}},
+    debug:{registerDebugConfigurationProvider:()=>disposable,registerDebugAdapterDescriptorFactory:()=>disposable},
     extensions:{getExtension:()=>({packageJSON:{version:'1.2.5'}})},
     workspace:{getConfiguration:()=>({get:name=>({verdiHome:process.env.VERDI_HOME,backendPath:verdiOverride,independentBackendPath:backendOverride,fsdbBackend:backendChoice,eventsPerSignal:20000})[name],update:async(name,value)=>{assert.equal(name,'fsdbBackend');backendChoice=value;}}),openTextDocument:async file=>({uri:file,lineCount:fs.readFileSync(file.fsPath,'utf8').split('\n').length})},
     window:{onDidChangeActiveTextEditor:fn=>{editorChanged=fn;return disposable;},registerWebviewViewProvider:(id,p)=>{if(id==='waveWorkbench.control')sidebarProvider=p;return disposable;},createOutputChannel:()=>({append(){},appendLine(){},dispose(){}}),registerCustomEditorProvider:(_id,p)=>{provider=p;return disposable;},showTextDocument:async (doc,options)=>{const editor={doc,options,revealRange(){}};opened.push(editor);return editor;},showOpenDialog:async()=>{dialogs++;return [uri(path.join(root,'examples/demo.vcd'))];},showQuickPick:async choices=>choices.find(choice=>choice.value===nextBackend),showInformationMessage:()=>{},showErrorMessage:message=>{throw new Error(message);}},
     commands:{registerCommand:(name,handler)=>{commands.set(name,handler);return disposable;},executeCommand:async(name,file)=>{if(name==='vscode.openWith')openedWaves.push(file.fsPath);if(name==='vscode.setEditorLayout')layoutCalls.push(file);}}
   };
+  vscode.window.registerWebviewPanelSerializer=()=>disposable;
   const context={extensionUri:uri(root),asAbsolutePath:p=>path.join(root,p),subscriptions:[],workspaceState:{get:(key,fallback)=>stored.has(key)?stored.get(key):fallback,update:async(key,value)=>stored.set(key,value)}};
   t.after(()=>context.subscriptions.forEach(d=>d.dispose()));
   const module={exports:{}};
   const wrapped=vm.runInThisContext('(function(require,module,exports){'+fs.readFileSync(path.join(root,'dist/extension.js'),'utf8')+'\n})');
   wrapped(name=>name==='vscode'?vscode:name.startsWith('.')?require(path.join(root,'dist',name)):require(name),module,module.exports);
   module.exports.activate(context);
-  const panel={active:true,reveal(){},onDidChangeViewState:()=>disposable,onDidDispose:()=>disposable,webview:{cspSource:"'self'",asWebviewUri:u=>u,onDidReceiveMessage:fn=>{receive=fn;return disposable;},postMessage:async m=>{messages.push(m);if(m.type==='ui'){if(m.action==='snapshot'){queueMicrotask(()=>receive({type:'uiResult',id:m.id,result:snapshot}));return true;}const fresh=m.payload.signals.filter(s=>!batchExisting.has(s.scope+'.'+s.name));for(const s of fresh)batchExisting.add(s.scope+'.'+s.name);queueMicrotask(()=>receive({type:'uiResult',id:m.id,result:{added:fresh.length,duplicates:m.payload.signals.length-fresh.length}}));}return true;}}};
+  const panel={active:true,viewColumn:3,reveal(){},onDidChangeViewState:()=>disposable,onDidDispose:()=>disposable,webview:{cspSource:"'self'",asWebviewUri:u=>u,onDidReceiveMessage:fn=>{receive=fn;return disposable;},postMessage:async m=>{messages.push(m);if(m.type==='ui'){if(m.action==='snapshot'){queueMicrotask(()=>receive({type:'uiResult',id:m.id,result:snapshot}));return true;}const fresh=m.payload.signals.filter(s=>!batchExisting.has(s.scope+'.'+s.name));for(const s of fresh)batchExisting.add(s.scope+'.'+s.name);queueMicrotask(()=>receive({type:'uiResult',id:m.id,result:{added:fresh.length,duplicates:m.payload.signals.length-fresh.length}}));}return true;}}};
   const document=await provider.openCustomDocument(uri(path.resolve(process.env.WAVE_TEST_KDB,'../waves.fsdb')));
   await provider.resolveCustomEditor(document,panel);
   await receive({type:'ready'});
-  assert.ok(messages.some(m=>m.type==='kdbAttached'), JSON.stringify(messages.filter(m=>m.type==='error')));assert.deepEqual(layoutCalls[0],{orientation:1,groups:[{size:.6},{size:.4}]});
+  assert.ok(messages.some(m=>m.type==='kdbAttached'), JSON.stringify(messages.filter(m=>m.type==='error')));assert.equal(layoutCalls.length,0);
   const sidebarStates=[];sidebarProvider.resolveWebviewView({visible:true,onDidDispose(){},onDidChangeVisibility(){},webview:{cspSource:"'self'",asWebviewUri:u=>u,onDidReceiveMessage:fn=>{sidebarReceive=fn;},postMessage:async m=>sidebarStates.push(m)}});
   await sidebarReceive({type:'ready'});assert.ok(sidebarStates.at(-1).tree.some(n=>n.fullname==='cv32e40p_mac_trace_tb'));
   const parts=['cv32e40p_mac_trace_tb','dut','u_core','u_core'];let parent='';for(const part of parts){parent=parent?parent+'.'+part:part;await sidebarReceive({type:'tree',scope:parent,action:'expand'});}
   assert.ok(sidebarStates.at(-1).tree.some(n=>n.fullname===parent+'.core_i'&&n.depth===4));
-  await sidebarReceive({type:'tree',scope:parent+'.core_i',action:'select'});assert.equal(opened.at(-1).selection.start.line,30);assert.equal(opened.at(-1).options.viewColumn,1);
+  await sidebarReceive({type:'tree',scope:parent+'.core_i',action:'select'});assert.equal(opened.at(-1).selection.start.line,30);assert.equal(opened.at(-1).options.viewColumn,3);assert.equal(layoutCalls.length,0);
   await sidebarReceive({type:'tree',scope:parent,action:'select'});await sidebarReceive({type:'tree',scope:'',action:'back'});assert.ok(sidebarStates.at(-1).tree.some(n=>n.fullname===parent+'.core_i'&&n.selected));
   const sourceUri=opened.at(-1).doc.uri;vscode.window.activeTextEditor={document:{uri:sourceUri,getText:()=> 'clk_i'},selection:{isEmpty:false}};
   await commands.get('waveWorkbench.addSelection')();assert.equal(messages.findLast(m=>m.type==='ui'&&m.action==='batchAdd').payload.signals[0].scope,parent+'.core_i');

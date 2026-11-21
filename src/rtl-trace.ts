@@ -8,11 +8,14 @@ import type {
   buildTemporalTrace,
   TemporalGap,
   TemporalEdgeEvidence,
+  RecordedWordWriter,
+  TraceBindingIssue,
   traceAssignmentCandidates,
   traceCursorWriters,
 } from "./rtl-trace-candidates";
 import type { AssignmentValue, IndexedPartSelect } from "./shared/protocol";
 import { traceInteger } from "./rtl-trace-values";
+import { feedbackInGraph, temporalFeedback } from "./rtl-trace-feedback";
 import {
   runtimeInputLabel,
   type RuntimeInputEvidence,
@@ -53,6 +56,8 @@ export interface GenerateLabel {
   uri: string;
   line: number;
   byteColumn: number;
+  blockEnd?: [line: number, byteColumn: number];
+  uniqueLine?: boolean;
 }
 
 export interface VideTrace {
@@ -71,11 +76,18 @@ export interface VideTrace {
     declaration: Location | null;
     instance?: string;
     signed?: boolean;
+    packedRange?: [number, number];
     packedStruct?: Location;
     lexicalScope?: string[];
     selectedElement?: number;
     modportAlias?: true;
     parameterValue?: { bits: string; signed: boolean };
+    instanceParameter?: true;
+    instanceParameterValue?: { bits: string; signed: boolean };
+    enumValue?: { bits: string; signed: boolean };
+    enumValueUnavailable?: true;
+    packageParameterValue?: { bits: string; signed: boolean };
+    packageParameterValueUnavailable?: true;
   }[];
   assignments: {
     kind:
@@ -122,14 +134,29 @@ export interface VideTrace {
       takenWhenTrue: boolean;
       expression?: GuardExpression | null;
     }[];
+    caseEntries?: {
+      selector: Location;
+      body: Location;
+      defaultBranch: boolean;
+    }[];
+    waitEntries?: Location[];
+    standaloneWaitEntries?: Location[];
+    waitPredicates?: { location: Location; expression: GuardExpression }[];
     generateBranches?: {
       selected: GenerateLabel | null;
       alternatives: GenerateLabel[];
       loopScope?: boolean;
       loopVariable?: string;
+      loneIfCondition?: AssignmentValue;
+      caseWithoutDefault?: {
+        selector: AssignmentValue;
+        labels: AssignmentValue[];
+      };
     }[];
     generateIndices?: Record<string, number>;
     hasUnresolvedOperands: boolean;
+    delayFreeContinuous?: true;
+    initializationAtStart?: true;
     unresolvedControlOnly?: true;
     value?: AssignmentValue;
     wordRead?: { signal: number; index: AssignmentValue };
@@ -181,6 +208,7 @@ export interface VideTrace {
     limitations: string[];
     unverifiedVcsParameterPaths?: string[];
     vcsRebuild?: boolean;
+    vcsPli?: { table: string; library?: string }[];
     libraryMaps?: string[];
     resolvedLibraryFiles?: {
       design: string;
@@ -199,6 +227,7 @@ export interface VideTrace {
     includeDirs: string[];
     topModules: string[];
     parameterOverrides?: string[];
+    defaultTimescale?: string;
     defines: string[];
     complete: boolean;
   };
@@ -491,6 +520,7 @@ export function staticTraceCoverage(trace: VideTrace) {
       canRetrace: boolean;
       waveformSignal?: string;
       waveformUnavailable?: true;
+      unavailableBits?: number[];
       continuationSignals?: string[];
       locations?: Location[];
     }
@@ -512,18 +542,11 @@ export function staticTraceCoverage(trace: VideTrace) {
       canRetrace && allowedBits?.length
         ? allowedBits.map((bit) => declaredSignalName(path) + "[" + bit + "]")
         : undefined;
-    const key = signal + ":" + reason;
+    const key = JSON.stringify([signal, reason, path, continuation === null]);
     const previous = stops.get(key);
     if (previous) {
       if (canRetrace) {
-        if (!previous.canRetrace) {
-          previous.canRetrace = true;
-          delete previous.waveformUnavailable;
-          previous.path = path;
-          if (continuation) previous.waveformSignal = continuation.signal;
-          if (continuationSignals)
-            previous.continuationSignals = continuationSignals;
-        } else if (continuationSignals && previous.continuationSignals) {
+        if (continuationSignals && previous.continuationSignals) {
           previous.continuationSignals = [
             ...new Set([
               ...previous.continuationSignals,
@@ -533,6 +556,11 @@ export function staticTraceCoverage(trace: VideTrace) {
         } else {
           delete previous.continuationSignals;
         }
+      }
+      if (previous.unavailableBits) {
+        previous.unavailableBits = bits?.length
+          ? [...new Set([...previous.unavailableBits, ...bits])]
+          : undefined;
       }
       if (
         location &&
@@ -550,6 +578,9 @@ export function staticTraceCoverage(trace: VideTrace) {
       canRetrace,
       ...(continuation ? { waveformSignal: continuation.signal } : {}),
       ...(continuation === null ? { waveformUnavailable: true } : {}),
+      ...(continuation === null && bits?.length
+        ? { unavailableBits: bits }
+        : {}),
       ...(continuationSignals ? { continuationSignals } : {}),
       ...(location ? { locations: [location] } : {}),
     });
@@ -644,30 +675,7 @@ export function traceFeedback(
         });
     }
   }
-  const active = new Set<number>();
-  const visited = new Set<number>();
-  const feedback: FeedbackEdge[] = [];
-  for (let start = 0; start < outgoing.length; start++) {
-    if (visited.has(start)) continue;
-    const stack = [{ node: start, index: 0 }];
-    active.add(start);
-    visited.add(start);
-    while (stack.length) {
-      const frame = stack[stack.length - 1];
-      const next = outgoing[frame.node][frame.index++];
-      if (!next) {
-        active.delete(frame.node);
-        stack.pop();
-      } else if (active.has(next.node)) {
-        feedback.push(next.edge);
-      } else if (!visited.has(next.node)) {
-        visited.add(next.node);
-        active.add(next.node);
-        stack.push({ node: next.node, index: 0 });
-      }
-    }
-  }
-  return feedback;
+  return feedbackInGraph(outgoing);
 }
 
 export function staticAssignmentPage<Assignment extends TraceDiagramAssignment>(
@@ -800,7 +808,20 @@ export function traceMermaidPages(
     const selection = signal.id === trace.root ? trace.bitSelection : undefined;
     graph.node(
       "s" + signal.id,
-      name + selectionText(selection?.range, selection?.bit),
+      name +
+        selectionText(selection?.range, selection?.bit) +
+        (signal.enumValueUnavailable
+          ? " · " + temporalGapLabels.enumValueUnavailable
+          : signal.packageParameterValue
+            ? " · RTL package parameter " + signal.packageParameterValue.bits
+            : signal.packageParameterValueUnavailable
+              ? " · " + temporalGapLabels.packageParameterValueUnavailable
+              : signal.instanceParameterValue
+                ? " · elaborated parameter " +
+                  signal.instanceParameterValue.bits
+                : signal.instanceParameter && !signal.parameterValue
+                  ? " · " + temporalGapLabels.instanceParameterValueUnavailable
+                  : ""),
       { style: signal.id === trace.root ? "root" : undefined },
     );
   }
@@ -870,7 +891,14 @@ export function temporalMermaidOutput(
 export function temporalEdgeLabel(edge: TemporalEdgeEvidence) {
   return (
     (edge.role ?? edge.kind) +
-    (edge.confidence === "possible" ? " candidate" : " evidence") +
+    (edge.continuousCause
+      ? " · callback " +
+        edge.continuousCause.sourceOrdinal +
+        " changed RHS before output callback " +
+        edge.continuousCause.targetOrdinal
+      : edge.confidence === "possible"
+        ? " candidate"
+        : " evidence") +
     (edge.callbackOrder
       ? edge.callbackOrder === "sourceBeforeTarget"
         ? " · source callback before target"
@@ -880,18 +908,29 @@ export function temporalEdgeLabel(edge: TemporalEdgeEvidence) {
         : "") +
     (edge.arrayIndexEvidence === "recordedTarget"
       ? " · matches recorded array index"
-      : edge.controlSampleEvidence === "recordedEvaluation"
-        ? " · matches recorded guard operand"
-        : edge.rhsSampleEvidence === "recordedEvaluation"
-          ? " · matches recorded RHS"
-          : edge.rhsSample === "matches"
-            ? " · RHS compatible"
-            : edge.rhsSample === "differs"
-              ? " · RHS differs"
-              : "") +
+      : edge.controlSampleEvidence === "recordedWaitResume"
+        ? " · matches recorded wait resume"
+        : edge.controlSampleEvidence === "recordedBranchEntry"
+          ? " · matches recorded branch entry"
+          : edge.controlSampleEvidence === "recordedEvaluation"
+            ? " · matches recorded guard operand"
+            : edge.rhsSampleEvidence === "recordedEvaluation"
+              ? " · matches recorded RHS"
+              : edge.rhsSampleEvidence === "waveformCombination"
+                ? " · RHS matches a waveform sample combination"
+                : edge.rhsSample === "matches"
+                  ? " · RHS compatible"
+                  : edge.rhsSample === "differs"
+                    ? " · RHS differs"
+                    : "") +
     (edge.sourceWriteEvidence === "recordedSameValueWrite"
       ? " · same-value write"
-      : "")
+      : "") +
+    (edge.waitResumeCause === "uniqueObservedTransition"
+      ? " · observed transition enabled wait"
+      : edge.waitResumeCause === "orderedCallbacks"
+        ? " · callback " + edge.waitResumeCallbackOrdinal + " enabled wait"
+        : "")
   );
 }
 
@@ -905,6 +944,80 @@ export function temporalGapUseLabel(use: NonNullable<TemporalGap["use"]>) {
   );
 }
 
+function addTemporalExternalEvidence(
+  graph: ReturnType<typeof createMermaidFlowchart>,
+  index: number,
+  node: ReturnType<typeof buildTemporalTrace>["nodes"][number],
+) {
+  if (!node.recordedWordWriters)
+    for (const [sample, label] of guardEntryLabels(
+      node.recordedWriter?.evaluation?.guardEntryValues,
+      node.recordedWriter?.evaluation?.guardEntryTicks,
+    ).entries()) {
+      const guard = "branch" + index + "_" + sample;
+      graph.node(guard, label);
+      graph.edge(guard, "t" + index, "recorded branch entry");
+    }
+  const transfer = node.recordedTaskTransfer;
+  if (transfer) {
+    const call = "task" + index;
+    graph.node(
+      call,
+      "Task input @ " +
+        transfer.input.tick +
+        " · commit " +
+        transfer.input.ordinal +
+        " · L" +
+        transfer.input.source.line,
+    );
+    graph.edge(
+      call,
+      "t" + index,
+      "recorded member write · commit " + transfer.write.ordinal,
+    );
+    for (const [offset, read] of transfer.reads.entries()) {
+      const id = call + "_" + offset;
+      graph.node(
+        id,
+        read.operation +
+          " = " +
+          read.value +
+          " @ " +
+          read.tick +
+          " · evaluation " +
+          read.ordinal +
+          " · L" +
+          read.source.line,
+      );
+      graph.edge(id, call, "recorded input byte");
+    }
+  }
+  for (const [stepIndex, step] of (
+    node.recordedWriter?.evaluation?.externalSteps ?? []
+  ).entries()) {
+    const id = "foreign" + index + "_" + stepIndex;
+    const filename = step.source.file.split(/[\\/]/).at(-1);
+    graph.node(
+      id,
+      step.operation +
+        (step.value === undefined ? "" : " = " + step.value) +
+        " · " +
+        filename +
+        " L" +
+        step.source.line,
+    );
+    const verified = step.source.identity === "matched";
+    graph.edge(
+      id,
+      "t" + index,
+      verified
+        ? "external execution"
+        : "external source " + step.source.identity,
+      !verified,
+    );
+  }
+}
+
 export function temporalMermaidPages(
   trace: ReturnType<typeof buildTemporalTrace>,
   evidence: Pick<
@@ -913,9 +1026,10 @@ export function temporalMermaidPages(
   >,
   commits?: ReadonlyMap<number, number>,
   signals?: VideTrace["signals"],
+  waveformSignals?: ContinuationTrace["waveformSignals"],
 ) {
   const graph = createMermaidFlowchart();
-  const names = temporalNames(evidence, signals);
+  const names = temporalNames(evidence, signals, waveformSignals);
   const recordedFields = new Set(
     trace.recordedFieldSignals?.map(({ id }) => id),
   );
@@ -933,22 +1047,31 @@ export function temporalMermaidPages(
       (node.orderAtTick === undefined ? "" : " · change " + node.orderAtTick) +
       " = " +
       (node.value ?? "unavailable") +
-      (node.elaboratedParameter
-        ? " · elaborated parameter"
-        : recordedFields.has(node.signal)
-          ? " · execution log observation"
-          : node.sameValueWrite
-            ? " · recorded same-value write"
-            : node.executionOnly
-              ? " · execution log"
-              : node.operandEvaluationOrdinal !== undefined
-                ? " · captured operand · evaluation " +
-                  node.operandEvaluationOrdinal
-                : node.beforeTick
-                  ? " · before tick"
-                  : node.sampleOnly
-                    ? " · stable sample"
-                    : "") +
+      (node.initialSample ? " · initial waveform sample" : "") +
+      (node.enumConstant
+        ? " · RTL enum constant"
+        : node.packageParameter
+          ? " · RTL package parameter"
+          : node.elaboratedParameter
+            ? " · elaborated parameter"
+            : recordedFields.has(node.signal)
+              ? " · execution log observation"
+              : node.sameValueWrite
+                ? " · recorded same-value write"
+                : node.executionOnly
+                  ? " · execution log"
+                  : node.operandEvaluationOrdinal !== undefined
+                    ? (node.waitResumeSample
+                        ? " · recorded wait resume · evaluation "
+                        : node.branchEntrySample
+                          ? " · captured branch entry · evaluation "
+                          : " · captured operand · evaluation ") +
+                      node.operandEvaluationOrdinal
+                    : node.beforeTick
+                      ? " · before tick"
+                      : node.sampleOnly
+                        ? " · stable sample"
+                        : "") +
       (node.recordedWordWriters
         ? " · " + node.recordedWordWriters.length + " recorded writes"
         : commit === undefined
@@ -983,6 +1106,14 @@ export function temporalMermaidPages(
           node.recordedRhsCombinations.length
         : "");
     graph.node("t" + index, label);
+    for (const assignment of node.initializationAssignments ?? []) {
+      const id = "init" + index + "_" + assignment;
+      graph.node(
+        id,
+        "Declaration initializer · RTL assignment " + (assignment + 1),
+      );
+      graph.edge(id, "t" + index, "candidate", true);
+    }
     for (const write of node.recordedWordWriters ?? []) {
       const id = "write" + index + "_" + write.commitOrdinal;
       graph.node(
@@ -1010,6 +1141,7 @@ export function temporalMermaidPages(
       );
       for (const [sample, label] of guardEntryLabels(
         write.evaluation?.guardEntryValues,
+        write.evaluation?.guardEntryTicks,
       ).entries()) {
         const guard = id + "_guard" + sample;
         graph.node(guard, label);
@@ -1038,81 +1170,25 @@ export function temporalMermaidPages(
       );
       graph.edge(changes, "t" + index, "recorded callback sequence", true);
     }
-    const transfer = node.recordedTaskTransfer;
-    if (transfer) {
-      const call = "task" + index;
-      graph.node(
-        call,
-        "Task input @ " +
-          transfer.input.tick +
-          " · commit " +
-          transfer.input.ordinal +
-          " · L" +
-          transfer.input.source.line,
-      );
-      graph.edge(
-        call,
-        "t" + index,
-        "recorded member write · commit " + transfer.write.ordinal,
-      );
-      for (const [offset, read] of transfer.reads.entries()) {
-        const id = call + "_" + offset;
-        graph.node(
-          id,
-          read.operation +
-            " = " +
-            read.value +
-            " @ " +
-            read.tick +
-            " · evaluation " +
-            read.ordinal +
-            " · L" +
-            read.source.line,
-        );
-        graph.edge(id, call, "recorded input byte");
-      }
-    }
-    for (const [stepIndex, step] of (
-      writer?.evaluation?.externalSteps ?? []
-    ).entries()) {
-      const id = "foreign" + index + "_" + stepIndex;
-      const filename = step.source.file.split(/[\\/]/).at(-1);
-      graph.node(
-        id,
-        step.operation +
-          (step.value === undefined ? "" : " = " + step.value) +
-          " · " +
-          filename +
-          " L" +
-          step.source.line,
-      );
-      const verified = step.source.identity === "matched";
-      graph.edge(
-        id,
-        "t" + index,
-        verified
-          ? "external execution"
-          : "external source " + step.source.identity,
-        !verified,
-      );
-    }
+    addTemporalExternalEvidence(graph, index, node);
   }
-  for (const edge of trace.edges) {
-    const label = temporalEdgeLabel(edge);
+  const feedback = new Set(trace.feedbackEdges?.map(({ edge }) => edge));
+  for (const [index, edge] of trace.edges.entries()) {
+    const cycle = feedback.has(index);
+    const label = temporalEdgeLabel(edge) + (cycle ? " · feedback" : "");
     const source = "t" + edge.source;
     const target =
       edge.recordedCommitOrdinal === undefined
         ? "t" + edge.target
         : "write" + edge.target + "_" + edge.recordedCommitOrdinal;
-    graph.edge(source, target, label);
+    graph.edge(source, target, label, cycle);
   }
   for (const [index, gap] of trace.gaps.entries()) {
     const name = temporalSignalName(
       names.get(gap.signal) ?? "Signal " + gap.signal,
       gap.bit,
     );
-    const label =
-      name + " @ " + gap.tick + " · " + temporalGapLabels[gap.reason];
+    const label = name + " @ " + gap.tick + " · " + temporalGapLabel(gap);
     const id = "gap" + index;
     graph.node(id, label);
     if (gap.use)
@@ -1136,19 +1212,76 @@ export function temporalMermaidPages(
 
 export const temporalGapLabels: Record<TemporalGap["reason"], string> = {
   unmapped: "No waveform binding",
+  enumValueUnavailable: "RTL enum value could not be confirmed",
+  packageParameterValueUnavailable:
+    "RTL package parameter value could not be confirmed",
+  instanceParameterValueUnavailable:
+    "Elaborated parameter value could not be confirmed",
   truncated: "History truncated",
   noChangeInWindow: "No usable change in the requested window",
   noMatchingOperandChange: "No waveform change matches the operand evidence",
   projectedDependency: "Needs the full signal value",
+  waveformBitsUnavailable: "Required bits were not captured in the waveform",
   unprovenTrigger: "Trigger edge unavailable",
+  unprovenInitialOrder: "Startup sample available, evaluation order unknown",
   unrecordedTaskInput: "Task input requires a recorded invocation",
   nodeBudget: "Time graph node budget reached",
   edgeBudget: "Time graph edge budget reached",
   staticBudget: "Static traversal budget reached",
 };
 
-export function guardEntryLabels(values?: Record<string, string>) {
+const traceBindingIssueLabels: Record<TraceBindingIssue, string> = {
+  missingDeclaration: "RTL declaration unavailable",
+  waveformMissing: "No matching dumped signal",
+  waveformUnsupported: "Dumped signal type unsupported",
+  waveformAmbiguous: "Multiple matching dumped signals",
+  designObjectMissing: "Signal absent from the elaborated design lookup",
+  designLocationMissing: "Elaborated signal has no source location",
+  declarationMismatch: "Design and RTL declaration do not match",
+};
+
+export function temporalGapLabel({ reason, bindingIssue }: TemporalGap) {
+  return bindingIssue
+    ? traceBindingIssueLabels[bindingIssue]
+    : temporalGapLabels[reason];
+}
+
+export function guardEntryLabels(
+  values?: Record<string, string>,
+  ticks?: Record<string, string>,
+  nextOrdinals?: Record<string, number>,
+) {
   return Object.entries(values ?? {}).map(([key, value]) => {
+    const sampled =
+      ticks?.[key] === undefined ? value : value + " @ " + ticks[key];
+    const wait = /^[wp](\d+)_(\d+)_(.+)$/.exec(key);
+    if (wait)
+      return (
+        "Wait resume L" +
+        wait[1] +
+        ":" +
+        wait[2] +
+        " · " +
+        wait[3] +
+        " = " +
+        sampled +
+        (nextOrdinals?.[key] === undefined
+          ? ""
+          : " · before event " + nextOrdinals[key])
+      );
+    const arm = /^c(\d+)_(\d+)(d?)_(.+)$/.exec(key);
+    if (arm)
+      return (
+        "Case L" +
+        arm[1] +
+        ":" +
+        arm[2] +
+        (arm[3] ? " · default" : "") +
+        " · " +
+        arm[4] +
+        " = " +
+        sampled
+      );
     const match = /^g(\d+)_(\d+)(f?)_(.+)$/.exec(key);
     return match
       ? "Guard L" +
@@ -1159,14 +1292,45 @@ export function guardEntryLabels(values?: Record<string, string>) {
           " · " +
           match[4] +
           " = " +
-          value
-      : key + " = " + value;
+          sampled
+      : key + " = " + sampled;
   });
+}
+
+function recordedGuardReport(
+  nodes: ReturnType<typeof buildTemporalTrace>["nodes"],
+  name: (index: number, signal: number) => string,
+  heading: string,
+) {
+  const lines = nodes.flatMap(
+    ({ signal, recordedWriter, recordedWordWriters }, index) =>
+      recordedWriter?.evaluation && !recordedWordWriters
+        ? guardEntryLabels(
+            recordedWriter.evaluation.guardEntryValues,
+            recordedWriter.evaluation.guardEntryTicks,
+            recordedWriter.evaluation.guardEntryNextOrdinals,
+          ).map(
+            (label) =>
+              "- " +
+              inlineCode(name(index, signal)) +
+              " · Evaluation " +
+              recordedWriter.evaluation.ordinal +
+              " · Commit " +
+              recordedWriter.commitOrdinal +
+              " · " +
+              inlineCode(label),
+          )
+        : [],
+  );
+  return lines.length
+    ? ["", heading + " Recorded branch entry", "", ...lines, ""]
+    : [];
 }
 
 function temporalNames(
   evidence: Pick<TraceObservations, "observations">,
   signals?: VideTrace["signals"],
+  waveformSignals?: Record<number, string>,
 ) {
   const names = new Map(
     signals?.map(({ id, name, instance }) => [
@@ -1176,6 +1340,8 @@ function temporalNames(
   );
   for (const { signal, waveformSignal } of evidence.observations)
     names.set(signal, waveformSignal);
+  for (const [signal, waveformSignal] of Object.entries(waveformSignals ?? {}))
+    names.set(Number(signal), waveformSignal);
   return names;
 }
 
@@ -1222,6 +1388,8 @@ export function temporalTraceReferences(
   const assignmentIds = new Set<number>();
   for (const node of graph?.nodes ?? []) {
     signalIds.add(node.signal);
+    for (const id of node.initializationAssignments ?? [])
+      assignmentIds.add(id);
     if (node.recordedWriter) assignmentIds.add(node.recordedWriter.assignment);
     for (const writer of node.recordedWordWriters ?? [])
       assignmentIds.add(writer.assignment);
@@ -1267,6 +1435,24 @@ type TemporalContinuationSegment<T> =
 
 export class TraceContextChanged extends Error {}
 
+export const automaticTraceContinuationLimit = 64;
+export const traceContinuationTimeout = 100_000;
+
+export function temporalContinuationHistoryStart(
+  request: TemporalContinuation,
+  defaultStart?: string,
+) {
+  if (request.historyStart !== undefined) return request.historyStart;
+  if (
+    !request.liveSessionId &&
+    defaultStart &&
+    defaultStart !== "auto" &&
+    BigInt(defaultStart) > BigInt(request.tick)
+  )
+    return "auto";
+  return defaultStart;
+}
+
 export async function followTemporalFrontier<
   T extends {
     context: { temporalTrace?: TemporalGraph };
@@ -1278,17 +1464,26 @@ export async function followTemporalFrontier<
   operation: AbortSignal,
   deadline: AbortSignal,
   query: (request: TemporalContinuation, operation: AbortSignal) => Promise<T>,
-  assertCurrent?: () => Promise<void>,
-  previous: readonly TemporalContinuationSegment<T>[] = [],
+  {
+    assertCurrent,
+    previous = [],
+    defaultHistoryStart,
+    selected,
+  }: {
+    assertCurrent?: () => Promise<void>;
+    previous?: readonly TemporalContinuationSegment<T>[];
+    defaultHistoryStart?: string;
+    selected?: readonly TemporalContinuation[];
+  } = {},
 ) {
-  const key = ({
-    signal,
-    tick,
-    changeOrder,
-    liveSessionId,
-    historyStart,
-  }: TemporalContinuation) =>
-    JSON.stringify([signal, tick, changeOrder, liveSessionId, historyStart]);
+  const key = (request: TemporalContinuation) =>
+    JSON.stringify([
+      request.signal,
+      request.tick,
+      request.changeOrder,
+      request.liveSessionId,
+      temporalContinuationHistoryStart(request, defaultHistoryStart),
+    ]);
   const segmentByKey = new Map([[key(root), 0]]);
   const pending = new Map<
     string,
@@ -1296,11 +1491,9 @@ export async function followTemporalFrontier<
   >();
   const discoveredLinks: { segment: number; gap: number; id: string }[] = [];
   const segments = [...previous];
-  previous.forEach(({ request }, index) =>
-    segmentByKey.set(key(request), index + 1),
-  );
   let truncated = false;
   let contextChanged = false;
+  let preferred: string | undefined;
   function enqueue(segment: number, current: TemporalGraph | undefined) {
     let firstStaticChild: string | undefined;
     truncated ||= Boolean(current?.gapsTruncated);
@@ -1308,6 +1501,10 @@ export async function followTemporalFrontier<
       .filter(([, { continuation }]) => continuation)
       .sort(
         ([, left], [, right]) =>
+          Number(right.use?.evidence?.waitResumeCause === "orderedCallbacks") -
+            Number(
+              left.use?.evidence?.waitResumeCause === "orderedCallbacks",
+            ) ||
           Number(!!left.continuation?.historyStart) -
             Number(!!right.continuation?.historyStart) ||
           Number(left.reason === "staticBudget") -
@@ -1325,51 +1522,67 @@ export async function followTemporalFrontier<
     }
     return firstStaticChild;
   }
+  function recordSegment(
+    segment: TemporalContinuationSegment<T>,
+    index: number,
+  ) {
+    const id = key(segment.request);
+    const promoteChild = pending.get(id)?.staticBudget && preferred !== id;
+    pending.delete(id);
+    // Old checkpoints may contain both spellings of the same query.
+    const existing = segmentByKey.get(id);
+    if (
+      existing === undefined ||
+      (existing > 0 && "error" in segments[existing - 1])
+    )
+      segmentByKey.set(id, index);
+    preferred = undefined;
+    if ("trace" in segment) {
+      const child = enqueue(index, segment.trace.context.temporalTrace);
+      // Alternate shallow and deeper work when a static boundary has many siblings.
+      if (promoteChild) preferred = child;
+    }
+  }
   enqueue(0, graph);
   previous.forEach((segment, index) => {
-    if ("trace" in segment)
-      enqueue(index + 1, segment.trace.context.temporalTrace);
+    recordSegment(segment, index + 1);
   });
+  const selectedKeys = selected?.map(key);
+  if (selectedKeys?.some((id) => !pending.has(id)))
+    throw Error("A selected continuation is no longer pending.");
   const signal = AbortSignal.any([operation, deadline]);
-  let preferred: string | undefined;
   while (
     segments.length - previous.length < limit &&
     pending.size &&
-    !deadline.aborted
+    !signal.aborted
   ) {
-    operation.throwIfAborted();
     const [oldest, entry] = pending.entries().next().value!;
-    const id = entry.staticBudget ? (preferred ?? oldest) : oldest;
-    const { request, staticBudget } = pending.get(id)!;
-    const promoteChild = staticBudget && preferred !== id;
-    preferred = undefined;
-    function finish() {
-      pending.delete(id);
-      segmentByKey.set(id, segments.length);
-    }
+    const id = selectedKeys
+      ? selectedKeys[segments.length - previous.length]
+      : entry.staticBudget
+        ? (preferred ?? oldest)
+        : oldest;
+    if (id === undefined) break;
+    const { request } = pending.get(id)!;
     try {
       await assertCurrent?.();
       signal.throwIfAborted();
       const trace = await query(request, signal);
       await assertCurrent?.();
       signal.throwIfAborted();
-      segments.push({ request, trace });
-      finish();
-      const child = enqueue(segments.length, trace.context.temporalTrace);
-      // Alternate shallow and deeper work when a static boundary has many siblings.
-      if (promoteChild) preferred = child;
+      const segment = { request, trace };
+      recordSegment(segment, segments.push(segment));
     } catch (error) {
-      operation.throwIfAborted();
-      if (deadline.aborted) break;
+      if (signal.aborted) break;
       if (error instanceof TraceContextChanged) {
         contextChanged = true;
         break;
       }
-      segments.push({
+      const segment = {
         request,
         error: error instanceof Error ? error.message : String(error),
-      });
-      finish();
+      };
+      recordSegment(segment, segments.push(segment));
     }
   }
   const remaining: TemporalContinuation[] = [];
@@ -1383,11 +1596,13 @@ export async function followTemporalFrontier<
     nextSegment: segmentByKey.get(id)!,
   }));
   const stopReasons = [
-    ...(contextChanged
-      ? ["contextChanged"]
-      : remaining.length
-        ? [deadline.aborted ? "timeBudget" : "requestBudget"]
-        : []),
+    ...(operation.aborted
+      ? ["cancelled"]
+      : contextChanged
+        ? ["contextChanged"]
+        : remaining.length
+          ? [deadline.aborted ? "timeBudget" : "requestBudget"]
+          : []),
     ...(truncated ? ["gapBudget"] : []),
     ...(segments.some((segment) => "error" in segment) ? ["queryFailed"] : []),
   ];
@@ -1399,7 +1614,8 @@ export type ContinuationTrace = ReturnType<typeof temporalTraceReferences> & {
     temporalTrace?: TemporalGraph;
     tick: string;
     scale: string;
-    provider: { kind: string; sampling: string };
+    provider: { kind: string; sampling: string; liveSessionId?: string };
+    waveformBindings?: Record<string, string>;
   };
   waveformSignals?: Record<number, string>;
 };
@@ -1417,16 +1633,33 @@ export function temporalWaveformSignals(
   );
 }
 
+type TemporalGapCounts = {
+  joined: number;
+  pending: number;
+  unmatched: number;
+  unresolved: number;
+};
+
 export function mergeTemporalContinuationGraph(
   initial: ContinuationTrace,
   walk: ContinuationWalk,
 ) {
   type Point = TemporalGraph["nodes"][number];
   type Edge = TemporalGraph["edges"][number];
+  type WordEvidence = {
+    segment: number;
+    node: number;
+    writers?: Point["recordedWordWriters"];
+    unresolved?: Point["recordedWordUnresolved"];
+    callbacks?: Point["recordedWordChanges"];
+  };
   const nodes: {
     signal: string;
+    waveformSignal?: string | null;
+    declaration?: Location;
     point: Point;
     sources: { segment: number; node: number }[];
+    recordedWordEvidence?: WordEvidence[];
   }[] = [];
   const edges: (Edge & { segment: number; edge: number })[] = [];
   const gaps: {
@@ -1438,8 +1671,14 @@ export function mergeTemporalContinuationGraph(
     anchor?: number;
     nextSegment?: number;
     source?: number;
-    status: "joined" | "pending" | "unmatched" | "unresolved";
+    status: keyof TemporalGapCounts;
   }[] = [];
+  const emptyCounts = { joined: 0, pending: 0, unmatched: 0, unresolved: 0 };
+  const gapSummary = {
+    ...emptyCounts,
+    byReason: {} as Partial<Record<TemporalGap["reason"], TemporalGapCounts>>,
+    byBindingIssue: {} as Partial<Record<TraceBindingIssue, number>>,
+  };
   const traces = [
     initial,
     ...walk.segments.map((segment) =>
@@ -1451,6 +1690,14 @@ export function mergeTemporalContinuationGraph(
   const mappings = traces.map((trace, segment) => {
     if (!trace?.context.temporalTrace) return [];
     const names = temporalNames(trace.context, trace.signals);
+    const declarations = new Map(
+      trace.signals.map(({ id, declaration }) => [id, declaration]),
+    );
+    for (const { id, array } of trace.context.temporalTrace.wordSignals ?? [])
+      declarations.set(id, declarations.get(array));
+    for (const { id, signal } of trace.context.temporalTrace
+      .recordedFieldSignals ?? [])
+      declarations.set(id, declarations.get(signal));
     const provider = trace.context.provider;
     return trace.context.temporalTrace.nodes.map((point, node) => {
       const waveformSignal = trace.waveformSignals?.[point.signal];
@@ -1467,24 +1714,59 @@ export function mergeTemporalContinuationGraph(
           ? JSON.stringify([
               provider.kind,
               provider.sampling,
+              provider.liveSessionId,
               trace.context.scale,
               name,
               point.bit,
               point.tick,
               point.orderAtTick,
+              point.initialSample,
               point.value,
               point.valueChangeOrdinal,
               point.recordedWriter?.commitOrdinal,
               point.recordedWriter?.evaluation?.ordinal,
             ])
           : undefined;
+      const binding =
+        trace.context.waveformBindings?.[
+          point.signal + ":" + (point.bit ?? "")
+        ];
+      const declaration = declarations.get(point.signal);
       let id = key === undefined ? undefined : sharedEvents.get(key);
       if (id === undefined) {
         id = nodes.length;
-        nodes.push({ signal: name, point, sources: [] });
+        nodes.push({
+          signal: name,
+          ...(trace.context.waveformBindings
+            ? { waveformSignal: binding ?? null }
+            : {}),
+          ...(declaration ? { declaration } : {}),
+          point,
+          sources: [],
+        });
         if (key !== undefined) sharedEvents.set(key, id);
       }
-      nodes[id].sources.push({ segment, node });
+      const event = nodes[id];
+      if (!event.waveformSignal && binding) event.waveformSignal = binding;
+      if (!event.declaration && declaration) event.declaration = declaration;
+      if (point.recordedTaskTransfer && !event.point.recordedTaskTransfer)
+        event.point = {
+          ...event.point,
+          recordedTaskTransfer: point.recordedTaskTransfer,
+        };
+      event.sources.push({ segment, node });
+      if (
+        point.recordedWordWriters ||
+        point.recordedWordUnresolved ||
+        point.recordedWordChanges
+      )
+        (event.recordedWordEvidence ??= []).push({
+          segment,
+          node,
+          writers: point.recordedWordWriters,
+          unresolved: point.recordedWordUnresolved,
+          callbacks: point.recordedWordChanges,
+        });
       return id;
     });
   });
@@ -1540,6 +1822,8 @@ export function mergeTemporalContinuationGraph(
           context.scale === next.context.scale &&
           context.provider.kind === next.context.provider.kind &&
           context.provider.sampling === next.context.provider.sampling &&
+          context.provider.liveSessionId ===
+            next.context.provider.liveSessionId &&
           (nextSegment === 0 ||
             (requested?.signal === evidence.continuation?.signal &&
               requested?.liveSessionId ===
@@ -1553,11 +1837,15 @@ export function mergeTemporalContinuationGraph(
             );
           const compatible = roots(next).filter((index, order) => {
             const event = next.context.temporalTrace!.nodes[index];
+            const expectedCallback =
+              evidence.use?.evidence?.waitResumeCallbackOrdinal;
             if (
               event.sampleOnly ||
               event.executionOnly ||
               event.bit !== evidence.bit ||
-              event.value === undefined
+              event.value === undefined ||
+              (expectedCallback !== undefined &&
+                event.valueChangeOrdinal !== expectedCallback)
             )
               return false;
             if (anchor !== undefined) {
@@ -1580,6 +1868,8 @@ export function mergeTemporalContinuationGraph(
               return (
                 event.tick === evidence.tick &&
                 event.orderAtTick === evidence.orderAtTick &&
+                Boolean(event.initialSample) ===
+                  Boolean(evidence.initialSample) &&
                 (evidence.value === undefined || event.value === evidence.value)
               );
             return (
@@ -1617,6 +1907,13 @@ export function mergeTemporalContinuationGraph(
         evidence.reason !== "nodeBudget" &&
         evidence.reason !== "edgeBudget" &&
         evidence.reason !== "staticBudget";
+      gapSummary[status]++;
+      (gapSummary.byReason[evidence.reason] ??= { ...emptyCounts })[status]++;
+      if (evidence.bindingIssue) {
+        const issue = evidence.bindingIssue;
+        gapSummary.byBindingIssue[issue] =
+          (gapSummary.byBindingIssue[issue] ?? 0) + 1;
+      }
       gaps.push({
         segment,
         gap,
@@ -1642,8 +1939,7 @@ export function mergeTemporalContinuationGraph(
       reasons.add(reason);
     }
   }
-  const partial =
-    reasons.size !== 0 || gaps.some(({ status }) => status !== "joined");
+  const partial = reasons.size !== 0 || gaps.length !== gapSummary.joined;
   return {
     schemaVersion: 1 as const,
     scale: initial.context.scale,
@@ -1665,6 +1961,8 @@ export function mergeTemporalContinuationGraph(
     nodes,
     edges,
     gaps,
+    feedbackEdges: temporalFeedback(nodes.length, edges, gaps),
+    gapSummary,
     assignmentSources: traces.map((trace) => trace?.assignmentSources ?? null),
     coverage: {
       status: partial
@@ -1675,68 +1973,249 @@ export function mergeTemporalContinuationGraph(
   };
 }
 
+function assignmentReference(segment: number, assignment: number) {
+  return "S" + segment + "/A" + (assignment + 1);
+}
+
+export function temporalFeedbackReport(
+  feedback: ReturnType<typeof temporalFeedback>,
+  heading = "###",
+) {
+  if (!feedback?.length) return [];
+  return [
+    "",
+    heading + " Feedback in the time graph",
+    "",
+    "The following links close directed paths in the retained evidence graph.",
+    "",
+    ...feedback.map(
+      ({ source, target, edge, gap }) =>
+        "- t" +
+        source +
+        " → t" +
+        target +
+        (edge === undefined ? " · Continuation gap " + gap : " · Edge " + edge),
+    ),
+    "",
+  ];
+}
+
+export function wordWriteLabel(writer: RecordedWordWriter) {
+  return (
+    "Commit " +
+    writer.commitOrdinal +
+    (writer.targetRange
+      ? " · Write " + selectionText(writer.targetRange)
+      : "") +
+    (writer.attemptedTargetRange
+      ? " · Attempted " + selectionText(writer.attemptedTargetRange)
+      : "") +
+    (writer.contributingRanges?.length
+      ? " · Contributes " +
+        writer.contributingRanges
+          .map((range) => selectionText(range))
+          .join(", ")
+      : "") +
+    (writer.evaluation
+      ? " · Evaluation " +
+        writer.evaluation.ordinal +
+        " @ " +
+        writer.evaluation.tick +
+        (writer.evaluation.value === undefined
+          ? ""
+          : " = " + writer.evaluation.value)
+      : "")
+  );
+}
+
 export function combinedTemporalMermaid(
   combined: ReturnType<typeof mergeTemporalContinuationGraph>,
 ) {
   const graph = createMermaidFlowchart({ root: "stroke-width:3px" });
   const roots = new Set(combined.roots);
-  combined.nodes.forEach(({ signal, point }, id) => {
-    graph.node(
-      "t" + id,
-      signal +
-        " @ " +
-        point.tick +
-        " = " +
-        (point.value ?? "unavailable") +
-        (point.orderAtTick === undefined
-          ? ""
-          : " · change " + point.orderAtTick) +
-        (point.sampleOnly
-          ? point.beforeTick
-            ? " · before tick"
-            : " · sample"
-          : "") +
-        (point.sameValueWrite ? " · recorded same-value write" : "") +
-        (point.recordedWriter
-          ? " · commit " + point.recordedWriter.commitOrdinal
-          : ""),
-      { style: roots.has(id) ? "root" : undefined },
-    );
-  });
-  const renderedEdges = new Set<string>();
-  for (const edge of combined.edges) {
+  combined.nodes.forEach(
+    ({ signal, point, sources, recordedWordEvidence }, id) => {
+      const evaluation = point.recordedWriter?.evaluation;
+      graph.node(
+        "t" + id,
+        signal +
+          " @ " +
+          point.tick +
+          " = " +
+          (point.value ?? "unavailable") +
+          (point.orderAtTick === undefined
+            ? ""
+            : " · change " + point.orderAtTick) +
+          (point.enumConstant
+            ? " · RTL enum constant"
+            : point.packageParameter
+              ? " · RTL package parameter"
+              : point.elaboratedParameter
+                ? " · elaborated parameter"
+                : point.executionOnly && !point.sameValueWrite
+                  ? " · execution log"
+                  : point.operandEvaluationOrdinal !== undefined
+                    ? (point.waitResumeSample
+                        ? " · recorded wait resume · evaluation "
+                        : point.branchEntrySample
+                          ? " · captured branch entry · evaluation "
+                          : " · captured operand · evaluation ") +
+                      point.operandEvaluationOrdinal
+                    : point.sampleOnly
+                      ? point.beforeTick
+                        ? " · before tick"
+                        : " · sample"
+                      : "") +
+          (point.sameValueWrite ? " · recorded same-value write" : "") +
+          (point.initialSample ? " · initial waveform sample" : "") +
+          (point.recordedWriter
+            ? " · commit " + point.recordedWriter.commitOrdinal
+            : "") +
+          (evaluation
+            ? " · evaluated @ " +
+              evaluation.tick +
+              " order " +
+              evaluation.ordinal
+            : ""),
+        { style: roots.has(id) ? "root" : undefined },
+      );
+      addTemporalExternalEvidence(graph, id, point);
+      for (const assignment of point.initializationAssignments ?? []) {
+        const initializer = "init" + id + "_" + assignment;
+        graph.node(
+          initializer,
+          "Declaration initializer · RTL " +
+            assignmentReference(sources[0].segment, assignment),
+        );
+        graph.edge(initializer, "t" + id, "candidate", true);
+      }
+      for (const evidence of recordedWordEvidence ?? []) {
+        const prefix =
+          "word" + id + "_" + evidence.segment + "_" + evidence.node;
+        for (const [index, writer] of (evidence.writers ?? []).entries()) {
+          const write = prefix + "_write" + index;
+          graph.node(write, wordWriteLabel(writer));
+          graph.edge(
+            write,
+            "t" + id,
+            "RTL " + assignmentReference(evidence.segment, writer.assignment),
+          );
+          for (const [sample, label] of guardEntryLabels(
+            writer.evaluation?.guardEntryValues,
+            writer.evaluation?.guardEntryTicks,
+          ).entries()) {
+            const guard = write + "_guard" + sample;
+            graph.node(guard, label);
+            graph.edge(guard, write, "recorded branch entry");
+          }
+        }
+        if (evidence.unresolved?.length) {
+          const unresolved = prefix + "_unresolved";
+          graph.node(
+            unresolved,
+            "S" +
+              evidence.segment +
+              " · Writer unresolved " +
+              evidence.unresolved
+                .map((range) => selectionText(range))
+                .join(", "),
+          );
+          graph.edge(unresolved, "t" + id, "unverified bits", true);
+        }
+      }
+    },
+  );
+  const relations = new Map<
+    string,
+    {
+      source: number;
+      target: number;
+      label: string;
+      feedback: boolean;
+      references: Set<string>;
+    }
+  >();
+  const feedback = new Set(combined.feedbackEdges?.map(({ edge }) => edge));
+  const joinedFeedback = new Set(
+    combined.feedbackEdges?.flatMap(({ gap, target }) =>
+      gap === undefined ? [] : [gap + ":" + target],
+    ),
+  );
+  for (const [index, edge] of combined.edges.entries()) {
     const label =
       temporalEdgeLabel(edge) +
       (edge.recordedCommitOrdinal === undefined
         ? ""
-        : " · commit " + edge.recordedCommitOrdinal);
+        : " · commit " + edge.recordedCommitOrdinal) +
+      (feedback.has(index) ? " · feedback" : "");
     const key = JSON.stringify([edge.source, edge.target, label]);
-    if (renderedEdges.has(key)) continue;
-    renderedEdges.add(key);
-    graph.edge("t" + edge.source, "t" + edge.target, label);
+    let relation = relations.get(key);
+    if (!relation) {
+      relation = {
+        source: edge.source,
+        target: edge.target,
+        label,
+        feedback: feedback.has(index),
+        references: new Set(),
+      };
+      relations.set(key, relation);
+    }
+    for (const assignment of [edge.assignment, ...(edge.alsoAssignments ?? [])])
+      relation.references.add(assignmentReference(edge.segment, assignment));
+  }
+  const referencesPerEdge = 8;
+  for (const {
+    source,
+    target,
+    label,
+    feedback,
+    references,
+  } of relations.values()) {
+    const assignments = [...references];
+    for (
+      let offset = 0;
+      offset < assignments.length;
+      offset += referencesPerEdge
+    )
+      graph.edge(
+        "t" + source,
+        "t" + target,
+        label +
+          " · RTL " +
+          assignments.slice(offset, offset + referencesPerEdge).join(" "),
+        feedback,
+      );
   }
   for (const [id, gap] of combined.gaps.entries()) {
     const target = gap.target === undefined ? undefined : "t" + gap.target;
     const anchor = gap.anchor === undefined ? undefined : "t" + gap.anchor;
+    const use = gap.evidence.use;
+    const useLabel = use
+      ? temporalGapUseLabel(use) +
+        " · RTL " +
+        assignmentReference(gap.segment, use.assignment)
+      : undefined;
     if (gap.status === "joined" && gap.source !== undefined) {
       if (anchor && gap.source !== gap.anchor)
         graph.edge(
           "t" + gap.source,
           anchor,
-          "same change · continued static trace",
+          "same change · continued static trace" +
+            (joinedFeedback.has(id + ":" + gap.anchor) ? " · feedback" : ""),
           true,
         );
-      if (target)
+      if (target && gap.source !== gap.target)
         graph.edge(
           "t" + gap.source,
           target,
           "continued " +
-            (gap.evidence.use
-              ? temporalGapUseLabel(gap.evidence.use)
-              : "observation") +
+            (useLabel ?? "observation") +
             (gap.evidence.historyCutoff === undefined
               ? ""
-              : " · earlier change"),
+              : combined.nodes[gap.source].point.initialSample
+                ? " · initial sample"
+                : " · earlier change") +
+            (joinedFeedback.has(id + ":" + gap.target) ? " · feedback" : ""),
           true,
         );
       continue;
@@ -1748,20 +2227,14 @@ export function combinedTemporalMermaid(
         " @ " +
         gap.evidence.tick +
         " · " +
-        temporalGapLabels[gap.evidence.reason] +
+        temporalGapLabel(gap.evidence) +
         (gap.status === "unmatched"
           ? " · transition unavailable"
           : gap.status === "pending"
             ? " · continuation pending"
             : ""),
     );
-    if (target)
-      graph.edge(
-        node,
-        target,
-        gap.evidence.use && temporalGapUseLabel(gap.evidence.use),
-        true,
-      );
+    if (target) graph.edge(node, target, useLabel, true);
     if (anchor) graph.edge(node, anchor, "static frontier", true);
   }
   return graph.pages();
@@ -1825,11 +2298,67 @@ export function continuationMermaidPages(
   return graph.pages();
 }
 
+const inlineCode = (value: string) =>
+  "`" + value.replace(/[`\r\n]/g, " ") + "`";
+
+export function recordedTaskReport<
+  Point extends Pick<
+    ReturnType<typeof buildTemporalTrace>["nodes"][number],
+    "recordedTaskTransfer"
+  >,
+>(
+  nodes: readonly Point[],
+  nameOf: (point: Point, index: number) => string,
+  heading: string,
+) {
+  const tasks = nodes.flatMap((point, index) => {
+    const task = point.recordedTaskTransfer;
+    if (!task) return [];
+    return [
+      "- " +
+        inlineCode(nameOf(point, index)) +
+        " · input commit " +
+        task.input.ordinal +
+        " @ " +
+        task.input.tick +
+        " · " +
+        inlineCode(task.input.source.file) +
+        " L" +
+        task.input.source.line +
+        " · member write commit " +
+        task.write.ordinal +
+        " @ " +
+        task.write.tick +
+        " · " +
+        inlineCode(task.write.source.file) +
+        " L" +
+        task.write.source.line,
+      ...task.reads.map(
+        (read) =>
+          "  - " +
+          inlineCode(read.operation + " = " + read.value) +
+          " · evaluation " +
+          read.ordinal +
+          " @ " +
+          read.tick +
+          " · " +
+          inlineCode(read.source.file) +
+          " L" +
+          read.source.line,
+      ),
+    ];
+  });
+  return tasks.length
+    ? ["", heading + " Recorded task inputs from firmware reads", "", ...tasks]
+    : [];
+}
+
 export function continuationReport(
   walk: ContinuationWalk,
   overview: readonly string[],
   combined?: ReturnType<typeof mergeTemporalContinuationGraph>,
   initial?: ContinuationTrace,
+  combinedPages?: readonly string[],
 ) {
   const code = (text: string) => "`" + text.replace(/[`\r\n]/g, " ") + "`";
   const section = (number: number) =>
@@ -1850,7 +2379,7 @@ export function continuationReport(
       : []),
     "",
   ];
-  if (combined?.nodes.length)
+  if (combined && (combined.nodes.length || combined.gaps.length)) {
     lines.push(
       "### Combined time graph",
       "",
@@ -1858,15 +2387,125 @@ export function continuationReport(
         " time nodes · " +
         combined.edges.length +
         " evidence edges · " +
-        combined.gaps.filter(({ status }) => status === "joined").length +
+        combined.gapSummary.joined +
         " linked continuations",
       ...(combined.coverage.reasons.length
         ? ["", "Coverage · " + combined.coverage.reasons.join(", ")]
         : []),
-      "",
-      mermaidMarkdown(combinedTemporalMermaid(combined)),
+      ...(combined.gaps.length
+        ? [
+            "",
+            "| Gap reason | Joined | Pending | Unmatched | Unresolved |",
+            "| --- | ---: | ---: | ---: | ---: |",
+            ...Object.entries(combined.gapSummary.byReason).map(
+              ([reason, { joined, pending, unmatched, unresolved }]) =>
+                "| " +
+                temporalGapLabels[reason as TemporalGap["reason"]] +
+                " | " +
+                [joined, pending, unmatched, unresolved].join(" | ") +
+                " |",
+            ),
+            ...(combined.coverage.reasons.includes("gapBudget")
+              ? [
+                  "",
+                  "Counts cover the retained gaps. Some gaps exceeded the recording budget.",
+                ]
+              : []),
+          ]
+        : []),
       "",
     );
+    const bindingIssues = Object.entries(combined.gapSummary.byBindingIssue);
+    if (bindingIssues.length)
+      lines.push(
+        "| Waveform binding issue | Retained gaps |",
+        "| --- | ---: |",
+        ...bindingIssues.map(
+          ([issue, count]) =>
+            "| " +
+            traceBindingIssueLabels[issue as TraceBindingIssue] +
+            " | " +
+            count +
+            " |",
+        ),
+        "",
+      );
+    lines.push(
+      mermaidMarkdown(combinedPages ?? combinedTemporalMermaid(combined)),
+      ...temporalFeedbackReport(combined.feedbackEdges, "####"),
+      "",
+      "#### RTL assignment source index",
+      "",
+      "`S0` is the root query, and `S1` onward are continuations. `A` numbers identify assignments within each segment, starting at 1.",
+      "",
+    );
+    for (const [segment, sources] of combined.assignmentSources.entries()) {
+      for (const [assignment, { kind, instance, location }] of Object.entries(
+        sources ?? {},
+      ))
+        lines.push(
+          "- " +
+            code(assignmentReference(segment, Number(assignment))) +
+            " · " +
+            kind +
+            (instance ? " · " + code(instance) : "") +
+            " · " +
+            code(location.uri) +
+            " L" +
+            (location.range.start.line + 1) +
+            ":" +
+            (location.range.start.character + 1),
+        );
+    }
+    lines.push("");
+    lines.push(
+      ...recordedGuardReport(
+        combined.nodes.map(({ point }) => point),
+        (index) => combined.nodes[index].signal,
+        "####",
+      ),
+    );
+    const wordEvidence = combined.nodes.flatMap((event, index) =>
+      (event.recordedWordEvidence ?? []).map((evidence) => ({
+        event,
+        index,
+        evidence,
+      })),
+    );
+    if (wordEvidence.length)
+      lines.push("#### Recorded packed word evidence", "");
+    for (const { event, index, evidence } of wordEvidence) {
+      lines.push(
+        "- " +
+          code("t" + index) +
+          " · " +
+          code(event.signal) +
+          " @ " +
+          event.point.tick +
+          " · S" +
+          evidence.segment,
+      );
+      for (const writer of evidence.writers ?? [])
+        lines.push(
+          "  - " +
+            code(assignmentReference(evidence.segment, writer.assignment)) +
+            " · " +
+            inlineCode(wordWriteLabel(writer)),
+        );
+      if (evidence.unresolved?.length)
+        lines.push(
+          "  - Writer unresolved " +
+            evidence.unresolved
+              .map((range) => code(selectionText(range)))
+              .join(", "),
+        );
+      for (const callback of evidence.callbacks ?? [])
+        lines.push(
+          "  - Callback " + callback.ordinal + " · " + code(callback.value),
+        );
+    }
+    if (wordEvidence.length) lines.push("");
+  }
   lines.push(mermaidMarkdown(overview), "");
   if (walk.links.length) {
     lines.push("### Links from time graph gaps", "");
@@ -1884,6 +2523,7 @@ export function continuationReport(
     context,
     signals,
     assignmentSources,
+    waveformSignals,
   }: ContinuationTrace) => {
     const graph = context.temporalTrace;
     if (!graph) {
@@ -1906,7 +2546,23 @@ export function continuationReport(
       lines.push("", "Coverage · " + graph.coverage.reasons.join(", "));
     lines.push(
       "",
-      mermaidMarkdown(temporalMermaidPages(graph, context, undefined, signals)),
+      mermaidMarkdown(
+        temporalMermaidPages(
+          graph,
+          context,
+          undefined,
+          signals,
+          waveformSignals,
+        ),
+      ),
+    );
+    const names = temporalNames(context, signals, waveformSignals);
+    lines.push(
+      ...recordedTaskReport(
+        graph.nodes,
+        ({ signal }) => names.get(signal) ?? "Signal " + signal,
+        "####",
+      ),
     );
     const sources = Object.entries(assignmentSources);
     if (sources.length) lines.push("", "RTL assignment locations", "");
@@ -1975,7 +2631,11 @@ export function observationReport(
       orderAtTick: number;
     };
     sourceMatch?: "matched" | "mismatched" | "unverified";
-    sourceVerification?: { mismatches: string[]; limitations: string[] };
+    sourceVerification?: {
+      mismatches: string[];
+      limitations: string[];
+      vcsPli?: import("./rtl-build-verification").VcsPliVerification[];
+    };
   },
   trace?: VideTrace,
 ) {
@@ -2018,6 +2678,22 @@ export function observationReport(
       lines.push("- Build difference · `" + clean(mismatch) + "`");
     for (const limitation of evidence.sourceVerification?.limitations ?? [])
       lines.push("- Verification gap · `" + clean(limitation) + "`");
+    const pli = evidence.sourceVerification?.vcsPli;
+    if (pli?.length) {
+      lines.push("", "## VCS PLI inputs recorded for this run", "");
+      for (const { table, library, calls } of pli) {
+        lines.push("- Table `" + clean(table.path) + "` · " + table.identity);
+        if (library)
+          lines.push(
+            "  - Library `" + clean(library.path) + "` · " + library.identity,
+          );
+        if (calls?.length)
+          lines.push(
+            "  - Registered entries in recorded table · " +
+              calls.map((call) => "`" + clean(call) + "`").join(", "),
+          );
+      }
+    }
   }
   if (evidence.runtimeInputs?.length || evidence.runtimeMismatches?.length) {
     const clean = (value: string) => value.replace(/[\x60\r\n]/g, " ");
@@ -2082,14 +2758,13 @@ export function observationReport(
       trace?.signals,
     ))
       lines.push("", "```mermaid", page, "```");
+    lines.push(...temporalFeedbackReport(temporal.feedbackEdges));
     if (temporal.frontier.length)
       lines.push(
         "",
         "Trace budget reached for " + temporal.frontier.length + " signals.",
       );
     const names = temporalNames(evidence, trace?.signals);
-    const inlineCode = (value: string) =>
-      "`" + value.replace(/[\x60\r\n]/g, " ") + "`";
     const sameValueWrites = temporal.nodes.flatMap((point) =>
       point.sameValueWrite && point.recordedWriter
         ? [
@@ -2191,41 +2866,53 @@ export function observationReport(
     );
     if (external.length)
       lines.push("", "## Recorded external execution", "", ...external);
-    const tasks = temporal.nodes.flatMap((point) => {
-      const task = point.recordedTaskTransfer;
-      if (!task) return [];
+    lines.push(
+      ...recordedTaskReport(
+        temporal.nodes,
+        ({ signal }) => names.get(signal) ?? "Signal " + signal,
+        "##",
+      ),
+    );
+    lines.push(
+      ...recordedGuardReport(
+        temporal.nodes,
+        (_index, signal) => names.get(signal) ?? "Signal " + signal,
+        "##",
+      ),
+    );
+    const waitCauses = temporal.edges.flatMap((edge) => {
+      if (!edge.waitResumeCause) return [];
+      const source = temporal.nodes[edge.source];
+      const target = temporal.nodes[edge.target];
+      const sourceName = inlineCode(
+        names.get(source.signal) ?? "Signal " + source.signal,
+      );
+      const targetName = inlineCode(
+        names.get(target.signal) ?? "Signal " + target.signal,
+      );
       return [
         "- " +
-          inlineCode(names.get(point.signal) ?? "Signal " + point.signal) +
-          " · input commit " +
-          task.input.ordinal +
-          " @ " +
-          task.input.tick +
-          " · member write commit " +
-          task.write.ordinal +
-          " @ " +
-          task.write.tick,
-        ...task.reads.map(
-          (read) =>
-            "  - " +
-            inlineCode(read.operation + " = " + read.value) +
-            " · evaluation " +
-            read.ordinal +
-            " @ " +
-            read.tick +
-            " · " +
-            inlineCode(read.source.file) +
-            " L" +
-            read.source.line,
-        ),
+          sourceName +
+          " became " +
+          inlineCode(source.value ?? "") +
+          " at tick " +
+          source.tick +
+          (edge.waitResumeCause === "orderedCallbacks"
+            ? " (recorded callback " + edge.waitResumeCallbackOrdinal + ")"
+            : "") +
+          " and enabled the wait leading to " +
+          targetName +
+          " at tick " +
+          target.tick +
+          ".",
       ];
     });
-    if (tasks.length)
+    if (waitCauses.length)
       lines.push(
         "",
-        "## Recorded task inputs from firmware reads",
+        "## Observed changes that enabled a wait",
         "",
-        ...tasks,
+        ...new Set(waitCauses),
       );
     const wordsWritten = temporal.nodes.filter(
       ({ recordedWordWriters }) => recordedWordWriters,
@@ -2279,6 +2966,7 @@ export function observationReport(
             );
           for (const label of guardEntryLabels(
             writer.evaluation?.guardEntryValues,
+            writer.evaluation?.guardEntryTicks,
           ))
             lines.push("    - Branch entry · " + inlineCode(label));
         }
@@ -2319,14 +3007,8 @@ export function observationReport(
       mermaidLabel(
         temporalSignalName(names.get(signal) ?? "RTL signal " + signal, bit),
       );
-    for (const {
-      signal,
-      bit,
-      tick,
-      reason,
-      use,
-      continuation,
-    } of temporal.gaps) {
+    for (const gap of temporal.gaps) {
+      const { signal, bit, tick, use, continuation } = gap;
       const target = use && temporal.nodes[use.target];
       const assignment = use && trace?.assignments[use.assignment];
       lines.push(
@@ -2335,7 +3017,7 @@ export function observationReport(
           " @ " +
           tick +
           " · " +
-          temporalGapLabels[reason] +
+          temporalGapLabel(gap) +
           (target
             ? " · " +
               temporalGapUseLabel(use) +
@@ -2346,6 +3028,9 @@ export function observationReport(
             : "") +
           (assignment
             ? " · " + mermaidLabel(sourceLocation(assignment.location))
+            : "") +
+          (gap.declaration
+            ? " · Declared at " + mermaidLabel(sourceLocation(gap.declaration))
             : "") +
           (continuation
             ? " · Continue from `" +
@@ -2389,10 +3074,12 @@ export function observationReport(
       ),
     );
   }
-  if (result?.status === "observedChange") {
+  if (result && result.status !== "noObservedChange") {
     lines.push(
       "",
-      "## Candidate assignments for the observed change",
+      result.status === "initialSample"
+        ? "## Candidate assignments for the initial waveform sample"
+        : "## Candidate assignments for the observed change",
       "",
       "Tick " + result.change.tick + " · Value " + result.change.value,
       "",
@@ -2421,9 +3108,11 @@ export function observationReport(
         candidate.status === "consistentWithObservations"
           ? "Trigger and guards consistent with the observations"
           : candidate.status === "contradictedByObservations"
-            ? indexExcluded
-              ? "The target index excludes this write"
-              : "Trigger or guard contradicted by the observations"
+            ? candidate.initializationOutsideStart
+              ? "The declaration initializes only at simulation start"
+              : indexExcluded
+                ? "The target index excludes this write"
+                : "Trigger or guard contradicted by the observations"
             : "Possible assignment";
       lines.push(
         "- " +
@@ -2537,8 +3226,34 @@ export function traceReport(
     value.replace(/[\\\x60*_[\]<>|#]/g, "\\$&").replace(/[\r\n]/g, " ");
   const root = safe(signal ?? names.get(trace.root) ?? "Signal");
   const parameters = new Map(
-    trace.signals.flatMap(({ id, parameterValue }) =>
-      parameterValue ? [[id, parameterValue] as const] : [],
+    trace.signals.flatMap(({ id, parameterValue, instanceParameterValue }) => {
+      const value = parameterValue ?? instanceParameterValue;
+      return value ? [[id, value] as const] : [];
+    }),
+  );
+  const instanceParameters = new Set(
+    trace.signals
+      .filter(({ instanceParameter }) => instanceParameter)
+      .map(({ id }) => id),
+  );
+  const enumValues = new Map(
+    trace.signals.flatMap(({ id, enumValue }) =>
+      enumValue ? [[id, enumValue.bits] as const] : [],
+    ),
+  );
+  const unavailableEnums = new Set(
+    trace.signals
+      .filter(({ enumValueUnavailable }) => enumValueUnavailable)
+      .map(({ id }) => id),
+  );
+  const packageParameters = new Map(
+    trace.signals.map(
+      ({ id, packageParameterValue, packageParameterValueUnavailable }) =>
+        [
+          id,
+          packageParameterValue ??
+            (packageParameterValueUnavailable ? "unavailable" : undefined),
+        ] as const,
     ),
   );
   const lines = [
@@ -2579,6 +3294,9 @@ export function traceReport(
               compilation.parameterOverrides.map(safe).join(", "),
           ]
         : []),
+      ...(compilation?.defaultTimescale
+        ? ["- Default RTL timescale " + safe(compilation.defaultTimescale)]
+        : []),
       ...(compilation?.defines.length
         ? ["- Defines " + compilation.defines.map(safe).join(", ")]
         : []),
@@ -2590,6 +3308,12 @@ export function traceReport(
         : []),
       ...(project.libraryMaps ?? []).map(
         (file) => "- Library map " + safe(file),
+      ),
+      ...(project.vcsPli ?? []).map(
+        ({ table, library }) =>
+          "- VCS PLI table " +
+          safe(table) +
+          (library ? " · " + safe(library) : ""),
       ),
       ...(compilation?.compilationUnits ?? []).flatMap((unit, index) => {
         const options = compilation?.compilationUnitOptions?.[index];
@@ -2698,11 +3422,23 @@ export function traceReport(
       const name = safe((names.get(input.signal) ?? "?") + selected);
       const kind = input.edge ? input.kind + " " + input.edge : input.kind;
       const parameter = parameters.get(input.signal);
-      const elaborated = parameter
-        ? " · elaborated parameter " +
-          (traceInteger(parameter.bits, parameter.signed)?.toString() ??
-            parameter.bits)
-        : "";
+      const enumBits = enumValues.get(input.signal);
+      const packageParameter = packageParameters.get(input.signal);
+      const elaborated = enumBits
+        ? " · RTL enum constant " + enumBits
+        : unavailableEnums.has(input.signal)
+          ? " · " + temporalGapLabels.enumValueUnavailable
+          : packageParameter === "unavailable"
+            ? " · " + temporalGapLabels.packageParameterValueUnavailable
+            : packageParameter
+              ? " · RTL package parameter " + packageParameter.bits
+              : parameter
+                ? " · elaborated parameter " +
+                  (traceInteger(parameter.bits, parameter.signed)?.toString() ??
+                    parameter.bits)
+                : instanceParameters.has(input.signal)
+                  ? " · " + temporalGapLabels.instanceParameterValueUnavailable
+                  : "";
       lines.push(
         "  - " +
           name +
@@ -2839,7 +3575,11 @@ export function traceReport(
                 : "this signal") +
               " as the root of a follow-up trace."
             : item.waveformUnavailable
-              ? " No matching dumped signal for waveform continuation."
+              ? " No matching dumped signal for waveform continuation" +
+                (item.unavailableBits?.length
+                  ? " at bits " + item.unavailableBits.join(", ")
+                  : "") +
+                "."
               : ""),
     );
   }

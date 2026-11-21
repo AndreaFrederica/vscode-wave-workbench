@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+import { localize } from "../shared/localization";
 import ELK from "elkjs/lib/elk.bundled.js";
 import type { ElkNode, ElkPort } from "elkjs/lib/elk-api";
 import { spatialIndex, type Bounds } from "./schematic-spatial";
@@ -423,7 +424,7 @@ function navigate(type: string, direction?: "drivers" | "loads") {
   }
   navigation = true;
   controls();
-  status.textContent = "正在读取连接…";
+  status.textContent = localize("正在读取连接…");
   vscode.postMessage({
     type,
     id: type === "follow" || type === "enter" ? selected?.id : undefined,
@@ -804,9 +805,13 @@ function renderDenseGraph(
       }
     }
     const message = overview
-      ? `${graph.nodes.length} 节点 · ${graph.edges.length} 连线 · 放大查看连线`
+      ? localize(
+          "{0} 节点 · {1} 连线 · 放大查看连线",
+          graph.nodes.length,
+          graph.edges.length,
+        )
       : graph.partial
-        ? "图中含未解析连接"
+        ? localize("图中含未解析连接")
         : "";
     const summary = [graph.module?.logicStatus, message]
       .filter(Boolean)
@@ -1122,12 +1127,12 @@ async function render(
     updateViewport();
   }
   const message = graph.partial
-    ? "图中含未解析连接"
+    ? localize("图中含未解析连接")
     : graph.nodes.length
       ? ""
       : moduleMode
-        ? "该模块没有可显示的端口或实例"
-        : "本次追踪没有可显示的关系";
+        ? localize("该模块没有可显示的端口或实例")
+        : localize("本次追踪没有可显示的关系");
   status.textContent = [graph.module?.logicStatus, message]
     .filter(Boolean)
     .join(" · ");
@@ -1160,9 +1165,9 @@ async function drawGraph(view?: SchematicView) {
   title.textContent =
     inside === undefined
       ? baseTitle
-      : baseTitle + " · " + (inside || "未定位实例");
+      : baseTitle + " · " + (inside || localize("未定位实例"));
   title.title = title.textContent;
-  status.textContent = "正在布局…";
+  status.textContent = localize("正在布局…");
   controls();
   try {
     await render(

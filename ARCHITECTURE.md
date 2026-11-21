@@ -4,9 +4,28 @@
 
 | 路径 | 职责 |
 | --- | --- |
-| `src/extension.ts` | 扩展激活、VS Code 命令、编辑器布局、RTL 双向定位 |
-| `src/wave-editor.ts` | 波形编辑器会话、Webview 消息、后端切换 |
+| `src/extension.ts` | 扩展激活、模块组装、打开的波形会话与当前会话 |
+| `src/wave-commands.ts`、`src/wave-files.ts` | 通用 VS Code 命令、最近文件、波形工程打开与保存 |
+| `src/wave-sidebar.ts`、`src/wave-source-navigation.ts` | 波形侧栏、源码与波形双向定位 |
+| `src/wave-rtl-hover.ts` | RTL 悬停取值、端口与实参映射、总线解码 |
+| `src/wave-analysis.ts` | 静态、动态与精确执行追踪的查询协调及 MCP 分页 |
+| `src/wave-trace-view.ts` | Trace Explorer 命令、选中信号、A 游标联动与视图状态 |
+| `src/wave-trace-continuation.ts` | 续查请求、检查点校验、恢复批次、合并结果和续查报告 |
+| `src/wave-vide-project.ts` | VIDE 仿真工程选择 |
+| `src/wave-schematics.ts` | 信号与模块原理图面板、导航与恢复 |
+| `src/live-debug-session.ts` | 在线仿真会话、VS Code 调试适配器与实时波形视图 |
+| `src/wave-foreground-tools.ts`、`src/wave-tcl.ts` | 扩展宿主 MCP 工具、波形 Tcl 执行与日志 |
+| `src/wave-tcl-console.ts`、`src/wave-dock.ts` | VS Code 调试控制台中的 Tcl 会话、波形编辑器的底部停靠 |
+| `src/wave-decoders.ts`、`src/wave-clip-export.ts` | 解码器管理、波形裁剪与导出 |
+| `src/wave-editor.ts` | VS Code 自定义编辑器注册、会话生命周期与 Webview 消息路由 |
+| `src/wave-editor-surfaces.ts` | 波形 Webview 渲染、编辑器与底部面板之间的状态交接 |
+| `src/wave-editor-queries.ts` | 波形窗口与概览、信号搜索与分页、虚拟信号及显示配置恢复 |
+| `src/wave-editor-decoders.ts` | Webview 解码器请求、取消、规则目录及配置保存 |
+| `src/wave-editor-backend.ts` | 读取波形元数据、恢复设计和视图、切换后端及回退 |
+| `src/wave-editor-operations.ts` | 波形编辑器的数学、测量、模拟单位与滞回操作 |
+| `src/wave-cache.ts` | 波形缓存预算、诊断和清理面板 |
 | `src/wave-documents.ts` | 波形工程文档的打开、保存、备份与恢复 |
+| `src/wave-design.ts` | 自动发现和手动接入设计数据库、恢复层次视图、为后端切换打开设计会话 |
 | `src/backend-selection.ts` | 为 FSDB、KDB 和 VCD 选择并启动对应后端 |
 | `src/viewer.ts` | 波形编辑器会话类型 |
 | `src/backend.ts` | 子进程生命周期、请求编号、超时与行分隔 JSON 协议 |
@@ -24,7 +43,11 @@
 | `native/src/independent/kdb/` | KDB 归档、设计层次、信号声明和 RTL 来源 |
 | `native/src/main.rs` | 两套后端的协议入口、波形查询、缓存和虚拟信号 |
 
-原先相互依赖全局变量的波形和工作流脚本合为一个浏览器入口，共享工具通过模块导入。esbuild 为扩展宿主生成 CommonJS 模块，为两个 Webview 分别生成独立浏览器包。Webview 资源根目录包含 `media/` 和 `dist/webview/`；浏览器包不依赖 Node 或运行时 npm 模块。
+扩展入口管理已打开的波形会话和当前会话。功能模块通过入口传入的回调读取会话，各自注册命令与视图。分析模块和 Trace 视图通过同一个回调读取当前在线仿真会话。前台 MCP 和 Tcl `waveTool` 共用工具派发，入口在注册波形编辑器前装配该派发。
+
+编辑器模块将波形文档处理器和 Webview 解析器注册为同一个自定义编辑器。关闭波形时，编辑器取消解码查询、释放波形后端、KDB 和 Tcl，并通知入口更新当前会话和追踪状态。扩展停用时，入口释放仍打开的会话，VS Code 释放扩展登记的命令和视图。
+
+波形与工作流脚本共用一个浏览器入口，共享工具通过模块导入。esbuild 为扩展宿主生成 CommonJS 模块，为波形编辑器、侧栏、实时波形和原理图各生成一个浏览器包。Webview 从 `media/` 和 `dist/webview/` 加载资源，浏览器包可直接在 Webview 中运行。
 
 ## 类型检查
 

@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import type { BigIntStats } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import * as path from "node:path";
+import { normalizeRtlTimescale } from "./shared/time";
 
 export interface SimulationManifest {
   schemaVersion: 1;
@@ -22,6 +23,10 @@ export interface SimulationManifest {
   defines: string[];
   topModules: string[];
   parameterOverrides: string[];
+  defaultTimescale?: string;
+  vcsPli?: { table: string; library?: string; calls?: string[] }[];
+  vcsTraceLibrary?: string;
+  externalSystemCalls?: string[];
   unverifiedVcsParameterPaths?: string[];
   unsupported: string[];
 }
@@ -132,6 +137,16 @@ async function readVcsMetadata(filename: string) {
   }
 }
 
+function vcsPliCalls(text: string) {
+  const calls = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    const name = /^\s*(\$[A-Za-z_][\w$]*)\s/.exec(line)?.[1];
+    if (name && /\bcall\s*=/.test(line)) calls.add(name);
+    if (calls.size === 512) break;
+  }
+  return [...calls];
+}
+
 function vcsDesignMetadata(text: string) {
   const [header, ...lines] = text.split(/\r?\n/);
   if (header !== "rc file Version 1.0") return undefined;
@@ -201,6 +216,30 @@ export async function discoverVcsRebuild(database: string) {
       fingerprint: metadata.fingerprint,
     });
   return { filelist, workingDirectory: directory, rebuild };
+}
+
+export async function readVcsSourceInventory(
+  rebuildFile: string,
+  workingDirectory: string,
+) {
+  const filename = path.join(
+    path.dirname(rebuildFile),
+    "debug_dump",
+    "src_files_verilog",
+  );
+  const inventory = await readVcsMetadata(filename);
+  const sources = inventory?.text?.trimEnd().split(/\r?\n/);
+  return {
+    input: inventory && { path: filename, fingerprint: inventory.fingerprint },
+    files:
+      sources?.length &&
+      sources.length <= 16384 &&
+      sources.every(
+        (source) => source.trim().length > 0 && !source.includes("\0"),
+      )
+        ? sources.map((source) => path.resolve(workingDirectory, source))
+        : [],
+  };
 }
 
 function libraryMapRules(
@@ -443,6 +482,55 @@ export async function readSimulationFilelist(
             /^-debug_(?:access|region)(?:\+.*)?$/.test(arg))
         ) {
           continue;
+        } else if (buildCommand && arg === "-load") {
+          const registration = option(arg);
+          const match = /^(.+\.so):wave_workbench_register_vpi$/.exec(
+            registration,
+          );
+          const linked = args[index + 1];
+          if (match && linked?.endsWith(".so") && !manifest.vcsTraceLibrary) {
+            const library = resolveInputPath(match[1], base, filename);
+            if (
+              library &&
+              library === resolveInputPath(linked, base, filename)
+            ) {
+              manifest.vcsTraceLibrary = library;
+              manifest.filelists.push(
+                await simulationInputFingerprint(library),
+              );
+              index++;
+              continue;
+            }
+          }
+          diagnostics.add(arg);
+          diagnostics.add(registration);
+        } else if (!unit && arg.startsWith("-timescale=")) {
+          const timescale = normalizeRtlTimescale(
+            arg.slice("-timescale=".length),
+          );
+          if (timescale) manifest.defaultTimescale = timescale;
+          else diagnostics.add(arg);
+        } else if (!unit && arg === "-P") {
+          const table = resolveInputPath(option(arg), base, filename);
+          const library = /\.(?:a|o|so(?:\.\d+)*|dll|lib|dylib)$/i.test(
+            args[index + 1] ?? "",
+          )
+            ? resolveInputPath(args[++index], base, filename)
+            : undefined;
+          if (table) {
+            const metadata = await readVcsMetadata(table);
+            if (metadata)
+              manifest.filelists.push({
+                path: table,
+                fingerprint: metadata.fingerprint,
+              });
+            const calls = metadata?.text ? vcsPliCalls(metadata.text) : [];
+            (manifest.vcsPli ??= []).push({
+              table,
+              library,
+              ...(calls.length ? { calls } : {}),
+            });
+          }
         } else if (!unit && (arg === "-f" || arg === "-F")) {
           const nested = resolveInputPath(option(arg), base, filename);
           if (nested)
@@ -552,6 +640,7 @@ export async function readSimulationFilelist(
   }
 
   await readList(manifest.filelist, manifest.workingDirectory);
+  if (manifest.vcsTraceLibrary) diagnostics.delete("+vpi");
   if (rebuild?.topModules && !manifest.topModules.length)
     manifest.topModules.push(...rebuild.topModules);
   const selectedTops = new Set(manifest.topModules);
@@ -743,6 +832,11 @@ export async function readSimulationFilelist(
   )
     throw Error("A compilation unit spans multiple named source libraries.");
   manifest.unsupported = [...diagnostics];
+  const externalSystemCalls = [
+    ...new Set(manifest.vcsPli?.flatMap(({ calls }) => calls ?? [])),
+  ];
+  if (externalSystemCalls.length)
+    manifest.externalSystemCalls = externalSystemCalls;
   return manifest;
 }
 
@@ -786,6 +880,10 @@ export function previewVideManifest(manifest: SimulationManifest) {
     "# Generated from " + comment(manifest.filelist),
     "# Simulator working directory " + comment(manifest.workingDirectory),
     ...manifest.unsupported.map((message) => "# Unmapped " + comment(message)),
+    ...(manifest.vcsPli ?? []).map(
+      ({ table, library }) =>
+        "# VCS PLI " + comment([table, library].filter(Boolean).join(" · ")),
+    ),
   ];
   return notes.join("\n") + "\n\n" + traceVideManifest(manifest);
 }
@@ -803,6 +901,8 @@ export function traceVideManifest(
     | "defines"
     | "topModules"
     | "parameterOverrides"
+    | "defaultTimescale"
+    | "externalSystemCalls"
   >,
 ) {
   const entries = {
@@ -820,6 +920,12 @@ export function traceVideManifest(
     defines: manifest.defines,
     top_modules: manifest.topModules,
     parameter_overrides: manifest.parameterOverrides,
+    ...(manifest.defaultTimescale
+      ? { default_timescale: manifest.defaultTimescale }
+      : {}),
+    ...(manifest.externalSystemCalls?.length
+      ? { external_system_calls: manifest.externalSystemCalls }
+      : {}),
   };
   return (
     Object.entries(entries)

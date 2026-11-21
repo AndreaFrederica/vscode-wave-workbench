@@ -11,9 +11,9 @@ const { test } = require("node:test");
 const { Backend } = require("../dist/backend");
 const { VerilatorDesign } = require("../dist/verilator");
 const { annotateRecordedValueChanges, attachRecordedTaskTransfers, correlateExecutionTransitions, readExecutionEvidence, readExecutionEvidenceBatch, reachedWriteEvents, executionMermaid, executionReport, linkExecutionAssignments, matchRecordedModportComponents, reconcileRecordedWordHistory, recordedCursorWrite, recordedOperandHistory, recordedWriters, restoreRecordedSignalHistory, vcsExecutionStatements } = require("../dist/rtl-execution");
-const { buildTemporalTrace } = require("../dist/rtl-trace-candidates");
+const { buildTemporalTrace, temporalTransitionKey } = require("../dist/rtl-trace-candidates");
 const { LiveTraceSession, matchLiveExecution } = require("../dist/rtl-live-trace");
-const { codeOnly, vcsGuardEntry } = require("../dist/rtl-selection");
+const { codeOnly, vcsCaseEntry, vcsGuardEntry, vcsStandaloneWait, vcsWaitEntry, vcsWaitOperands } = require("../dist/rtl-selection");
 
 test("verified array callbacks refine coalesced waveform history only when slot values match", () => {
   const observation = {
@@ -68,6 +68,116 @@ test("complete callbacks restore a packed bit that returns to its prior value at
   recording.observationCoverage.status = "complete";
   events.push({ kind: "assignment-committed", ordinal: 23, tick: "3", value: "1001" });
   assert.equal(restoreRecordedSignalHistory(evidence, recordings), undefined);
+  recording.coverage = { status: "complete" };
+  assert.equal(restoreRecordedSignalHistory(evidence, recordings), undefined);
+  events.splice(1, 0, {
+    kind: "assignment-committed", ordinal: 21, tick: "3",
+    writeKind: "nonblocking", timing: "simulator-commit", targetRange: [1, 1], value: "1",
+  });
+  assert.deepEqual(restoreRecordedSignalHistory(evidence, recordings).observations[0].history,
+    restored.observations[0].history);
+  events[1].timing = "end-of-slot";
+  assert.equal(restoreRecordedSignalHistory(evidence, recordings), undefined);
+  events[1].timing = "simulator-commit";
+  const noInitial = {
+    ...evidence, historyStart: "0",
+    observations: [{ ...signal, initial: undefined, history: [
+      { tick: "0", value: "0" }, { tick: "3", value: "0" },
+    ] }],
+    wholeRoot: { ...evidence.wholeRoot, initial: undefined, history: [
+      { tick: "0", value: "0001" }, { tick: "3", value: "1001" },
+    ] },
+  };
+  assert.deepEqual(restoreRecordedSignalHistory(noInitial, recordings).observations[0].history,
+    [{ tick: "0", value: "0" }, ...restored.observations[0].history]);
+});
+
+test("a commit with a verified callback survives a mixed packed-signal slot", () => {
+  const instance = "tb.dut";
+  const signal = "q";
+  const tick = "4";
+  const initial = { tick: "3", value: "0101" };
+  const observation = {
+    signal: 0, range: [3, 0], width: 4, status: "observed",
+    initial, history: [{ tick, value: "1011" }],
+  };
+  const evidence = { tick, historyStart: tick, historyEnd: tick, observations: [observation] };
+  const events = [
+    { ordinal: 1, kind: "signal-value-changed", value: "0011" },
+    { ordinal: 2, kind: "assignment-unobserved", targetRange: [2, 0] },
+    { ordinal: 3, kind: "assignment-evaluated", targetRange: [3, 1], value: "101" },
+    { ordinal: 4, kind: "signal-value-changed", value: "1011" },
+    { ordinal: 5, kind: "assignment-committed", writeKind: "blocking",
+      evaluationOrdinal: 3, timing: "simulator-commit", targetRange: [3, 1],
+      targetPackedRange: [3, 0], value: "101", valueChangeOrdinal: 4 },
+  ].map(event => ({ ...event, tick, instance, signal }));
+  const recording = {
+    start: tick, waveformMatch: "verified", events,
+    observationCoverage: { status: "complete", start: tick, gaps: [] },
+    coverage: { status: "partial", declared: { start: tick }, gaps: ["unobservedCommit"] },
+  };
+  const restored = restoreRecordedSignalHistory(evidence, new Map([[0, recording]]));
+  assert.deepEqual(restored.observations[0].history.map(({ value }) => value), ["0011", "1011"]);
+  const temporal = { nodes: ["0011", "1011"].map((value, index) =>
+    ({ signal: 0, tick, value, orderAtTick: index + 1 })) };
+  const links = [3, 5].map(ordinal => ({ ordinal, assignment: 0 }));
+  const compare = () => correlateExecutionTransitions(0, restored, temporal, recording, links)[0];
+  assert.deepEqual(compare().callbackLinks, [{ node: 0, ordinal: 1 }, { node: 1, ordinal: 4 }]);
+  assert.deepEqual(compare().links, [{ node: 1, ordinal: 5, assignment: 0 }]);
+  events.at(-1).valueChangeOrdinal = 1;
+  assert.equal(compare().links, undefined);
+  assert.equal(restoreRecordedSignalHistory(evidence, new Map([[0, recording]])), undefined);
+});
+
+test("complete commit replay verifies the callback for each change independently", () => {
+  const tick = "3";
+  const instance = "tb.dut";
+  const signal = "q";
+  const events = [
+    { ordinal: 0, kind: "assignment-evaluated", value: "01" },
+    { ordinal: 1, kind: "assignment-evaluated", value: "10" },
+    { ordinal: 2, kind: "signal-value-changed", value: "0001" },
+    { ordinal: 3, kind: "signal-value-changed", value: "1001" },
+    { ordinal: 4, kind: "assignment-committed", evaluationOrdinal: 0, valueChangeOrdinal: 2,
+      targetRange: [1, 0], value: "01" },
+    { ordinal: 5, kind: "assignment-committed", evaluationOrdinal: 1, valueChangeOrdinal: 3,
+      targetRange: [3, 2], value: "10" },
+  ].map((event) => ({
+    ...event, tick, instance, signal,
+    ...(event.kind === "assignment-committed" && {
+      timing: "simulator-commit", writeKind: "blocking", targetPackedRange: [3, 0],
+    }),
+  }));
+  const history = ["0001", "1001"].map(value => ({ tick, value }));
+  const evidence = {
+    tick, historyStart: tick, historyEnd: tick,
+    observations: [{
+      signal: 0, range: [3, 0], width: 4, status: "observed",
+      initial: { tick: "2", value: "0000" }, history,
+    }],
+  };
+  const temporal = { nodes: history.map(({ value }, index) =>
+    ({ signal: 0, tick, value, orderAtTick: index + 1 })) };
+  const recording = {
+    start: tick, waveformMatch: "verified", events,
+    observationCoverage: { status: "complete", start: tick, gaps: [] },
+    coverage: { status: "complete", declared: { start: tick } },
+  };
+  const assignments = [0, 1, 4, 5].map(ordinal => ({ ordinal, assignment: ordinal % 2 }));
+  const compare = () => correlateExecutionTransitions(0, evidence, temporal, recording, assignments)[0];
+  assert.equal(compare().status, "matched");
+  assert.deepEqual(compare().callbackLinks, [{ node: 0, ordinal: 2 }, { node: 1, ordinal: 3 }]);
+  assert.deepEqual(compare().links, [{ node: 0, ordinal: 4, assignment: 0 }, { node: 1, ordinal: 5, assignment: 1 }]);
+  events[5].valueChangeOrdinal = 4;
+  assert.deepEqual(compare().unverifiedCommitCallbacks, [5]);
+  assert.deepEqual(compare().links, [{ node: 0, ordinal: 4, assignment: 0 }]);
+  const coalesced = {
+    ...evidence, observations: [{ ...evidence.observations[0], history: history.slice(1) }],
+  };
+  const recordings = new Map([[0, recording]]);
+  assert.equal(restoreRecordedSignalHistory(coalesced, recordings), undefined);
+  events[5].valueChangeOrdinal = 3;
+  assert.deepEqual(restoreRecordedSignalHistory(coalesced, recordings).observations[0].history, history);
 });
 
 test("overlapping modport callbacks narrow components only with complete compatible evidence", () => {
@@ -177,6 +287,51 @@ test("overlapping modport callbacks narrow components only with complete compati
   assert.equal(matchCaptured().get("0:2@3:1").evaluationOrdinal, undefined);
   measured.coverage.gaps.push("undeclaredWriter");
   assert.equal(matchCaptured().size, 0);
+
+  const process = { ...location, range: { start: { line: 20, character: 2 } } };
+  const owners = ["tb.writer", "tb.writer2"];
+  const sha256 = "a".repeat(64);
+  const multiTrace = {
+    ...trace,
+    assignments: owners.flatMap((instance) =>
+      trace.assignments.map((assignment) => ({ ...assignment, process, instance })),
+    ),
+  };
+  const multiEvaluation = (ordinal, owner, range, value) => {
+    const processId = createHash("sha256")
+      .update(JSON.stringify([owners[owner], sha256, 21, 3])).digest("hex");
+    const event = evaluated(ordinal, range, value);
+    return { ...event, processId, source: { ...event.source, sha256 } };
+  };
+  const multiRecording = {
+    ...repeated,
+    start: "0",
+    coverage: { declared: { start: "0" }, checkedThrough: "3", gaps: ["unobservedCommit"] },
+    events: [
+      multiEvaluation(7, 0, [3, 1], "100"), multiEvaluation(8, 0, [2, 0], "101"),
+      callback(10, "x101"), callback(12, "1001"),
+      multiEvaluation(17, 1, [3, 1], "010"), multiEvaluation(18, 1, [2, 0], "011"),
+      callback(20, "1011"), callback(21, "0101"),
+    ],
+  };
+  const multiEvidence = {
+    ...evidence,
+    historyStart: "0",
+    wholeRoot: { ...evidence.wholeRoot, history: [{ tick: "0", value: "xxxx" }] },
+  };
+  const changes = [10, 12, 20, 21];
+  const wholeBus = { nodes: changes.map((_, index) => ({ signal: 0, tick: "3", orderAtTick: index + 1 })) };
+  const matchOwners = () => matchRecordedModportComponents(
+    multiTrace, multiEvidence, wholeBus, [{
+      status: "valueChangesMatch", callbackLinks: changes.map((ordinal, node) => ({ ordinal, node })),
+    }], new Map([[0, multiRecording]]), new Set(),
+  );
+  assert.deepEqual([...matchOwners().values()].map(({ assignment, evaluationOrdinal }) =>
+    [multiTrace.assignments[assignment].instance, evaluationOrdinal]), [
+      ["tb.writer", 8], ["tb.writer", 7], ["tb.writer2", 18], ["tb.writer2", 17],
+    ]);
+  multiRecording.events[4].processId = "unknown";
+  assert.equal(matchOwners().size, 0);
 });
 
 test("VCS modport probes retain each RHS component and its unobserved outcome", {
@@ -197,6 +352,65 @@ test("VCS modport probes retain each RHS component and its unobserved outcome", 
     .map(({ value }) => value), ["0101", "1001"]);
   assert.equal(replay.coverage.pendingEvaluations, 0);
   assert(!replay.events.some(({ kind }) => kind === "assignment-committed"));
+});
+
+test("VCS modport probes confirm unique physical changes and preserve ambiguous outcomes", {
+  skip: !process.env.WAVE_TEST_VCS_MODPORT_COMMITS,
+}, async () => {
+  const directory = process.env.WAVE_TEST_VCS_MODPORT_COMMITS;
+  for (const extension of ["vcd", "fsdb"]) {
+    const replay = await readExecutionEvidence(
+      path.join(directory, "execution-" + extension + ".jsonl"),
+      path.join(directory, "nested." + extension),
+      "1ns", "nested_tb.overlap", "data", "0", "3",
+    );
+    assert.equal(replay.waveformMatch, "verified");
+    const commits = replay.events.filter(({ kind }) => kind === "assignment-committed");
+    assert.deepEqual(commits.map(({ ordinal, evaluationOrdinal, targetRange, value }) =>
+      [ordinal, evaluationOrdinal, targetRange, value]), [
+        [13, 8, [2, 0], "101"], [15, 7, [3, 1], "100"],
+        [22, 18, [2, 0], "011"], [23, 17, [3, 1], "010"],
+      ]);
+    assert(commits.every(({ timing }) => timing === "simulator-commit"));
+    assert.equal(replay.coverage.pendingEvaluations, 0);
+  }
+  const ambiguous = process.env.WAVE_TEST_VCS_MODPORT_AMBIGUOUS;
+  if (!ambiguous) return;
+  const replay = await readExecutionEvidence(
+    path.join(ambiguous, "execution-vcd.jsonl"), path.join(ambiguous, "nested.vcd"),
+    "1ns", "nested_tb.overlap", "data", "4", "4",
+  );
+  assert.equal(replay.waveformMatch, "verified");
+  assert.deepEqual(replay.events.map(({ kind, value }) => [kind, value]), [
+    ["assignment-evaluated", "001"], ["assignment-evaluated", "011"],
+    ["signal-value-changed", "0011"],
+    ["assignment-unobserved", undefined], ["assignment-unobserved", undefined],
+  ]);
+});
+
+test("VCS PLI replay links synchronous writes to ordered foreign steps", {
+  skip: !process.env.WAVE_TEST_VCS_PLI,
+}, async (t) => {
+  const directory = process.env.WAVE_TEST_VCS_PLI;
+  const waveform = path.join(directory, "trace.vcd");
+  const log = path.join(directory, "sealed.jsonl");
+  const replay = await readExecutionEvidence(log, waveform, "1ps", "tb", "target", "5000", "5000");
+  const evaluation = replay.events.find(({ kind }) => kind === "assignment-evaluated");
+  const commit = replay.events.find(({ kind }) => kind === "assignment-committed");
+  assert.equal(replay.waveformMatch, "verified");
+  assert.equal(evaluation.writeKind, "subroutineCall");
+  assert.equal(commit.evaluationOrdinal, evaluation.ordinal);
+  assert.equal(commit.value, "1");
+  assert.deepEqual(evaluation.resolvedExternalSteps.map(({ operation, value, source }) =>
+    [operation, value, source.identity]), [["tf_getp(2)", "1", "matched"], ["tf_putp(1)", "1", "matched"]]);
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "wave-pli-replay-"));
+  t.after(() => fs.rm(temporary, { recursive: true, force: true }));
+  const lines = (await fs.readFile(log, "utf8")).trimEnd().split("\n").map(JSON.parse);
+  lines.find(({ kind }) => kind === "assignment-committed").tick = "5001";
+  const shifted = path.join(temporary, "shifted.jsonl");
+  await fs.writeFile(shifted, lines.map(line => JSON.stringify(line)).join("\n") + "\n");
+  await assert.rejects(readExecutionEvidence(shifted, waveform, "1ps", "tb", "target", "5000", "5001"),
+    /Execution outcome does not match its evaluation/);
 });
 
 test("task replay pairs overlapping activations and same-tick field writes by captured identity", async (t) => {
@@ -279,12 +493,15 @@ test("VCS execution maps and the generator agree on opt-in operand capture", asy
   const file = path.join(dir, "top.sv");
   const uri = pathToFileURL(file).href;
   await fs.writeFile(file, [
-    "module top(input logic a, b, enable, clk, output logic q);",
+    "module top(input logic [1:0] a, input logic b, enable, clk, output logic q);",
     "  always @(posedge clk) begin",
     "    if (a && enable) q <= (~a /* comment */ &",
     "          b);",
     "    q <= a & 1'b1;",
     "    q <= b ^ b;",
+    "    q = a[0];",
+    "    q <= a << b;",
+    "    q <= enable ? a : b;",
     "  end",
     "endmodule",
     "",
@@ -299,17 +516,23 @@ test("VCS execution maps and the generator agree on opt-in operand capture", asy
   const trace = {
     root: 0,
     signals: ["q", "a", "b", "enable"].map((name, id) => ({ id, name, instance: "top" })),
-    assignments: [nonblocking(2, [1, 2]), nonblocking(4, [1]), nonblocking(5, [2, 2])],
+    assignments: [nonblocking(2, [1, 2]), nonblocking(4, [1]), nonblocking(5, [2, 2]),
+      { ...nonblocking(6, [1]), kind: "blocking" },
+      nonblocking(7, [1, 2]), nonblocking(8, [3, 1, 2])],
   };
   trace.assignments[0].location = location(2, 21);
   trace.assignments[0].guards = [{ expression: { op: "signal", args: 3 } }];
   trace.assignments[0].inputs.push({ signal: 1, kind: "control" }, { signal: 3, kind: "control" });
   const plain = await vcsExecutionStatements(trace, "top", "q", new Set());
   const captured = await vcsExecutionStatements(trace, "top", "q", new Set(), true);
-  assert.deepEqual(captured.map(({ sampleOperands }) => sampleOperands), [["a", "b"], undefined, undefined]);
+  assert.deepEqual(captured.map(({ sampleOperands }) => sampleOperands), [
+    ["a", "b"], undefined, undefined, ["a"], ["a", "b"], ["enable", "a", "b"],
+  ]);
   assert.deepEqual(captured.map(({ sampleOperands, ...site }) => site), plain);
   const guarded = await vcsExecutionStatements(trace, "top", "q", new Set(), true, true);
-  assert.deepEqual(guarded.map(({ sampleGuards }) => sampleGuards), [["a", "enable"], undefined, undefined]);
+  assert.deepEqual(guarded.map(({ sampleGuards }) => sampleGuards), [
+    ["a", "enable"], undefined, undefined, undefined, undefined, undefined,
+  ]);
   const runGenerator = async (statements, output) => {
     const map = path.join(dir, "maps.json");
     await fs.writeFile(map, JSON.stringify([{ schemaVersion: 1, instance: "top", signal: "q", statements }]));
@@ -321,10 +544,13 @@ test("VCS execution maps and the generator agree on opt-in operand capture", asy
   await runGenerator(guarded, "generated");
   const generated = await fs.readFile(path.join(dir, "generated", "top.sv"), "utf8");
   assert.match(generated, /a=%b,b=%b,enable=%b/);
-  assert.equal(generated.split("\n").length, 9);
+  assert.match(generated, /_operand_0\[0\]; wave_workbench_probe::wave_workbench_blocking_evaluate_sampled/);
+  assert.match(generated, /_operand_0 << [\w$]+_operand_1/);
+  assert.match(generated, /_operand_0 \? [\w$]+_operand_1 : [\w$]+_operand_2/);
+  assert.equal(generated.split("\n").length, 12);
   const bad = captured.map((site, index) => index === 1 ? { ...site, sampleOperands: ["a"] } : site);
   await assert.rejects(runGenerator(bad, "invalid"), (error) =>
-    /Operand capture requires a bitwise expression/.test(error.stderr.toString()));
+    /Operand capture requires a supported expression/.test(error.stderr.toString()));
 });
 
 test("VCS maps and generates one guarded source edit for multiple selected array words", async (t) => {
@@ -405,6 +631,55 @@ test("VCS guard entry mapping preserves bare branches and dangling else ownershi
     at: namedFalse.indexOf(": update") + ": update".length, bare: false,
   });
   assert.equal(locate("if (enable) if (ready) q <= data; else mem[idx] <= data;", false), undefined);
+});
+
+test("VCS case entry capture keeps a simple procedural delay", () => {
+  const locate = (source, body) => {
+    const first = source.indexOf("selector");
+    return vcsCaseEntry(codeOnly(source), first, first + "selector".length,
+      source.indexOf(body), source.indexOf("endcase"), source.indexOf("q <="));
+  };
+  const direct = "case (selector) default: q <= b; endcase";
+  assert.deepEqual(locate(direct, "q <="), { at: direct.indexOf("q <="), bare: true });
+  const named = "casez (selector) 4'b10?1: begin : take selector = 0; q <= a; end endcase";
+  assert.deepEqual(locate(named, "begin"), { at: named.indexOf("take") + 4, bare: false });
+  const delay = "case (selector) default: begin #1; q <= b; end endcase";
+  assert.deepEqual(locate(delay, "begin"), { at: delay.indexOf("begin") + 5, bare: false });
+  assert.equal(locate("case (selector) default: begin #DELAY q <= b; end endcase", "begin"), undefined);
+  assert.equal(locate("case (selector) default: begin int selector; q <= b; end endcase", "begin"), undefined);
+  assert.equal(locate("case (selector) default: begin wait (ready); q <= b; end endcase", "begin"), undefined);
+});
+
+test("VCS wait capture binds the NBA that the wait directly controls", () => {
+  const locate = (source) => {
+    const first = source.indexOf("ready");
+    return vcsWaitEntry(codeOnly(source), first, first + 5, source.indexOf("q <="));
+  };
+  const direct = "wait (ready) q <= d;";
+  assert.deepEqual(locate(direct), { at: direct.indexOf("q <="), bare: true });
+  assert.equal(locate("wait (ready); q <= d;"), undefined);
+  assert.equal(locate("wait (ready) #2 q <= d;"), undefined);
+  assert.equal(locate("wait (ready && valid) q <= d;"), undefined);
+  const standalone = source => {
+    const first = source.indexOf("ready");
+    return vcsStandaloneWait(codeOnly(source), first, first + 5, source.indexOf("q <="));
+  };
+  assert.deepEqual(standalone("wait (ready); #3; q <= d;"), { start: 0, semicolon: 12 });
+  assert.equal(standalone("wait (ready); if (en) q <= d;"), undefined);
+  assert.equal(standalone("wait (ready); q2 <= d; q <= d;"), undefined);
+});
+
+test("VCS wait operands preserve logical grouping and reject function calls and mutations", () => {
+  assert.deepEqual(vcsWaitOperands("ready && (!inhibit || ready)"), {
+    names: ["ready", "inhibit"], compound: true,
+  });
+  assert.deepEqual(vcsWaitOperands("ready"), { names: ["ready"], compound: false });
+  assert.deepEqual(vcsWaitOperands("(status & 4'b1011) === 4'b10x1 /* mask */ && signed_status < 4'sd0"), {
+    names: ["status", "signed_status"], compound: true,
+  });
+  for (const expression of ["ready &&", "!()", "(ready", "ready || sample()", "++ready", "top.ready",
+    "status = 4'b1010", "status == 2.0", "ready && 4'b1010garbage", "ready === \"go\"", "ready ==? 1'bx"])
+    assert.equal(vcsWaitOperands(expression), undefined, expression);
 });
 
 test("VPI replay retains ordered value changes without fabricating assignment evidence", async t => {
@@ -610,9 +885,12 @@ test("VCS dynamic NBA replay uses the saved index across same-tick updates and i
   const commits = replay.events.filter(({ kind }) => kind === "assignment-committed");
   assert.deepEqual(commits.map(({ tick, targetRange }) => [tick, targetRange]),
     [["2", [-1, -1]], ["4", [2, 2]], ["10", [1, 1]]]);
-  assert.deepEqual(replay.events.filter(({ kind }) => kind === "assignment-unobserved")
+  const unusableIndexes = replay.events.filter(({ kind }) =>
+    kind === "assignment-unobserved" || kind === "assignment-no-target");
+  assert.deepEqual(unusableIndexes
     .map(({ tick, targetRange }) => [tick, targetRange]), [["6", undefined], ["8", undefined]]);
-  assert.deepEqual(replay.coverage.gaps, ["unobservedCommit"]);
+  assert.deepEqual(replay.coverage.gaps,
+    unusableIndexes.some(({ kind }) => kind === "assignment-unobserved") ? ["unobservedCommit"] : []);
   const observations = [{
     signal: 0, width: 5, range: [3, -1],
     initial: { tick: "0", value: "00000" },
@@ -636,7 +914,7 @@ test("VCS dynamic NBA replay uses the saved index across same-tick updates and i
   }
 });
 
-test("VCS indexed NBA replay preserves range direction and partial-out-of-bounds gaps", {
+test("VCS indexed NBA replay preserves range direction for old and clipped outcomes", {
   skip: !process.env.WAVE_TEST_VCS_INDEXED_WRITE,
 }, async () => {
   const build = process.env.WAVE_TEST_VCS_INDEXED_WRITE;
@@ -645,7 +923,8 @@ test("VCS indexed NBA replay preserves range direction and partial-out-of-bounds
     "1ns", "indexed_write_tb", signal, "1", "12",
   );
   const [asc, desc] = await Promise.all([get("ascending"), get("descending")]);
-  const writes = (recording) => recording.events.filter(({ kind }) => kind === "assignment-committed")
+  const writes = (recording) => recording.events.filter(({ kind, attemptedTargetRange }) =>
+    kind === "assignment-committed" && !attemptedTargetRange)
     .map(({ tick, targetRange, value }) => [tick, targetRange, value]);
   assert.deepEqual(writes(asc), [
     ["2", [1, 2], "10"], ["4", [4, 5], "10"], ["8", [0, 1], "10"], ["12", [3, 4], "10"],
@@ -653,15 +932,102 @@ test("VCS indexed NBA replay preserves range direction and partial-out-of-bounds
   assert.deepEqual(writes(desc), [
     ["2", [1, 0], "10"], ["4", [4, 3], "10"], ["6", [7, 6], "10"], ["12", [3, 2], "10"],
   ]);
-  const gaps = (recording) => recording.events.filter(({ kind }) => kind === "assignment-unobserved")
-    .map(({ tick }) => tick);
-  assert.deepEqual(gaps(asc), ["6", "10"]);
-  assert.deepEqual(gaps(desc), ["8", "10"]);
+  const special = (recording) => recording.events.filter(({ kind, attemptedTargetRange }) =>
+    kind === "assignment-unobserved" || kind === "assignment-no-target" || attemptedTargetRange)
+    .map(({ tick, targetRange, attemptedTargetRange, evaluationOrdinal }) => {
+      const evaluation = recording.events.find(({ ordinal }) => ordinal === evaluationOrdinal);
+      assert.deepEqual(evaluation.targetRange, attemptedTargetRange ?? targetRange);
+      assert.equal(evaluation.value, "10");
+      return [tick, attemptedTargetRange ?? targetRange];
+    });
+  for (const [recording, tick, expectedRange] of [
+    [asc, "6", [7, 8]], [desc, "8", [0, -1]],
+  ]) {
+    const outcomes = special(recording);
+    assert.deepEqual(outcomes.map(([time]) => time), [tick, "10"]);
+    if (outcomes[0][1]) assert.deepEqual(outcomes[0][1], expectedRange);
+    assert.equal(outcomes[1][1], undefined);
+  }
   assert.equal(asc.coverage.pendingEvaluations, 0);
   assert.equal(desc.coverage.pendingEvaluations, 0);
 });
 
-test("VCS overlapping NBA gaps leave disjoint bit commits attributable", {
+test("VCS partial NBA commits retain the attempted range and actual bits", {
+  skip: !process.env.WAVE_TEST_VCS_PARTIAL_TARGET,
+}, async (t) => {
+  const fixture = process.env.WAVE_TEST_VCS_PARTIAL_TARGET;
+  const log = path.join(fixture, "sealed.jsonl");
+  const waveform = path.join(fixture, "reference.vcd");
+  const read = (signal, recording = log) =>
+    readExecutionEvidence(recording, waveform, "1ns", "partial_tb", signal, "1", "4");
+  const cases = [
+    ["asc_right", [7, 8], 7, 14], ["desc_right", [0, -1], 0, 16],
+    ["asc_left", [-1, 0], 0, 18], ["desc_left", [8, 7], 7, 20],
+  ];
+  for (const [signal, attempted, bit, ordinal] of cases) {
+    const replay = await read(signal);
+    assert.deepEqual(replay.coverage.gaps, []);
+    const commits = replay.events.filter(({ kind }) => kind === "assignment-committed");
+    assert.deepEqual(commits.map((event) => ({
+      tick: event.tick,
+      attempted: event.attemptedTargetRange,
+      range: event.targetRange,
+      written: event.value,
+      evaluated: replay.events.find((sample) => sample.ordinal === event.evaluationOrdinal)?.value,
+    })), [
+      { tick: "2", attempted, range: [bit, bit], written: "0", evaluated: "10" },
+      { tick: "4", attempted, range: [bit, bit], written: "1", evaluated: "01" },
+    ]);
+    assert.equal(commits[1].ordinal, ordinal);
+    assert.match(executionReport(replay), /Attempted target/);
+  }
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "wave-clipped-commit-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const events = (await fs.readFile(log, "utf8")).trim().split("\n").map(JSON.parse);
+  const commit = events.find(({ ordinal }) => ordinal === 14);
+  commit.value = "0";
+  const changed = path.join(directory, "changed.jsonl");
+  await fs.writeFile(changed, events.map((event) => JSON.stringify(event)).join("\n") + "\n");
+  await assert.rejects(read("asc_right", changed), /Execution outcome does not match its evaluation/);
+});
+
+test("VCS NBA selections without a writable target preserve same-slot commit attribution", {
+  skip: !process.env.WAVE_TEST_VCS_NO_TARGET,
+}, async () => {
+  const build = process.env.WAVE_TEST_VCS_NO_TARGET;
+  const replay = await readExecutionEvidence(
+    path.join(build, "sealed.jsonl"), path.join(build, "reference.vcd"),
+    "1ns", "no_target_tb", "q", "1", "4",
+  );
+  assert.deepEqual(replay.coverage.gaps, []);
+  assert.equal(replay.coverage.pendingEvaluations, 0);
+  assert.deepEqual(replay.events.filter(({ kind }) => kind === "assignment-no-target")
+    .map(({ tick, ordinal, evaluationOrdinal }) => [tick, ordinal, evaluationOrdinal]),
+  [["2", 3, 2], ["4", 11, 10]]);
+  assert.match(executionMermaid(replay), /no writable target bits/);
+  const observations = [{
+    signal: 0, width: 4, range: [3, 0], initial: { tick: "0", value: "0000" },
+    history: [{ tick: "2", value: "0001" }, { tick: "4", value: "0011" }],
+  }];
+  const graph = { nodes: [
+    { signal: 0, bit: 0, tick: "2", value: "1" },
+    { signal: 0, bit: 1, tick: "4", value: "1" },
+  ] };
+  for (const [bit, tick, ordinal] of [[0, "2", 6], [1, "4", 13]]) {
+    const compare = (recording) => correlateExecutionTransitions(
+      0, { tick, observations }, graph, recording, [], { bit },
+    ).find((entry) => entry.tick === tick);
+    assert.deepEqual(compare(replay).links, [{ node: bit, ordinal, assignment: undefined }]);
+    const legacy = {
+      ...replay,
+      events: replay.events.map((event) => event.kind === "assignment-no-target"
+        ? { ...event, kind: "assignment-unobserved" } : event),
+    };
+    assert.equal(compare(legacy).status, "incomplete");
+  }
+});
+
+test("VCS overlapping NBA outcomes preserve observed commits and unresolved gaps", {
   skip: !process.env.WAVE_TEST_VCS_OVERLAP_WRITE,
 }, async () => {
   const build = process.env.WAVE_TEST_VCS_OVERLAP_WRITE;
@@ -673,20 +1039,30 @@ test("VCS overlapping NBA gaps leave disjoint bit commits attributable", {
   const writes = (recording) => recording.events.filter(({ kind }) =>
     kind === "assignment-committed" || kind === "assignment-unobserved")
     .map(({ tick, kind, targetRange, value }) => [tick, kind, targetRange, value]);
+  const rangeTags = q.events.some(({ ordinal, kind }) =>
+    ordinal === 8 && kind === "assignment-committed");
+  const mixedTags = mixed.events.some(({ tick, kind }) =>
+    tick === "2" && kind === "assignment-committed");
   assert.deepEqual(writes(q), [
-    ["2", "assignment-unobserved", [2, 1], undefined],
-    ["2", "assignment-unobserved", [1, 0], undefined],
+    rangeTags ? ["2", "assignment-committed", [2, 1], "11"]
+      : ["2", "assignment-unobserved", [2, 1], undefined],
+    rangeTags ? ["2", "assignment-committed", [1, 0], "01"]
+      : ["2", "assignment-unobserved", [1, 0], undefined],
     ["2", "assignment-committed", [3, 3], "1"],
     ["4", "assignment-committed", [2, 1], "01"],
   ]);
   assert.deepEqual(writes(mixed), [
-    ["2", "assignment-unobserved", [2, 1], undefined],
-    ["2", "assignment-unobserved", [1, 0], undefined],
-    ["4", "assignment-unobserved", [1, 0], undefined],
-    ["4", "assignment-unobserved", undefined, undefined],
+    mixedTags ? ["2", "assignment-committed", [2, 1], "11"]
+      : ["2", "assignment-unobserved", [2, 1], undefined],
+    mixedTags ? ["2", "assignment-committed", [1, 0], "01"]
+      : ["2", "assignment-unobserved", [1, 0], undefined],
+    mixedTags ? ["4", "assignment-committed", [1, 0], "01"]
+      : ["4", "assignment-unobserved", [1, 0], undefined],
+    mixedTags ? ["4", "assignment-committed", undefined, "1000"]
+      : ["4", "assignment-unobserved", undefined, undefined],
   ]);
-  for (const recording of [q, mixed]) {
-    assert.deepEqual(recording.coverage.gaps, ["unobservedCommit"]);
+  for (const [recording, complete] of [[q, rangeTags], [mixed, mixedTags]]) {
+    assert.deepEqual(recording.coverage.gaps, complete ? [] : ["unobservedCommit"]);
     assert.equal(recording.coverage.pendingEvaluations, 0);
   }
   const observations = [{
@@ -696,12 +1072,38 @@ test("VCS overlapping NBA gaps leave disjoint bit commits attributable", {
   const temporal = { nodes: [
     { signal: 0, bit: 2, tick: "2", value: "1" },
     { signal: 0, bit: 3, tick: "2", value: "1" },
+    { signal: 0, bit: 1, tick: "2", value: "1", orderAtTick: 1 },
+    { signal: 0, bit: 1, tick: "2", value: "0", orderAtTick: 2 },
   ] };
   const compare = (bit) => correlateExecutionTransitions(
     0, { tick: "2", observations }, temporal, q, [], { bit },
   ).find(({ tick }) => tick === "2");
-  assert.equal(compare(2).status, "incomplete");
+  if (rangeTags) {
+    assert.deepEqual(compare(2).links, [{ node: 0, ordinal: 8, assignment: undefined }]);
+    assert.deepEqual(compare(1).links, [
+      { node: 2, ordinal: 8, assignment: undefined },
+      { node: 3, ordinal: 10, assignment: undefined },
+    ]);
+  } else {
+    assert.equal(compare(2).status, "incomplete");
+  }
   assert.deepEqual(compare(3).links, [{ node: 1, ordinal: 12, assignment: undefined }]);
+  if (mixedTags) {
+    const observed = [{
+      ...observations[0],
+      history: observations[0].history.slice(0, 2),
+    }];
+    const comparison = correlateExecutionTransitions(
+      0, { tick: "2", observations: observed }, temporal, mixed, [], { bit: 1 },
+    ).find(({ tick }) => tick === "2");
+    assert.deepEqual(comparison.links, [
+      { node: 2, ordinal: 14, assignment: undefined },
+      { node: 3, ordinal: 16, assignment: undefined },
+    ]);
+    const whole = mixed.events.find(({ ordinal }) => ordinal === 26);
+    assert.equal(whole.evaluationOrdinal, 21);
+    assert.equal(whole.timing, "simulator-commit");
+  }
 });
 
 test("replays mapped C++ steps of a recorded DPI assignment", {
@@ -863,6 +1265,26 @@ test("verified array writes contribute their individual ranges and upstream oper
   assert.deepEqual(slot.nodes[final].recordedWordUnresolved, [[1, 1]]);
   assert.deepEqual(slot.nodes[final].recordedWordWriters.map(({ commitOrdinal, contributingRanges }) =>
     [commitOrdinal, contributingRanges]), [[2, [[0, 0]]], [3, undefined]]);
+  const partialRange = sameSlot.map(event => event.ordinal === 4
+    ? { ...event, targetRange: [4, 3] }
+    : event);
+  const partialComparison = compareSlot(partialRange);
+  assert.deepEqual(partialComparison[0].wordSnapshot.excluded, [0]);
+  const partial = buildTemporalTrace(
+    trace, evidence, recordedWriters(base, partialComparison, partialRange, undefined, links),
+    false, undefined, undefined, [word],
+  );
+  assert.deepEqual(partial.nodes[final].recordedWordUnresolved, [[3, 3]]);
+  assert.deepEqual(partial.nodes[final].recordedWordWriters.map(({ commitOrdinal, contributingRanges }) =>
+    [commitOrdinal, contributingRanges]), [[2, undefined], [3, [[2, 2]]]]);
+  const earlierPartial = recorded.map(event => event.ordinal === loss.ordinal
+    ? { ...event, targetRange: [0, -1] }
+    : event);
+  const earlier = replay(mappings, moved, earlierPartial, true).nodes
+    .find(({ signal, value }) => signal === word.id && value === "1011");
+  assert.deepEqual(earlier.recordedWordUnresolved, [[0, 0]]);
+  assert.deepEqual(earlier.recordedWordWriters.map(({ commitOrdinal, contributingRanges }) =>
+    [commitOrdinal, contributingRanges]), [[1, [[1, 1]]], [4, undefined]]);
   const wrongTail = [...sameSlot.slice(0, -1), { ...sameSlot.at(-1), value: "1010" }];
   assert.equal(compareSlot(wrongTail)[0].status, "incomplete");
   assert.equal(compareSlot(sameSlot, "unverified")[0].status, "incomplete");
@@ -1011,6 +1433,187 @@ test("the time graph follows a verified same-value cursor write", () => {
   assert.equal(recover({
     ...recording, events: [evaluation, packed], cursor: { latestCommit: packed },
   }, { ...evidence, observations: [{ ...projected, bit: 1 }] }), undefined);
+});
+
+test("a verified startup commit supplies an initial sample and can recover its actual operand", () => {
+  const location = { uri: "file:///startup.sv", range: { start: { line: 4, character: 0 } } };
+  const trace = {
+    root: 0,
+    signals: [{ id: 0, name: "q" }, { id: 1, name: "seed", instance: "tb" }],
+    assignments: [{
+      instance: "tb",
+      kind: "nonblocking",
+      location,
+      targets: [0],
+      inputs: [{ signal: 1, kind: "data" }],
+    }, { kind: "blocking", location, targets: [1], inputs: [] }],
+    frontier: [],
+  };
+  const observation = (signal, value) => ({
+    signal, status: "observed", width: 1, value, history: [{ tick: "0", value }],
+  });
+  const evidence = {
+    tick: "0", historyStart: "0", observations: [observation(0, "1"), observation(1, "1")],
+  };
+  const graph = buildTemporalTrace(trace, evidence);
+  assert(graph.gaps.some(({ reason }) => reason === "unprovenInitialOrder"));
+  const evaluation = { kind: "assignment-evaluated", ordinal: 4, tick: "0", value: "1", operandValues: { seed: "1" } };
+  const commit = { kind: "assignment-committed", ordinal: 8, tick: "0", value: "1",
+    writeKind: "nonblocking", timing: "simulator-commit", evaluationOrdinal: 4 };
+  const callback = { kind: "signal-value-changed", ordinal: 7, tick: "0", value: "1" };
+  const recording = {
+    start: "0", waveformMatch: "verified",
+    events: [evaluation, callback, commit],
+    coverage: { status: "complete", declared: { start: "0" } },
+  };
+  const links = [{ ordinal: 4, assignment: 0 }, { ordinal: 8, assignment: 0 }];
+  const compare = (data, mappings = links) =>
+    correlateExecutionTransitions(0, evidence, graph, data, mappings)[0];
+  const comparison = compare(recording);
+  assert.equal(comparison.status, "initialSampleMatched");
+  assert.deepEqual(comparison.links, [{ node: 0, ordinal: 8, assignment: 0 }]);
+  assert.equal(compare(recording, links.slice(1)).status, "incomplete");
+  for (const replacement of [
+    { ...recording, waveformMatch: "unverified" },
+    { ...recording, events: [evaluation, { ...callback, value: "0" }, commit] },
+    { ...recording, events: [evaluation, callback, commit, { ...commit, ordinal: 9 }] },
+    { ...recording, events: [evaluation, callback, { ...commit, timing: "read-only" }] },
+    { ...recording, events: [evaluation, callback, commit, { ...commit, kind: "assignment-unobserved", ordinal: 9 }] },
+  ]) assert.equal(compare(replacement).status, "incomplete");
+
+  const seedEvents = [
+    { ...evaluation, ordinal: 1 },
+    { ...commit, ordinal: 3, writeKind: "blocking", evaluationOrdinal: 1 },
+  ];
+  const seedLinks = [{ ordinal: 1, assignment: 1 }, { ordinal: 3, assignment: 1 }];
+  const resolve = recordedOperandHistory({ ...recording, events: seedEvents }, seedLinks);
+  assert.equal(resolve("0", 4, "1")[0].writer.commitOrdinal, 3);
+  assert.equal(resolve("0", 0, "0"), undefined);
+  const repeated = recordedOperandHistory({
+    ...recording, events: [...seedEvents, { ...seedEvents[1], ordinal: 6 }],
+  }, seedLinks);
+  assert.equal(repeated("0", 4, "1"), undefined);
+  const attributed = buildTemporalTrace(
+    trace, evidence, recordedWriters(graph, [comparison], recording.events), false,
+    (_signal, tick, ordinal, value) => resolve(tick, ordinal, value),
+  );
+  assert.equal(attributed.nodes[0].recordedWriter.commitOrdinal, 8);
+  assert.equal(attributed.nodes[1].recordedWriter.commitOrdinal, 3);
+  assert.equal(attributed.nodes[1].executionOnly, true);
+  assert.equal(attributed.edges[0].rhsSampleEvidence, "recordedEvaluation");
+  assert.deepEqual(attributed.gaps, []);
+});
+
+test("startup bit replay distinguishes the changing blocking commit from later same-value writes", () => {
+  const observation = {
+    signal: 0, status: "observed", projected: true, bit: 1, range: [3, 0], width: 1,
+    value: "0", history: [{ tick: "0", value: "0" }],
+  };
+  const evidence = { tick: "0", historyStart: "0", observations: [observation] };
+  const graph = { nodes: [{ signal: 0, bit: 1, tick: "0", value: "0", initialSample: true }] };
+  const callback = (ordinal, value) => ({ tick: "0", kind: "signal-value-changed", ordinal, value });
+  const evaluation = { tick: "0", ordinal: 3, kind: "assignment-evaluated", value: "00" };
+  const commit = {
+    tick: "0", kind: "assignment-committed", writeKind: "blocking", ordinal: 4,
+    evaluationOrdinal: 3, targetRange: [2, 1], value: "00",
+  };
+  const sameValue = { ...commit, ordinal: 6, evaluationOrdinal: 5 };
+  const base = {
+    start: "0", waveformMatch: "verified",
+    coverage: { status: "complete", declared: { start: "0" } },
+    observationCoverage: { start: "0", gaps: [] },
+    events: [callback(2, "0xx0"), evaluation, commit,
+      { ...evaluation, ordinal: 5 }, sameValue, callback(7, "0000")],
+  };
+  const links = [3, 4, 5, 6].map(ordinal => ({ ordinal, assignment: 2 }));
+  const compare = (overrides) =>
+    correlateExecutionTransitions(0, evidence, graph, { ...base, ...overrides }, links, { bit: 1 })[0];
+  assert.deepEqual(compare().links, [{ node: 0, ordinal: 4, assignment: 2 }]);
+  for (const overrides of [
+    { observationCoverage: { start: "0", gaps: ["truncated"] } },
+    { events: [callback(2, "0xx0"), evaluation, commit, { ...sameValue, value: "01" }, callback(7, "0000")] },
+    { events: [callback(2, "0xx0"), evaluation, commit, sameValue] },
+    { events: [...base.events, { ...sameValue, ordinal: 8, kind: "assignment-unobserved" }] },
+  ]) assert.equal(compare(overrides).links, undefined);
+
+  const packedSample = { ...observation, projected: false, bit: undefined, width: 4,
+    value: "0000", history: [{ tick: "0", value: "0000" }] };
+  const packedGraph = { nodes: [{ signal: 0, tick: "0", value: "0000", initialSample: true }] };
+  const packed = (recording) => correlateExecutionTransitions(
+    0, { ...evidence, observations: [packedSample] }, packedGraph, recording, links,
+  );
+  const comparisons = packed(base);
+  assert.equal(comparisons[0].status, "initialPackedSampleMatched");
+  const [attribution] = recordedWriters(packedGraph, comparisons, base.events).values();
+  assert.deepEqual(attribution.wordWriters.map(({ commitOrdinal, contributingRanges }) =>
+    [commitOrdinal, contributingRanges]), [[4, [[2, 1]]]]);
+  assert.deepEqual(attribution.unresolved, [[3, 3], [0, 0]]);
+  assert.equal(packed({ ...base, waveformMatch: "unverified" })[0].startupPacked, undefined);
+});
+
+test("wait cause uses a unique transition or verified callback order", () => {
+  const location = { uri: "file:///trace.sv", range: {
+    start: { line: 3, character: 4 }, end: { line: 3, character: 10 },
+  } };
+  const expression = { op: "and", args: [
+    { op: "signal", args: 1 }, { op: "signal", args: 2 },
+  ] };
+  const trace = {
+    root: 0,
+    signals: ["q", "a", "b"].map((name, id) => ({ id, name, instance: "tb" })),
+    assignments: [{
+      kind: "nonblocking", location, targets: [0], instance: "tb",
+      inputs: [1, 2].map(signal => ({ signal, location, kind: "control" })),
+      waitEntries: [location],
+      waitPredicates: [{ location, expression }],
+    }],
+  };
+  const sample = (tick, value) => ({ tick, value });
+  const observation = (signal, initial, history) => ({
+    signal, width: 1, initial: sample("0", initial), history,
+  });
+  const graph = (first, second, recordedValueCallbacks, resume = "5", nextOrdinal) => {
+    const evidence = { tick: "7", historyStart: "0", recordedValueCallbacks, observations: [
+      observation(0, "0", [sample("7", "1")]), first, second,
+    ] };
+    const root = buildTemporalTrace(trace, evidence).nodes[0];
+    const writers = new Map([[temporalTransitionKey(root), {
+      assignment: 0, commitOrdinal: 9,
+      evaluation: { ordinal: 8, value: "1", tick: "7",
+        guardEntryValues: { p4_5_a: "1", p4_5_b: "1" },
+        guardEntryTicks: { p4_5_a: resume, p4_5_b: resume },
+        ...(nextOrdinal === undefined ? {} : {
+          guardEntryNextOrdinals: { p4_5_a: nextOrdinal, p4_5_b: nextOrdinal },
+        }),
+      },
+    }]]);
+    const result = buildTemporalTrace(trace, evidence, writers);
+    return result.edges.filter(edge => edge.waitResumeCause).map(edge => result.nodes[edge.source].signal);
+  };
+  const rise = id => observation(id, "0", [sample("5", "1")]);
+  assert.deepEqual(graph(rise(1), observation(2, "1", [])), [1]);
+  assert.deepEqual(graph(observation(1, "x", [sample("5", "1")]), observation(2, "1", [])), [1]);
+  assert.deepEqual(graph(rise(1), rise(2)), []);
+  const callbacks = (signal) => [{ ordinal: signal + 2, value: "1" }];
+  assert.deepEqual(graph(rise(1), rise(2), callbacks), [2]);
+  const oscillations = ["1", "0", "1"];
+  const repeated = observation(1, "0", oscillations.map(value => sample("5", value)));
+  const changes = (id, ordinals) => id === 1
+    ? oscillations.map((value, index) => ({ ordinal: ordinals[index], value }))
+    : [{ ordinal: 4, value: "1" }];
+  assert.deepEqual(graph(repeated, rise(2), id => changes(id, [2, 3, 5])), [1]);
+  assert.deepEqual(graph(repeated, rise(2), id => changes(id, [3, 2, 5])), []);
+  assert.deepEqual(graph(repeated, rise(2), id => changes(id, [2, 5, 6])), []);
+  assert.deepEqual(graph(repeated, rise(2), id => changes(id, [2, 5, 6]), "5", 5), [2]);
+  assert.deepEqual(graph(repeated, rise(2), id => changes(id, [2, 5, 6]), "5", 6), []);
+  assert.deepEqual(graph(rise(1), rise(2), signal => signal === 1 ? callbacks(signal) : undefined), []);
+  assert.deepEqual(graph(rise(1), rise(2), signal => [{ ordinal: signal, value: "0" }]), []);
+  assert.deepEqual(graph(rise(1), rise(2), () => [{ ordinal: 3, value: "1" }]), []);
+  const atEvaluation = id => observation(id, "0", [sample("7", "1")]);
+  assert.deepEqual(graph(atEvaluation(1), atEvaluation(2),
+    signal => [{ ordinal: signal + 6, value: "1" }], "7"), []);
+  assert.deepEqual(graph(observation(1, "1", []), observation(2, "1", [])), []);
+  assert.deepEqual(graph(rise(1), { ...observation(2, "1", []), historyTruncated: true }), []);
 });
 
 test("recorded writes select one assignment and trace its inputs at evaluation time", () => {
@@ -1290,10 +1893,40 @@ test("execution coverage independently validates log gaps, pending writes and re
   assert(warm.scannedAfterOrdinal > 2000);
   assert.deepEqual(warm.events, cold.events);
   assert.deepEqual(warm.cursor, cold.cursor);
+  const diskCache = path.join(temp, "replay-index");
+  const replayInNewProcess = (wave = waveform) => JSON.parse(execFileSync(process.execPath, [
+    "-e", `const {readExecutionEvidence} = require(process.argv[1]);
+    readExecutionEvidence(process.argv[2], process.argv[3], "1ps", "top.first", "q", "3002", "3002")
+      .then(result => console.log(JSON.stringify(result)))
+      .catch(error => console.log(JSON.stringify({error: error.message})));`,
+    require.resolve("../dist/rtl-execution"), log, wave,
+  ], { env: { ...process.env, WAVE_WORKBENCH_REPLAY_CACHE_DIR: diskCache }, encoding: "utf8" }));
+  const coldProcess = replayInNewProcess();
+  assert.equal(coldProcess.scannedAfterOrdinal, undefined);
+  const warmProcess = replayInNewProcess();
+  assert(warmProcess.scannedAfterOrdinal > 2000);
+  assert.deepEqual({ ...warmProcess, scannedAfterOrdinal: undefined },
+    { ...coldProcess, scannedAfterOrdinal: undefined });
+  assert.equal(warmProcess.cursor.latestCommit.source.identity, "changed");
+  await fs.writeFile(source, sourceCode);
+  const restoredSource = replayInNewProcess();
+  assert.equal(restoredSource.scannedAfterOrdinal, warmProcess.scannedAfterOrdinal);
+  assert.equal(restoredSource.cursor.latestCommit.source.identity, "matched");
+  const differentWave = path.join(temp, "different.vcd");
+  await fs.writeFile(differentWave, "different waveform");
+  assert.match(replayInNewProcess(differentWave).error, /waveform hash mismatch/);
+  const [slot] = await fs.readdir(diskCache);
+  assert(slot.endsWith(".json"));
+  await fs.appendFile(path.join(diskCache, slot), "corrupted");
+  assert.equal(replayInNewProcess().scannedAfterOrdinal, undefined);
+  assert(replayInNewProcess().scannedAfterOrdinal > 2000);
   await fs.writeFile(log, longRecording.replace('"eventCount":3003', '"eventCount":3004'));
   const edited = await readLatest();
   assert.equal(edited.scannedAfterOrdinal, undefined);
   assert.deepEqual(edited.coverage.gaps, ["missingEventOrdinals"]);
+  const editedInNewProcess = replayInNewProcess();
+  assert.equal(editedInNewProcess.scannedAfterOrdinal, undefined);
+  assert.deepEqual(editedInNewProcess.coverage.gaps, edited.coverage.gaps);
 });
 
 const orderDirectory = process.env.WAVE_TEST_EXECUTION_ORDER;

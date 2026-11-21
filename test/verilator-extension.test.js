@@ -140,6 +140,10 @@ test("extension host opens Verilator FST, links RTL both ways and reopens a save
       },
     }) }) },
     languages: { registerHoverProvider(_selector, service) { hover = service; return disposable; } },
+    debug: {
+      registerDebugConfigurationProvider: () => disposable,
+      registerDebugAdapterDescriptorFactory: () => disposable,
+    },
     workspace: {
       workspaceFolders: process.platform === "win32" ? [] : [{ uri: uri(temporary) }],
       textDocuments: [],
@@ -147,6 +151,7 @@ test("extension host opens Verilator FST, links RTL both ways and reopens a save
       openTextDocument: async (file) => file.language === "markdown" ? file : rtl(file.fsPath),
     },
     window: {
+      registerWebviewPanelSerializer: () => disposable,
       registerCustomEditorProvider(_id, value) { provider = value; return disposable; },
       registerWebviewViewProvider(id, value) { if (id === "waveWorkbench.control") sidebarProvider = value; return disposable; },
       registerTreeDataProvider(_id, value) { traceTree = value; return disposable; },
@@ -314,6 +319,10 @@ test("extension host opens Verilator FST, links RTL both ways and reopens a save
       mcp.on("error", reject);
       mcp.on("close", (code) => code === 0 ? resolve() : reject(Error("MCP exited with " + code)));
     });
+    const pagedCalls = [
+      ["wave_trace_drivers", { signal: scope + ".pc" }],
+      ["wave_trace_context", { signal: scope + ".pc", tick: "30", historyStart: "28" }],
+    ];
     mcp.stdin.end([
       { jsonrpc: "2.0", id: 1, method: "tools/list" },
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: {
@@ -332,12 +341,60 @@ test("extension host opens Verilator FST, links RTL both ways and reopens a save
         name: "wave_trace_drivers",
         arguments: { signal: scope + ".pc", detail: "full", buildManifest: "trace.build.json", pageSize: 32 },
       } },
+      ...pagedCalls.flatMap(([name, args], index) => [false, true].map((eager, variant) => ({
+        jsonrpc: "2.0", id: 7 + 2 * index + variant, method: "tools/call",
+        params: {
+          name,
+          arguments: { ...args, output: "paged", ...(eager ? { format: "mermaid", detail: "full" } : {}) },
+        },
+      }))),
     ].map((request) => JSON.stringify(request) + "\n").join(""));
     await complete;
     const responses = new Map(output.trim().split("\n").map((line) => {
       const reply = JSON.parse(line);
       return [reply.id, reply];
     }));
+    const data = (id) => {
+      const { result } = responses.get(id);
+      assert.ok(!result.isError, result.content[0].text);
+      return JSON.parse(result.content[0].text);
+    };
+    const comparePages = [];
+    for (let index = 0; index < pagedCalls.length; index++) {
+      const { graphSnapshot: deferred, continuationCursor } = data(7 + 2 * index);
+      const { graphSnapshot: eager } = data(8 + 2 * index);
+      assert.equal(continuationCursor, undefined);
+      assert.deepEqual(deferred.deferredSections, ["mermaid", "report"]);
+      assert.deepEqual(eager.deferredSections, []);
+      for (const section of ["mermaid", "report"]) {
+        assert.equal(deferred.sections[section], undefined);
+        comparePages.push([section, deferred.graphCursor, eager.graphCursor]);
+      }
+    }
+    const pages = spawn(process.execPath, [path.join(root, "dist/mcp.js"), temporary]);
+    t.after(() => pages.kill());
+    let pageOutput = "";
+    pages.stdout.setEncoding("utf8").on("data", (data) => { pageOutput += data; });
+    const pagesExited = new Promise((resolve, reject) => {
+      pages.on("error", reject);
+      pages.on("close", (code) => code === 0 ? resolve() : reject(Error("MCP exited with " + code)));
+    });
+    pages.stdin.end(comparePages.flatMap(([section, ...cursors], index) => cursors.map((graphCursor, variant) =>
+      JSON.stringify({ jsonrpc: "2.0", id: 20 + 2 * index + variant, method: "tools/call", params: {
+        name: "wave_trace_graph_page", arguments: { graphCursor, section, offset: 0, limit: 128 },
+      } }) + "\n",
+    )).join(""));
+    await pagesExited;
+    for (const line of pageOutput.trim().split("\n")) {
+      const reply = JSON.parse(line);
+      responses.set(reply.id, reply);
+    }
+    for (let index = 0; index < comparePages.length; index++) {
+      const { graphCursor: _deferred, ...deferred } = data(20 + index * 2);
+      const { graphCursor: _eager, ...eager } = data(21 + index * 2);
+      assert.ok(deferred.total > 0);
+      assert.deepEqual(deferred, eager);
+    }
     const [list, reply, contextReply, managedReply] = [1, 2, 3, 4].map((id) => responses.get(id));
     const waiting = spawn(process.execPath, [path.join(root, "dist/mcp.js"), temporary]);
     t.after(() => waiting.kill());

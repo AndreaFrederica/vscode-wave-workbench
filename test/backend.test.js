@@ -306,6 +306,25 @@ test('Rust virtual signals: merge, four states, concat order, source identity, c
  const nested=await backend.request('defineVirtual',{definition:{op:'not',inputs:[input(joined.signal)]}});assert.ok(nested.definitions.find(d=>d.id===joined.signal.id));assert.equal(nested.definitions.at(-1).id,nested.signal.id);await backend.request('open',{path:path.resolve(__dirname,'../examples/demo.vcd')});await require('../dist/view-state').registerVirtuals(backend,nested.definitions);const replay=await backend.request('query',{signals:[nested.signal.id],start:'25',end:'25',limit:100});assert.deepEqual(replay[nested.signal.id].events,[['25','00']]);
 });
 
+test('Verdi FSDB window seed keeps the original transition timestamp', {
+  skip: independent || !process.env.WAVE_TEST_VERDI_SEED_FSDB,
+}, async t => {
+  const backend = new Backend(process.env.WAVE_WORKBENCH_VERDI_BACKEND || fsdbBinary);
+  t.after(() => backend.dispose());
+  const metadata = await backend.request('open', { path: process.env.WAVE_TEST_VERDI_SEED_FSDB });
+  assert.equal(metadata.backend, 'native-fsdb');
+  const scalar = metadata.signals.find(({ scope, name }) => scope === 'selective_tb' && name === 'scalar');
+  assert.ok(scalar);
+  for (const [start, end, events] of [
+    ['4', '4', [['3', '1']]],
+    ['3', '3', [['3', '1']]],
+    ['2', '4', [['0', '0'], ['3', '1']]],
+  ]) {
+    const result = await backend.request('query', { signals: [scalar.id], start, end, limit: 16 });
+    assert.deepEqual(result[scalar.id], { events, truncated: false });
+  }
+});
+
 test('native FSDB virtual NOT matches source four-state value',{skip:!process.env.WAVE_TEST_FSDB},async t=>{
  const b=new Backend(fsdbBinary,fsdbOptions);t.after(()=>b.dispose());const m=await b.request('open',{path:process.env.WAVE_TEST_FSDB});const s=m.signals.find(s=>s.supported&&s.width===1&&s.name.includes('clk'));assert.ok(s);const d=await b.request('defineVirtual',{name:'inverted_clk',definition:{op:'not',inputs:[{id:s.id,scope:s.scope,name:s.name,bitOffset:null}]}});const time=String(Math.floor(Number(m.end)/2));const r=await b.request('query',{signals:[s.id,d.signal.id],start:time,end:time,limit:100});const raw=r[s.id].events.at(-1)[1].toLowerCase();assert.equal(r[d.signal.id].events.at(-1)[1],raw==='0'?'1':raw==='1'?'0':'x');
 });

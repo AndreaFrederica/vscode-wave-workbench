@@ -357,6 +357,36 @@ for (const [variable, reader] of [["WAVE_TEST_ANALOG_SHM", "shm-lib"], ["WAVE_TE
   });
 }
 
+test("AMS PSFXL overview and point query reach the recorded end", {
+  skip: !process.env.WAVE_TEST_AMS_SHM || !existsSync(binary),
+}, async (t) => {
+  const { backend, meta, window } = await openAnalog(t, process.env.WAVE_TEST_AMS_SHM);
+  const { signals } = await backend.request("search", {
+    query: "sar_adc_ams_tb.I_BRIDGE.I_ANA.topp",
+  });
+  const signal = signals.find(({ id }) => id.startsWith("psfxl:"));
+  assert(signal);
+  const point = await window(signal, meta.end, meta.end);
+  assert.equal(point.truncated, false);
+  assert.equal(point.events.length, 1);
+  assert.equal(point.events[0][0], meta.end);
+  assert(Number.isFinite(Number(point.events[0][1])));
+  const bins = await backend.request("overview", {
+    name: signal.id, start: meta.start, end: meta.end, bins: 768,
+  });
+  assert.equal(bins[0][0], meta.start);
+  assert.equal(bins.at(-1)[1], meta.end);
+  assert.deepEqual(await backend.request("describe", {
+    descriptors: [{ id: "psfxl:0", scope: signal.scope, name: signal.name }],
+  }), [signal]);
+  const end = String(BigInt(meta.start) + 15_000n);
+  const options = { name: signal.id, start: meta.start, end, bins: 3072 };
+  const reference = await backend.request("overview", options);
+  assert(reference.some(([, , , , samples]) => samples?.length));
+  assert.equal((await window(signal, meta.start, end, 2)).truncated, true);
+  assert.deepEqual(await backend.request("overview", options), reference);
+});
+
 test("Spectre transient PSF ASCII preserves voltage values and units", {
   skip: !process.env.WAVE_TEST_ANALOG_PSF || !existsSync(binary),
 }, async (t) => {

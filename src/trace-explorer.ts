@@ -5,15 +5,21 @@ import {
   isPortIndex,
   portSourceSelection,
   selectionText,
-  temporalGapLabels,
+  temporalGapLabel,
   temporalGapUseLabel,
   guardEntryLabels,
   staticTraceCoverage,
+  wordWriteLabel,
   type mergeTemporalContinuationGraph,
+  type TemporalContinuation,
   type TraceDirection,
   type VideTrace,
 } from "./rtl-trace";
-import type { buildTemporalTrace, TemporalGap } from "./rtl-trace-candidates";
+import type {
+  buildTemporalTrace,
+  RecordedWordWriter,
+  TemporalGap,
+} from "./rtl-trace-candidates";
 import type { mergeStaticContinuationGraph } from "./rtl-static-continuations";
 import {
   runtimeInputLabel,
@@ -45,6 +51,10 @@ type StaticAssignment = Pick<
   | "hasUnresolvedOperands"
 > & { id?: number };
 type CombinedGap = CombinedTimeGraph["gaps"][number];
+const combinedGapPageSize = 128;
+type WaveformTarget =
+  | { signal: Signal; bit?: number; waveformSignal?: undefined }
+  | { waveformSignal: string; signal?: undefined; bit?: undefined };
 type CombinedTransition = {
   kind: "combinedTransition";
   index: number;
@@ -60,6 +70,7 @@ type CombinedAssignment = {
   assignment: number;
   edges: CombinedTimeGraph["edges"];
   gaps: CombinedGap[];
+  writes: RecordedWordWriter[];
 };
 type TemporalAssignmentEvidence = {
   edges: TemporalEdge[];
@@ -107,6 +118,7 @@ type Node =
   | { kind: "resumeCombined"; generation: number }
   | { kind: "combinedStaticRoot" }
   | { kind: "combinedGaps" }
+  | { kind: "combinedGapPage"; start: number; end: number; generation: number }
   | CombinedTransition
   | CombinedAssignment
   | { kind: "combinedGap"; gap: CombinedGap }
@@ -126,14 +138,39 @@ type Node =
       kind: "executionSource";
       source: NonNullable<ReplayEvent["source"]>;
       step?: ResolvedExternalStep;
+      label?: string;
     }
   | { kind: "notice"; label: string; location?: TraceLocation };
+
+function recordedTaskSources(point: TemporalTrace["nodes"][number]): Node[] {
+  const task = point.recordedTaskTransfer;
+  if (!task) return [];
+  return [
+    {
+      kind: "executionSource",
+      label: "Task input commit " + task.input.ordinal,
+      source: task.input.source,
+    },
+    {
+      kind: "executionSource",
+      label: "Member write commit " + task.write.ordinal,
+      source: task.write.source,
+    },
+    ...task.reads.map(
+      (step): Node => ({ kind: "executionSource", source: step.source, step }),
+    ),
+  ];
+}
 
 export function createTraceExplorer(
   api: typeof vscode,
   context: vscode.ExtensionContext,
   open: (location: TraceLocation) => Promise<void>,
-  addSignal: (signal: Signal, bit?: number) => Promise<void>,
+  addSignal: (
+    signal?: Signal,
+    bit?: number,
+    waveformSignal?: string,
+  ) => Promise<void>,
   copy: (signal: Signal) => Promise<void>,
   retrace: (
     signal: Signal,
@@ -143,7 +180,7 @@ export function createTraceExplorer(
     continuationSignal?: string,
   ) => Promise<void>,
   jumpToTick: (tick: string) => Promise<void>,
-  resumeCombined: () => Promise<void>,
+  resumeCombined: (request?: TemporalContinuation | string) => Promise<void>,
 ) {
   const changed = new api.EventEmitter<void>();
   let trace: VideTrace | undefined;
@@ -153,6 +190,7 @@ export function createTraceExplorer(
   let temporal: TemporalTrace | undefined;
   let combined: CombinedTimeGraph | undefined;
   let pendingContinuations = 0;
+  let pendingStaticSignals = new Set<string>();
   let combinedGeneration = 0;
   let combinedStatic: CombinedStaticGraph | undefined;
   let signalGeneration = 0;
@@ -161,6 +199,7 @@ export function createTraceExplorer(
     Map<string, Omit<CombinedAssignment, "kind" | "target">>
   >();
   const combinedAnchors = new Map<number, CombinedGap[]>();
+  let remainingCombinedGaps: CombinedGap[] = [];
   const recordedFields = new Set<number>();
   let runtimeInputs: readonly RuntimeInputEvidence[] = [];
   let replay: { evidence: Replay; canJump: boolean } | undefined;
@@ -180,6 +219,8 @@ export function createTraceExplorer(
     combined = next;
     combinedAssignments.clear();
     combinedAnchors.clear();
+    remainingCombinedGaps =
+      next?.gaps.filter(({ status }) => status !== "joined") ?? [];
     if (!next) return;
     function evidenceAt(target: number, segment: number, assignment: number) {
       const entries = combinedAssignments.get(target) ?? new Map();
@@ -190,6 +231,7 @@ export function createTraceExplorer(
         assignment,
         edges: [],
         gaps: [],
+        writes: [],
       };
       entries.set(key, entry);
       return entry;
@@ -199,11 +241,17 @@ export function createTraceExplorer(
       for (const assignment of edge.alsoAssignments ?? [])
         evidenceAt(edge.target, edge.segment, assignment).edges.push(edge);
     }
-    for (const [target, { point, sources }] of next.nodes.entries()) {
-      const { recordedWriter, recordedWordWriters } = point;
-      for (const writer of recordedWordWriters ??
-        (recordedWriter ? [recordedWriter] : []))
-        evidenceAt(target, sources[0].segment, writer.assignment);
+    for (const [
+      target,
+      { point, sources, recordedWordEvidence },
+    ] of next.nodes.entries()) {
+      for (const assignment of point.initializationAssignments ?? [])
+        evidenceAt(target, sources[0].segment, assignment);
+      if (point.recordedWriter && !point.recordedWordWriters)
+        evidenceAt(target, sources[0].segment, point.recordedWriter.assignment);
+      for (const { segment, writers } of recordedWordEvidence ?? [])
+        for (const writer of writers ?? [])
+          evidenceAt(target, segment, writer.assignment).writes.push(writer);
     }
     for (const gap of next.gaps) {
       if (gap.target !== undefined && gap.evidence.use)
@@ -326,15 +374,35 @@ export function createTraceExplorer(
     }
     if (node.kind === "combinedGaps") {
       if (!combined) return [];
+      const count = remainingCombinedGaps.length;
+      const entries: Node[] =
+        count > combinedGapPageSize
+          ? Array.from(
+              { length: Math.ceil(count / combinedGapPageSize) },
+              (_, page) => {
+                const start = page * combinedGapPageSize;
+                return {
+                  kind: "combinedGapPage",
+                  start,
+                  end: Math.min(start + combinedGapPageSize, count),
+                  generation: combinedGeneration,
+                };
+              },
+            )
+          : remainingCombinedGaps.map((gap) => ({ kind: "combinedGap", gap }));
       return [
-        ...combined.gaps
-          .filter(({ status }) => status !== "joined")
-          .map((gap): Node => ({ kind: "combinedGap", gap })),
+        ...entries,
         ...combined.coverage.reasons.map(
           (reason): Node => ({ kind: "notice", label: reason }),
         ),
       ];
     }
+    if (node.kind === "combinedGapPage")
+      return node.generation === combinedGeneration
+        ? remainingCombinedGaps
+            .slice(node.start, node.end)
+            .map((gap) => ({ kind: "combinedGap", gap }))
+        : [];
     if (node.kind === "combinedGap" || node.kind === "resumeCombined")
       return [];
     if (node.kind === "combinedTransition") {
@@ -358,6 +426,10 @@ export function createTraceExplorer(
             : { kind: "combinedGap", gap },
         );
       }
+      children.push(...recordedTaskSources(node.event.point));
+      for (const step of node.event.point.recordedWriter?.evaluation
+        ?.externalSteps ?? [])
+        children.push({ kind: "executionSource", source: step.source, step });
       return children;
     }
     if (node.kind === "combinedAssignment") {
@@ -427,23 +499,7 @@ export function createTraceExplorer(
         target: node,
         evidence,
       }));
-      const task = node.point.recordedTaskTransfer;
-      if (task) {
-        assignments.push({
-          kind: "executionSource",
-          source: task.input.source,
-        });
-        assignments.push({
-          kind: "executionSource",
-          source: task.write.source,
-        });
-        for (const step of task.reads)
-          assignments.push({
-            kind: "executionSource",
-            source: step.source,
-            step,
-          });
-      }
+      assignments.push(...recordedTaskSources(node.point));
       for (const { ordinal, value } of node.point.recordedWordChanges ?? [])
         assignments.push({
           kind: "notice",
@@ -458,9 +514,12 @@ export function createTraceExplorer(
               .map((range) => selectionText(range))
               .join(", "),
         });
-      for (const writer of node.point.recordedWordWriters ?? [])
+      const { recordedWordWriters, recordedWriter } = node.point;
+      for (const writer of recordedWordWriters ??
+        (recordedWriter ? [recordedWriter] : []))
         for (const label of guardEntryLabels(
           writer.evaluation?.guardEntryValues,
+          writer.evaluation?.guardEntryTicks,
         ))
           assignments.push({
             kind: "notice",
@@ -571,10 +630,17 @@ export function createTraceExplorer(
             });
           }
         } else if (item.waveformUnavailable) {
+          const bits = item.unavailableBits?.filter(
+            (bit) => !node.bits?.length || node.bits.includes(bit),
+          );
+          if (bits?.length === 0) continue;
           assignments.push({
             kind: "notice",
             label:
-              "Waveform continuation unavailable · " + item.reason + " limit",
+              "Waveform continuation unavailable · " +
+              item.reason +
+              " limit" +
+              (bits ? " · bits " + bits.join(", ") : ""),
           });
         } else if (
           (item.reason === "unresolvedPort" ||
@@ -701,10 +767,14 @@ export function createTraceExplorer(
     });
   }
 
-  function waveformTargets(node: Node): { signal: Signal; bit?: number }[] {
+  function waveformTargets(node: Node): WaveformTarget[] {
     const target = (id: number, bit?: number) => {
       const signal = signals.get(id);
-      return signal?.instance && !signal.parameterValue
+      return signal?.instance &&
+        !signal.parameterValue &&
+        !signal.instanceParameter &&
+        !signal.packageParameterValue &&
+        !signal.packageParameterValueUnavailable
         ? [{ signal, bit }]
         : [];
     };
@@ -730,7 +800,10 @@ export function createTraceExplorer(
       case "combinedAssignment":
         return waveformTargets(node.target);
       case "combinedTransition":
-        return combined?.nodes[node.index] === node.event &&
+        if (combined?.nodes[node.index] !== node.event) return [];
+        if (node.event.waveformSignal)
+          return [{ waveformSignal: node.event.waveformSignal }];
+        return node.event.waveformSignal === undefined &&
           node.event.sources[0].segment === 0
           ? target(node.event.point.signal, node.event.point.bit)
           : [];
@@ -760,9 +833,15 @@ export function createTraceExplorer(
       return signals.get(node.point.signal)?.declaration ?? undefined;
     if (
       node.kind === "combinedTransition" &&
-      node.event.sources[0].segment === 0
+      combined?.nodes[node.index] === node.event
     )
-      return signals.get(node.event.point.signal)?.declaration ?? undefined;
+      return (
+        node.event.declaration ??
+        (node.event.sources[0].segment === 0
+          ? signals.get(node.event.point.signal)?.declaration
+          : undefined) ??
+        undefined
+      );
     return undefined;
   }
 
@@ -782,7 +861,10 @@ export function createTraceExplorer(
   };
 
   function treeItem(node: Node) {
-    const childCount = children(node).length;
+    const collapsible = () =>
+      children(node).length
+        ? api.TreeItemCollapsibleState.Collapsed
+        : api.TreeItemCollapsibleState.None;
     if (node.kind === "combinedStaticRoot") {
       const item = new api.TreeItem(
         "Combined static dependencies",
@@ -807,19 +889,39 @@ export function createTraceExplorer(
       };
       return item;
     }
-    if (node.kind === "combinedGaps")
-      return new api.TreeItem(
+    if (node.kind === "combinedGaps") {
+      const item = new api.TreeItem(
         "Remaining trace gaps",
         api.TreeItemCollapsibleState.Collapsed,
       );
-    if (node.kind === "combinedTransition") {
-      const { signal, point } = node.event;
-      const item = new api.TreeItem(
-        signal,
-        childCount
-          ? api.TreeItemCollapsibleState.Collapsed
-          : api.TreeItemCollapsibleState.None,
+      item.description = remainingCombinedGaps.length.toLocaleString();
+      const summary = combined?.gapSummary;
+      if (summary) {
+        const details = [
+          summary.pending.toLocaleString() + " pending gaps",
+          summary.unmatched.toLocaleString() + " unmatched gaps",
+          summary.unresolved.toLocaleString() + " unresolved gaps",
+        ];
+        if (combined.coverage.reasons.includes("gapBudget"))
+          details.push("The gap budget omitted additional entries.");
+        item.tooltip = details.join("\n");
+      }
+      return item;
+    }
+    if (node.kind === "combinedGapPage")
+      return new api.TreeItem(
+        "Gaps " + (node.start + 1) + "–" + node.end,
+        api.TreeItemCollapsibleState.Collapsed,
       );
+    if (node.kind === "combinedTransition") {
+      const { signal, point, recordedWordEvidence } = node.event;
+      const commits = new Set(
+        recordedWordEvidence?.flatMap(
+          ({ writers }) =>
+            writers?.map(({ commitOrdinal }) => commitOrdinal) ?? [],
+        ),
+      );
+      const item = new api.TreeItem(signal, collapsible());
       const relation = node.continuation?.evidence.use;
       item.description = [
         "Tick " + point.tick,
@@ -827,6 +929,7 @@ export function createTraceExplorer(
         point.orderAtTick === undefined
           ? undefined
           : "Change " + point.orderAtTick,
+        point.initialSample ? "Initial waveform sample" : undefined,
         point.recordedWriter &&
           "Recorded commit " + point.recordedWriter.commitOrdinal,
         point.recordedWriter?.evaluation &&
@@ -834,13 +937,23 @@ export function createTraceExplorer(
             point.recordedWriter.evaluation.ordinal +
             " at tick " +
             point.recordedWriter.evaluation.tick,
-        point.recordedWordWriters &&
-          point.recordedWordWriters.length + " recorded writes",
-        point.beforeTick
-          ? "Before tick"
-          : point.sampleOnly
-            ? "Sample"
-            : undefined,
+        commits.size ? commits.size + " recorded writes" : undefined,
+        point.enumConstant
+          ? "RTL enum constant"
+          : point.packageParameter
+            ? "RTL package parameter"
+            : point.elaboratedParameter
+              ? "Elaborated parameter"
+              : point.operandEvaluationOrdinal !== undefined
+                ? (point.branchEntrySample
+                    ? "Captured branch entry · Evaluation "
+                    : "Captured operand · Evaluation ") +
+                  point.operandEvaluationOrdinal
+                : point.beforeTick
+                  ? "Before tick"
+                  : point.sampleOnly
+                    ? "Sample"
+                    : undefined,
         point.sameValueWrite
           ? "Recorded same-value write"
           : point.executionOnly
@@ -852,6 +965,7 @@ export function createTraceExplorer(
             ? "Continued " +
               (relation ? temporalGapUseLabel(relation) : "observation")
             : (node.edge?.role ?? node.edge?.kind),
+        point.initialSample ||
         node.continuation?.evidence.historyCutoff === undefined
           ? undefined
           : "Earlier change",
@@ -881,9 +995,7 @@ export function createTraceExplorer(
         source
           ? source.kind + " · L" + (source.location.range.start.line + 1)
           : "Assignment evidence",
-        childCount
-          ? api.TreeItemCollapsibleState.Collapsed
-          : api.TreeItemCollapsibleState.None,
+        collapsible(),
       );
       if (source) {
         item.description = source.instance;
@@ -893,12 +1005,21 @@ export function createTraceExplorer(
           arguments: [source.location],
         };
       }
+      if (node.writes.length) {
+        const commits = [
+          ...new Set(node.writes.map(({ commitOrdinal }) => commitOrdinal)),
+        ];
+        item.description = [source?.instance, "Commit " + commits.join(", ")]
+          .filter(Boolean)
+          .join(" · ");
+        item.tooltip = [...new Set(node.writes.map(wordWriteLabel))].join("\n");
+      }
       return item;
     }
     if (node.kind === "combinedGap") {
       const { gap } = node;
       const item = new api.TreeItem(
-        gap.signal + " · " + temporalGapLabels[gap.evidence.reason],
+        gap.signal + " · " + temporalGapLabel(gap.evidence),
       );
       item.description =
         "Tick " +
@@ -915,8 +1036,17 @@ export function createTraceExplorer(
         item.contextValue = "traceTemporalFrontier";
         item.command = {
           command: "waveWorkbench.traceFromSignal",
-          title: "Continue trace",
+          title:
+            gap.status === "pending" && pendingContinuations
+              ? "Continue in current graph"
+              : "Continue trace",
           arguments: [node],
+        };
+      } else if (gap.evidence.declaration) {
+        item.command = {
+          command: "waveWorkbench.traceOpenSource",
+          title: "Open RTL source",
+          arguments: [gap.evidence.declaration],
         };
       }
       return item;
@@ -941,7 +1071,10 @@ export function createTraceExplorer(
       item.description = node.reason + " limit";
       item.command = {
         command: "waveWorkbench.traceFromSignal",
-        title: "Continue trace",
+        title:
+          node.waveformSignal && pendingStaticSignals.has(node.waveformSignal)
+            ? "Continue in current graph"
+            : "Continue trace",
         arguments: [node],
       };
       return item;
@@ -974,16 +1107,13 @@ export function createTraceExplorer(
     }
     if (node.kind === "executionEvent") {
       const { event } = node;
-      const item = new api.TreeItem(
-        event.kind,
-        childCount
-          ? api.TreeItemCollapsibleState.Collapsed
-          : api.TreeItemCollapsibleState.None,
-      );
+      const item = new api.TreeItem(event.kind, collapsible());
       item.description = [
         "Tick " + event.tick,
         "Order " + event.ordinal,
-        event.signal,
+        event.signal && event.signal + selectionText(event.targetRange),
+        event.attemptedTargetRange &&
+          "Attempted " + selectionText(event.attemptedTargetRange),
         event.value,
         event.timing,
       ]
@@ -998,9 +1128,9 @@ export function createTraceExplorer(
       return item;
     }
     if (node.kind === "executionSource") {
-      const { source, step } = node;
+      const { source, step, label } = node;
       const item = new api.TreeItem(
-        (step?.operation ?? "RTL source") + " · L" + source.line,
+        (label ?? step?.operation ?? "RTL source") + " · L" + source.line,
       );
       item.description = [step?.value, source.identity]
         .filter(Boolean)
@@ -1050,17 +1180,15 @@ export function createTraceExplorer(
       return item;
     }
     if (node.kind === "temporalGap") {
-      const { signal, bit, tick, reason, use } = node.gap;
+      const { signal, bit, tick, use } = node.gap;
       const subject = signals.get(signal);
       const point = use && temporal?.nodes[use.target];
       const item = new api.TreeItem(
         (subject?.name ?? "Signal " + signal) +
           selectionText(undefined, bit) +
           " · " +
-          temporalGapLabels[reason],
-        childCount
-          ? api.TreeItemCollapsibleState.Collapsed
-          : api.TreeItemCollapsibleState.None,
+          temporalGapLabel(node.gap),
+        collapsible(),
       );
       item.description = [
         "Tick " + tick,
@@ -1071,7 +1199,9 @@ export function createTraceExplorer(
         .filter(Boolean)
         .join(" · ");
       if (node.gap.continuation) item.contextValue = "traceTemporalFrontier";
-      const location = use && trace?.assignments[use.assignment]?.location;
+      const location =
+        node.gap.declaration ??
+        (use && trace?.assignments[use.assignment]?.location);
       if (location)
         item.command = {
           command: "waveWorkbench.traceOpenSource",
@@ -1087,12 +1217,16 @@ export function createTraceExplorer(
         tick,
         value,
         orderAtTick,
+        initialSample,
         beforeTick,
         sampleOnly,
         elaboratedParameter,
+        enumConstant,
+        packageParameter,
         recordedWriter,
         recordedWordWriters,
         operandEvaluationOrdinal,
+        branchEntrySample,
         executionOnly,
         sameValueWrite,
         recordedRhsCombinations,
@@ -1104,29 +1238,35 @@ export function createTraceExplorer(
       const edge = node.edge;
       const item = new api.TreeItem(
         (subject?.name ?? "Signal") + selectionText(undefined, bit),
-        childCount
-          ? api.TreeItemCollapsibleState.Collapsed
-          : api.TreeItemCollapsibleState.None,
+        collapsible(),
       );
       item.description = [
         "Tick " + tick,
         value,
+        initialSample ? "Initial waveform sample" : undefined,
         orderAtTick === undefined ? undefined : "Change " + orderAtTick,
-        elaboratedParameter
-          ? "Elaborated parameter"
-          : recordedFields.has(signal)
-            ? "Execution log observation"
-            : sameValueWrite
-              ? "Recorded same-value write"
-              : executionOnly
-                ? "Execution log"
-                : operandEvaluationOrdinal !== undefined
-                  ? "Captured operand · Evaluation " + operandEvaluationOrdinal
-                  : beforeTick
-                    ? "Before tick"
-                    : sampleOnly
-                      ? "Stable sample"
-                      : undefined,
+        enumConstant
+          ? "RTL enum constant"
+          : packageParameter
+            ? "RTL package parameter"
+            : elaboratedParameter
+              ? "Elaborated parameter"
+              : recordedFields.has(signal)
+                ? "Execution log observation"
+                : sameValueWrite
+                  ? "Recorded same-value write"
+                  : executionOnly
+                    ? "Execution log"
+                    : operandEvaluationOrdinal !== undefined
+                      ? (branchEntrySample
+                          ? "Captured branch entry · Evaluation "
+                          : "Captured operand · Evaluation ") +
+                        operandEvaluationOrdinal
+                      : beforeTick
+                        ? "Before tick"
+                        : sampleOnly
+                          ? "Stable sample"
+                          : undefined,
         recordedWordWriters
           ? recordedWordWriters.length + " recorded writes"
           : recordedWriter && "Recorded commit " + recordedWriter.commitOrdinal,
@@ -1154,18 +1294,36 @@ export function createTraceExplorer(
         edge?.sourceWriteEvidence === "recordedSameValueWrite"
           ? "Same-value write"
           : undefined,
-        edge?.confidence === "possible" ? "Candidate" : undefined,
+        edge?.waitResumeCause === "uniqueObservedTransition"
+          ? "Observed transition enabled wait"
+          : edge?.waitResumeCause === "orderedCallbacks"
+            ? "Callback " + edge.waitResumeCallbackOrdinal + " enabled wait"
+            : undefined,
+        edge?.continuousCause
+          ? "Callback " +
+            edge.continuousCause.sourceOrdinal +
+            " changed RHS before output callback " +
+            edge.continuousCause.targetOrdinal
+          : edge?.confidence === "possible"
+            ? "Candidate"
+            : undefined,
         edge?.arrayIndexEvidence === "recordedTarget"
           ? "Matches recorded array index"
-          : edge?.controlSampleEvidence === "recordedEvaluation"
-            ? "Matches recorded guard operand"
-            : edge?.rhsSampleEvidence === "recordedEvaluation"
-              ? "Matches recorded RHS"
-              : edge?.rhsSample === "matches"
-                ? "RHS compatible"
-                : edge?.rhsSample === "differs"
-                  ? "RHS differs"
-                  : undefined,
+          : edge?.controlSampleEvidence === "recordedWaitResume"
+            ? "Matches recorded wait resume"
+            : edge?.controlSampleEvidence === "recordedBranchEntry"
+              ? "Matches recorded branch entry"
+              : edge?.controlSampleEvidence === "recordedEvaluation"
+                ? "Matches recorded guard operand"
+                : edge?.rhsSampleEvidence === "recordedEvaluation"
+                  ? "Matches recorded RHS"
+                  : edge?.rhsSampleEvidence === "waveformCombination"
+                    ? "RHS matches a waveform sample combination"
+                    : edge?.rhsSample === "matches"
+                      ? "RHS compatible"
+                      : edge?.rhsSample === "differs"
+                        ? "RHS differs"
+                        : undefined,
         edge?.callbackOrder
           ? edge.callbackOrder === "sourceBeforeTarget"
             ? "Source callback before target"
@@ -1197,9 +1355,7 @@ export function createTraceExplorer(
               : node.assignment.kind) +
           " · L" +
           (node.assignment.location.range.start.line + 1),
-      childCount
-        ? api.TreeItemCollapsibleState.Collapsed
-        : api.TreeItemCollapsibleState.None,
+      collapsible(),
     );
     const location =
       node.kind === "signal"
@@ -1282,6 +1438,10 @@ export function createTraceExplorer(
   const registration =
     view ?? api.window.registerTreeDataProvider?.(viewId, provider);
   if (registration) context.subscriptions.push(registration);
+  const panel = api.window.createTreeView?.("waveWorkbench.panelTrace", {
+    treeDataProvider: provider,
+  });
+  if (panel) context.subscriptions.push(panel);
   context.subscriptions.push(
     changed,
     api.commands.registerCommand("waveWorkbench.traceOpenSource", open),
@@ -1332,14 +1492,15 @@ export function createTraceExplorer(
         const targets = waveformTargets(node);
         if (targets.length <= 1) {
           const target = targets[0];
-          if (target) return addSignal(target.signal, target.bit);
+          if (target)
+            return addSignal(target.signal, target.bit, target.waveformSignal);
           return;
         }
         const generation = signalGeneration;
         return (async () => {
-          for (const { signal, bit } of targets) {
+          for (const { signal, bit, waveformSignal } of targets) {
             if (generation !== signalGeneration) return;
-            await addSignal(signal, bit);
+            await addSignal(signal, bit, waveformSignal);
           }
         })();
       },
@@ -1358,6 +1519,11 @@ export function createTraceExplorer(
       (node: Node) => {
         if (node?.kind === "staticFrontier") {
           if (node.generation !== signalGeneration) return;
+          if (
+            node.waveformSignal &&
+            pendingStaticSignals.has(node.waveformSignal)
+          )
+            return resumeCombined(node.waveformSignal);
           if (node.waveformSignal)
             return retrace(
               node.signal,
@@ -1384,6 +1550,12 @@ export function createTraceExplorer(
         if (node?.kind === "combinedGap") {
           if (!combined?.gaps.includes(node.gap)) return;
           const { signal, tick, bit, continuation } = node.gap.evidence;
+          if (
+            continuation &&
+            node.gap.status === "pending" &&
+            pendingContinuations
+          )
+            return resumeCombined(continuation);
           if (continuation)
             return retrace(
               { id: signal, name: node.gap.signal, declaration: null },
@@ -1409,6 +1581,7 @@ export function createTraceExplorer(
   return {
     setMessage(message?: string) {
       if (view) view.message = message;
+      if (panel) panel.message = message;
     },
     clear() {
       signalGeneration++;
@@ -1417,6 +1590,7 @@ export function createTraceExplorer(
       temporal = undefined;
       setCombined();
       combinedStatic = undefined;
+      pendingStaticSignals.clear();
       staticStops = [];
       runtimeInputs = [];
       observations.clear();
@@ -1425,6 +1599,7 @@ export function createTraceExplorer(
       temporalAssignments.clear();
       recordedFields.clear();
       if (view) view.message = undefined;
+      if (panel) panel.message = undefined;
       changed.fire();
     },
     updateCombined(next: CombinedTimeGraph, pending = 0) {
@@ -1439,6 +1614,7 @@ export function createTraceExplorer(
       if (clearStatic) {
         signalGeneration++;
         combinedStatic = undefined;
+        pendingStaticSignals.clear();
         if (!combined) setCombined();
         signals.clear();
         relations.clear();
@@ -1453,6 +1629,7 @@ export function createTraceExplorer(
       temporal = undefined;
       setCombined();
       combinedStatic = undefined;
+      pendingStaticSignals.clear();
       runtimeInputs = [];
       changed.fire();
     },
@@ -1464,12 +1641,15 @@ export function createTraceExplorer(
       inputs: readonly RuntimeInputEvidence[] = [],
       combinedTrace?: CombinedTimeGraph,
       staticGraph?: CombinedStaticGraph,
-      pending = 0,
+      pending: number | readonly string[] = 0,
     ) {
       signalGeneration++;
       if (combinedStatic !== staticGraph) combinedGeneration++;
       trace = next;
       combinedStatic = staticGraph;
+      pendingStaticSignals = new Set(
+        typeof pending === "number" ? [] : pending,
+      );
       staticStops = staticGraph
         ? staticGraph.gaps.map((gap) => ({
             ...gap,
@@ -1481,7 +1661,10 @@ export function createTraceExplorer(
       direction = nextDirection;
       observations = values;
       temporal = timeTrace;
-      setCombined(combinedTrace, pending);
+      setCombined(
+        combinedTrace,
+        typeof pending === "number" ? pending : pending.length,
+      );
       runtimeInputs = inputs;
       temporalAssignments.clear();
       const evidenceAt = (target: number, assignment: number) => {
@@ -1499,6 +1682,8 @@ export function createTraceExplorer(
           evidenceAt(edge.target, assignment).edges.push(edge);
       }
       for (const [target, point] of timeTrace?.nodes.entries() ?? []) {
+        for (const assignment of point.initializationAssignments ?? [])
+          evidenceAt(target, assignment);
         const { recordedWordWriters, recordedWriter } = point;
         for (const writer of recordedWordWriters ??
           (recordedWriter ? [recordedWriter] : []))

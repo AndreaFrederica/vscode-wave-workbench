@@ -1,8 +1,15 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{csp}}; script-src 'nonce-{{nonce}}';"><link rel="stylesheet" href="{{css}}"><title>Wave Workbench</title></head>
 <body>
-<nav id="compactToolbar" aria-label="Wave controls">
-<details class="toolMenu" id="fileMenu"><summary>文件</summary><div class="menuPanel"><span id="file">正在读取波形…</span><small id="backend"></small><button data-action="openWaveform">打开波形…</button><button data-action="openRecent">最近打开…</button><button data-action="openProject">打开波形工程…</button><button data-action="saveProject">保存波形工程…</button><button data-action="exportClip">截取 / 导出波形…</button><button data-action="runScript">运行 Tcl 脚本…</button><button data-action="console">Tcl 命令</button></div></details>
+<section id="dockedNotice" hidden>
+  <p>此波形正在底部面板显示。</p>
+  <button data-action="undockWave">移回编辑器</button>
+</section>
+<nav id="compactToolbar" aria-label="Wave controls" data-rows="1">
+<div id="toolbarControls">
+<div class="toolbarRow">
+<details class="toolMenu" id="fileMenu"><summary>文件</summary><div class="menuPanel"><span id="file">正在读取波形…</span><small id="backend"></small><button data-action="openWaveform">打开波形…</button><button data-action="openRecent">最近打开…</button><button data-action="openProject">打开波形工程…</button><button data-action="saveProject">保存波形工程…</button><button data-action="exportClip">截取 / 导出波形…</button><button data-action="runScript">运行 Tcl 脚本…</button><button data-action="showTclConsole">打开 Tcl 控制台</button></div></details>
+<button data-action="dockWave" class="dock-action">移到底部</button><button data-action="undockWave" class="undock-action">移回编辑器</button>
 <button data-action="fit" title="全局缩放 F" aria-label="全局缩放">全局</button><button data-action="in" title="放大 +" aria-label="放大">＋</button><button data-action="out" title="缩小 -" aria-label="缩小">−</button><button data-action="left" title="向左平移" aria-label="向左平移">←</button><button data-action="right" title="向右平移" aria-label="向右平移">→</button><button data-action="prev" title="上一边沿 [" aria-label="上一边沿">Ⅰ‹</button><button data-action="next" title="下一边沿 ]" aria-label="下一边沿">›Ⅰ</button><i></i>
 <details class="toolMenu" id="displayMenu"><summary>显示</summary><div class="menuPanel"><label for="waveRowHeight">波形行高</label><input id="waveRowHeight" type="range" step="1" value="32">
 <label for="busLabelMode">总线格数值</label>
@@ -28,10 +35,10 @@
 </details>
 <details class="toolMenu" id="measurementMenu"><summary>测量</summary><div class="menuPanel">
 <button data-action="measure-cursors">A/B 游标读数与差值</button>
-<button data-action="measure-analog">实数统计（最值、峰峰值、均值、RMS）</button>
-<button data-action="measure-pulse">数字脉宽、周期、频率和占空比</button>
-<button data-action="measure-delay">两路信号的首个上升沿延时</button>
-<button data-action="measure-edges">实数 10–90% 上升／下降时间</button>
+<button data-action="measure-analog">实数幅值和面积</button>
+<button data-action="measure-pulse">脉宽、周期、频率和占空比</button>
+<button data-action="measure-delay">双通道延时、相位和建立／保持时间</button>
+<button data-action="measure-edges">实数上升／下降时间和斜率</button>
 <button data-action="measure-peaks">FFT 频谱峰值</button>
 </div></details>
 <details class="toolMenu" id="mathMenu"><summary>数学</summary><div class="menuPanel">
@@ -44,7 +51,9 @@
 <button data-action="math-fft">FFT 频谱…</button>
 <button data-action="math-external">运行外部算子…</button>
 </div></details>
-<details class="toolMenu" id="signalMenu"><summary>信号</summary><div class="menuPanel" id="signalTools"><button id="renameSignal">重命名信号</button><button id="editAnnotation">标签和注释…</button><button id="moveUp">上移</button><button id="moveDown">下移</button><button id="createVirtual">拼接 / 逻辑</button><button id="expandBus">展开 Bus</button><button id="collapseBus">收回 Bus</button><button data-action="exportClip">截取 / 导出波形…</button><button id="signalReport">事件报告</button><button data-action="analogUnit">设置实数单位…</button><button data-action="analogThreshold">生成滞回数字波形…</button><button data-action="remove">移除信号</button></div></details>
+</div>
+<div class="toolbarRow">
+<details class="toolMenu" id="signalMenu"><summary>信号</summary><div class="menuPanel" id="signalTools"><button id="renameSignal">重命名信号</button><button id="editAnnotation">标签和注释…</button><button id="moveUp">上移</button><button id="moveDown">下移</button><button id="createVirtual">拼接 / 逻辑</button><button id="expandBus">展开 Bus</button><button id="collapseBus">收回 Bus</button><button data-action="exportClip">截取 / 导出波形…</button><button id="signalReport">事件报告</button><button data-action="analogScale">设置模拟纵轴…</button><button data-action="analogUnit">设置实数单位…</button><button data-action="analogThreshold">生成滞回数字波形…</button><button data-action="remove">移除信号</button></div></details>
 <details class="toolMenu" id="sourceMenu">
   <summary>源码</summary>
   <div class="menuPanel">
@@ -83,12 +92,62 @@
   <input id="toggleTooltip" type="checkbox" checked> 悬停提示
 </label>
 <input id="findSignal" aria-label="查找波形信号" placeholder="查找 Ctrl+F"><button id="findNext" title="下一个匹配" aria-label="下一个匹配">⌕</button><button id="toggleFilter" title="过滤 Ctrl+Shift+F" aria-label="过滤">筛选</button>
+</div>
+</div>
+<button id="toggleToolbarRows" type="button" aria-pressed="false" aria-label="双行工具栏" title="切换单行或双行工具栏"><span>双行</span></button>
 </nav>
 <main><aside><details id="catalogPanel" open><summary class="section">波形目录</summary><input id="search" placeholder="搜索层次或信号…" aria-label="Search signals"><div id="catalogModes"><button id="catalogPreview">层次预览</button><button id="catalogAll">全部信号</button></div><div id="tree"></div><div id="count"></div></details><div class="section" id="scopeTitle">Signals · 选择实例查看信号</div><div id="scopeSignals"></div><details id="legacyKdb" open><summary class="section">Elaborated Design</summary><div id="kdbState">未接入设计数据库</div><div id="kdbTools"><button id="kdbUp">↑ 上一级</button><button id="kdbDefinition">模块定义 ↗</button></div><div id="kdbTree"></div></details></aside>
-<section id="viewer"><div id="readout"><input id="filterSignals" aria-label="过滤波形信号" placeholder="信号 / tag:标签" hidden><label>A <input id="cursorAInput" aria-label="Cursor A" inputmode="decimal"></label><label>B <input id="cursorBInput" aria-label="Cursor B" inputmode="decimal"></label><button data-action="between" title="缩放到 A/B 之间" aria-label="A B 之间缩放">A↔B</button><select id="timeUnitSelect" aria-label="时间轴单位" title="时间轴单位" disabled><option value="">原始单位</option><option value="1fs">fs</option><option value="1ps">ps</option><option value="1ns">ns</option><option value="1us">µs</option><option value="1ms">ms</option><option value="1s">s</option></select><span id="cursors">单击设置 A；Shift+单击设置 B；Ctrl+滚轮缩放</span><span id="range"></span></div><div id="decoderTracks"></div><div id="tracks"><div id="trackContent"><div id="names"><div class="ruler"><span>Signal</span><span class="valueHeader">Value @ A</span></div><div id="rows"></div><div id="valueSplit" role="separator" aria-label="调整信号名与数值列宽度" aria-orientation="vertical" tabindex="0" title="拖动调整列宽 · 双击恢复"></div></div><div id="waveSplit" role="separator" tabindex="0" aria-label="调整信号栏与波形画布宽度" aria-orientation="vertical" aria-valuemin="10" aria-valuemax="75" title="拖动调整宽度 · 双击恢复"></div><div id="plot"><div id="markerLayer" aria-label="时间标记"></div><canvas id="canvas" tabindex="0" aria-label="Waveform canvas"></canvas></div></div></div><div id="waveScrollbars">
+<section id="viewer">
+<div id="readout">
+  <div id="cursorToolbar" role="toolbar" aria-label="游标">
+    <span class="cursor-toolbar-title">游标</span>
+    <label class="time-cursor-a" title="单击波形设置 A">A <input id="cursorAInput" aria-label="Cursor A" inputmode="decimal"></label>
+    <label class="time-cursor-b" title="Shift+单击波形设置 B">B <input id="cursorBInput" aria-label="Cursor B" inputmode="decimal"></label>
+    <button data-action="between" title="缩放到 A/B 之间" aria-label="A B 之间缩放">A↔B</button>
+    <button id="toggleAmplitudeCursors" type="button" aria-pressed="false" aria-controls="amplitudeCursorToolbar" title="在选中的实数信号上添加两条水平游标">幅值</button>
+    <span id="cursors"></span>
+  </div>
+  <input id="filterSignals" aria-label="过滤波形信号" placeholder="信号 / tag:标签" hidden>
+  <select id="timeUnitSelect" aria-label="时间轴单位" title="时间轴单位" disabled><option value="">原始单位</option><option value="1fs">fs</option><option value="1ps">ps</option><option value="1ns">ns</option><option value="1us">µs</option><option value="1ms">ms</option><option value="1s">s</option></select>
+  <span id="range"></span>
+</div>
+<div id="amplitudeCursorToolbar" role="toolbar" aria-label="幅值游标" hidden>
+  <label class="amplitude-first">Y1 <input id="amplitudeY1" aria-label="Y1 幅值" inputmode="decimal"></label>
+  <label class="amplitude-second">Y2 <input id="amplitudeY2" aria-label="Y2 幅值" inputmode="decimal"></label>
+  <output id="amplitudeCursorDelta" for="amplitudeY1 amplitudeY2" aria-label="幅值差"></output>
+  <span id="amplitudeCursorSource"></span>
+  <button id="attachAmplitudeCursors" type="button">使用选中通道</button>
+</div>
+<div id="decoderTracks"></div><div id="tracks"><div id="trackContent"><div id="names"><div class="ruler"><span>Signal</span><span class="valueHeader">Value @ A</span></div><div id="rows"></div><div id="valueSplit" role="separator" aria-label="调整信号名与数值列宽度" aria-orientation="vertical" tabindex="0" title="拖动调整列宽 · 双击恢复"></div></div><div id="waveSplit" role="separator" tabindex="0" aria-label="调整信号栏与波形画布宽度" aria-orientation="vertical" aria-valuemin="10" aria-valuemax="75" title="拖动调整宽度 · 双击恢复"></div><div id="plot"><div id="markerLayer" aria-label="时间标记"></div><canvas id="canvas" tabindex="0" aria-label="Waveform canvas"></canvas>
+<div id="amplitudeCursorLayer" hidden>
+  <div class="amplitude-line amplitude-first"><div id="amplitudeY1Handle" role="slider" tabindex="0" aria-label="拖动 Y1 幅值游标" aria-orientation="vertical">Y1</div></div>
+  <div class="amplitude-line amplitude-second"><div id="amplitudeY2Handle" role="slider" tabindex="0" aria-label="拖动 Y2 幅值游标" aria-orientation="vertical">Y2</div></div>
+</div></div></div></div><div id="waveScrollbars">
   <div id="nameScroll" tabindex="0" aria-label="横向滚动信号名" hidden><div></div></div>
   <div id="timeScroll" role="scrollbar" aria-orientation="horizontal" aria-controls="tracks" aria-label="全波形时间轴" tabindex="0" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-disabled="true"><div id="timeThumb"></div></div>
-</div></section></main>
+</div>
+<section id="measurementPanel" aria-labelledby="measurementHeading" data-layout="docked" hidden>
+  <div class="measurement-toolbar">
+    <button id="moveMeasurements" type="button" aria-label="移动浮动测量面板" title="拖动或用方向键移动" hidden>⠿</button>
+    <strong id="measurementHeading">测量</strong>
+    <select id="addMeasurement" aria-label="添加测量"><option value="">＋ 添加测量</option></select>
+    <select id="measurementLayout" aria-label="测量显示方式">
+      <option value="docked">底部停靠</option>
+      <option value="floating">浮动</option>
+    </select>
+    <label>区间
+      <select id="measurementGate" aria-label="测量区间">
+        <option value="auto">自动 · 优先 A/B</option>
+        <option value="visible">当前视窗</option>
+        <option value="full">全波形</option>
+      </select>
+    </label>
+    <button id="toggleMeasurements" type="button" aria-expanded="true" aria-controls="measurementCards">收起</button>
+    <button id="clearMeasurements" type="button">清空</button>
+  </div>
+  <div id="measurementCards"></div>
+</section>
+</section></main>
 <details id="console"><summary>nWave Tcl Console</summary><pre id="commandLog" role="log"></pre><form id="commandForm"><textarea id="commandInput" rows="2" aria-label="nWave Tcl command" placeholder="wvZoomAll; wvSetCursor 20 · waveHelp 查看命令"></textarea><button type="submit">执行 Ctrl+Enter</button></form></details>
 <details id="eventReport" hidden><summary>信号事件报告 · 当前时间窗口</summary><div id="reportSummary"></div><button id="closeReport">关闭报告</button><pre id="reportBody"></pre></details><footer id="status" role="status">FSDB 原生读取 · Rust + Verdi Reader SDK</footer>
 <div id="editPopover" hidden role="dialog" aria-label="编辑波形显示"><form id="markerForm" hidden><label for="markerName">时间标记名称</label><input id="markerName" aria-label="时间标记名称" maxlength="120"><label for="markerTime">时间（当前显示单位）</label><input id="markerTime" aria-label="标记时间" inputmode="decimal"><label for="markerColor">颜色</label><input id="markerColor" aria-label="标记颜色" type="color" value="#4ec9b0"><div class="editActions"><button type="submit">保存标记</button><button id="cancelMarker" type="button">取消</button></div><div id="markerError" role="status"></div></form><form id="groupForm" hidden><label for="groupName">分组名称</label><input id="groupName" aria-label="分组名称" maxlength="120"><div class="editActions"><button type="submit">确定分组</button><button id="cancelGroup" type="button">取消</button></div></form><form id="renameSignalForm" hidden><label for="signalAlias">信号显示名称</label><input id="signalAlias" aria-label="信号显示名称" maxlength="160"><div class="editActions"><button type="submit">确定名称</button><button id="cancelSignalRename" type="button">取消</button></div></form><form id="decoderForm" hidden>
@@ -130,10 +189,40 @@
 <div id="annotationError" role="status"></div>
 </form><form id="virtualForm" hidden><label for="virtualName">虚拟信号名称</label><input id="virtualName" aria-label="虚拟信号名称" maxlength="120"><select id="virtualOp" aria-label="虚拟信号操作"><option value="concat">拼接（上方信号为高位）</option><option value="and">按位 AND</option><option value="or">按位 OR</option><option value="xor">按位 XOR</option><option value="not">按位 NOT</option></select><div class="editActions"><button type="submit">创建虚拟信号</button><button id="cancelVirtual" type="button">取消</button></div></form></div>
 <section id="markerManager" hidden role="dialog" aria-label="时间标记管理"><div class="markerManagerHeader"><strong>时间标记</strong><button id="closeMarkerManager">关闭</button></div><div id="markerList"></div></section>
-<dialog id="measurementDialog" aria-labelledby="measurementTitle">
-<header><strong id="measurementTitle">波形测量</strong><form method="dialog"><button>关闭</button></form></header>
-<p id="measurementStatus" role="status"></p>
-<table><tbody id="measurementRows"></tbody></table>
-</dialog>
 <div id="waveTooltip" role="tooltip" hidden></div>
+<dialog id="measurementSourceDialog" aria-labelledby="measurementSourceTitle">
+  <form id="measurementSourceForm">
+    <strong id="measurementSourceTitle">更换测量通道</strong>
+    <input id="measurementSourceSearch" type="search" placeholder="搜索信号名或路径" aria-label="搜索测量通道" autofocus>
+    <select id="measurementSourceOptions" size="7" aria-label="选择测量通道" required></select>
+    <p id="measurementSourceStatus" role="status"></p>
+    <div class="editActions">
+      <button id="cancelMeasurementSource" type="button">取消</button>
+      <button id="applyMeasurementSource" type="submit">绑定</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="analogScaleDialog" aria-labelledby="analogScaleTitle">
+  <form id="analogScaleForm">
+    <strong id="analogScaleTitle">模拟纵轴</strong>
+    <label for="analogScaleMode">范围</label>
+    <select id="analogScaleMode">
+      <option value="viewport">自动 · 当前视口</option>
+      <option value="window">自动 · 自定义时间窗</option>
+      <option value="cursors">自动 · A–B 游标</option>
+      <option value="manual">固定上下限</option>
+    </select>
+    <fieldset id="analogScaleManual" hidden>
+      <label for="analogScaleMin">下限</label><input id="analogScaleMin" type="number" step="any" required>
+      <label for="analogScaleMax">上限</label><input id="analogScaleMax" type="number" step="any" required>
+    </fieldset>
+    <fieldset id="analogScaleWindow" hidden>
+      <legend id="analogScaleTimeUnit">时间窗</legend>
+      <label for="analogScaleStart">起点</label><input id="analogScaleStart" type="number" step="any" required>
+      <label for="analogScaleEnd">终点</label><input id="analogScaleEnd" type="number" step="any" required>
+    </fieldset>
+    <div id="analogScaleError" role="status"></div>
+    <div class="editActions"><button type="submit">应用</button><button id="analogScaleCancel" type="button">取消</button></div>
+  </form>
+</dialog>
 <div id="contextMenu" role="menu" hidden></div><script nonce="{{nonce}}" src="{{script}}"></script></body></html>

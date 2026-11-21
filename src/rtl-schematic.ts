@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
+import { pathToFileURL } from "node:url";
 import {
+  guardEntryLabels,
   temporalEdgeLabel,
-  temporalGapLabels,
+  temporalGapLabel,
   traceSignalScope,
+  wordWriteLabel,
   type mergeTemporalContinuationGraph,
   type StaticTraceDiagram,
   type VideTrace,
@@ -114,13 +117,15 @@ export function traceTimeSchematic(
   >();
   const signalNodes = new Map<string, number>();
   const signals = new Map(trace.signals.map((signal) => [signal.id, signal]));
-  for (const [index, { signal, point, sources }] of time.nodes.entries()) {
+  for (const [index, event] of time.nodes.entries()) {
+    const { signal, point, sources, waveformSignal } = event;
     const id = pointId(index);
     const local = sources.some(({ segment }) => segment === 0);
-    const declaration = local
-      ? signals.get(point.signal)?.declaration
-      : undefined;
-    if (local) signalNodes.set(id, point.signal);
+    const declaration =
+      event.declaration ??
+      (local ? signals.get(point.signal)?.declaration : undefined);
+    if (local && waveformSignal === undefined)
+      signalNodes.set(id, point.signal);
     if (declaration) locations.set(id, declaration);
     const split = signal.lastIndexOf(".");
     graph.nodes.push({
@@ -129,20 +134,86 @@ export function traceTimeSchematic(
       label: signal.slice(split + 1),
       instance: split > 0 ? signal.slice(0, split) : undefined,
       signal,
+      ...(waveformSignal ? { waveformSignal, wave: true } : {}),
+      ...(waveformSignal === null ? { wave: false } : {}),
       detail: [
         "tick " + point.tick,
         point.value === undefined ? undefined : "= " + point.value,
+        point.initialSample ? "初始波形采样" : undefined,
         point.orderAtTick === undefined
           ? undefined
           : "事件 " + point.orderAtTick,
-        point.sampleOnly ? "采样" : undefined,
+        point.enumConstant
+          ? "RTL 枚举常量"
+          : point.packageParameter
+            ? "RTL package 参数"
+            : point.elaboratedParameter
+              ? "展开参数"
+              : point.operandEvaluationOrdinal !== undefined
+                ? "求值 " + point.operandEvaluationOrdinal + " 的操作数"
+                : point.executionOnly
+                  ? "执行记录"
+                  : point.sampleOnly
+                    ? "采样"
+                    : undefined,
         point.recordedWriter
           ? "提交 " + point.recordedWriter.commitOrdinal
           : undefined,
+        ...guardEntryLabels(
+          point.recordedWriter?.evaluation?.guardEntryValues,
+          point.recordedWriter?.evaluation?.guardEntryTicks,
+        ),
       ]
         .filter(Boolean)
         .join(" · "),
       source: !!declaration,
+    });
+  }
+  for (const [index, { point }] of time.nodes.entries()) {
+    const id = pointId(index);
+    const task = point.recordedTaskTransfer;
+    if (task) {
+      const callId = id + "-task-input";
+      const writeId = id + "-member-write";
+      addExecutionSource(
+        callId,
+        "Task input commit " + task.input.ordinal,
+        "tick " + task.input.tick,
+        task.input.source,
+      );
+      addExecutionSource(
+        writeId,
+        "Member write commit " + task.write.ordinal,
+        "tick " + task.write.tick,
+        task.write.source,
+      );
+      graph.edges.push(
+        { from: callId, to: writeId },
+        { from: writeId, to: id },
+      );
+      for (const [offset, read] of task.reads.entries()) {
+        const readId = callId + "-" + offset;
+        addExecutionSource(
+          readId,
+          read.operation,
+          read.value + " · tick " + read.tick + " · evaluation " + read.ordinal,
+          read.source,
+        );
+        graph.edges.push({ from: readId, to: callId });
+      }
+    }
+  }
+
+  function addExecutionSource(
+    id: string,
+    label: string,
+    detail: string,
+    source: { file: string; line: number; column: number },
+  ) {
+    graph.nodes.push({ id, label, detail, kind: "logic", source: true });
+    locations.set(id, {
+      uri: pathToFileURL(source.file).href,
+      range: { start: { line: source.line - 1, character: source.column - 1 } },
     });
   }
 
@@ -169,6 +240,10 @@ export function traceTimeSchematic(
     return id;
   };
 
+  for (const [target, { point, sources }] of time.nodes.entries())
+    for (const assignment of point.initializationAssignments ?? [])
+      addAssignment(sources[0].segment, assignment, target);
+
   for (const edge of time.edges) {
     for (const assignment of [
       edge.assignment,
@@ -183,12 +258,29 @@ export function traceTimeSchematic(
     }
   }
   // Recorded writes can have no incoming dependency, such as a constant assignment.
-  for (const [index, { point, sources }] of time.nodes.entries()) {
-    const writers =
-      point.recordedWordWriters ??
-      (point.recordedWriter ? [point.recordedWriter] : []);
-    for (const writer of writers)
-      addAssignment(sources[0].segment, writer.assignment, index);
+  for (const [
+    index,
+    { point, sources, recordedWordEvidence },
+  ] of time.nodes.entries()) {
+    if (point.recordedWriter && !point.recordedWordWriters)
+      addAssignment(sources[0].segment, point.recordedWriter.assignment, index);
+    for (const { segment, node, writers } of recordedWordEvidence ?? []) {
+      for (const [offset, writer] of (writers ?? []).entries()) {
+        const id = `write-${segment}-${node}-${offset}`;
+        const location =
+          time.assignmentSources[segment]?.[writer.assignment]?.location;
+        graph.nodes.push({
+          id,
+          kind: "logic",
+          label: "提交 " + writer.commitOrdinal,
+          detail: wordWriteLabel(writer),
+          source: !!location,
+          instance: graph.nodes[index]?.instance,
+        });
+        if (location) locations.set(id, location);
+        graph.edges.push({ from: id, to: pointId(index) });
+      }
+    }
   }
   for (const [index, gap] of time.gaps.entries()) {
     let id: string;
@@ -204,11 +296,9 @@ export function traceTimeSchematic(
           : undefined,
         kind: "gap",
         detail:
-          "tick " +
-          gap.evidence.tick +
-          " · " +
-          temporalGapLabels[gap.evidence.reason],
+          "tick " + gap.evidence.tick + " · " + temporalGapLabel(gap.evidence),
       });
+      if (gap.evidence.declaration) locations.set(id, gap.evidence.declaration);
     }
     if (gap.target !== undefined) {
       const use = gap.evidence.use;

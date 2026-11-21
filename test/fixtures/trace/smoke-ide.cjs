@@ -144,12 +144,45 @@ async function run(workspace) {
     assert.equal(sections.queryFailures, 0);
     assert(sections.nodes > 0 && sections.edges > 0);
     assert(sections.mermaid > 0 && sections.report > 0);
-    const page = await call("wave_trace_graph_page", {
+    const pageArgs = {
       graphCursor: automatic.graphSnapshot.graphCursor,
       section: "report",
       limit: 1,
-    });
+    };
+    const page = await call("wave_trace_graph_page", pageArgs);
     assert.match(page.items[0].replaceAll("\\_", "_"), /RTL trace of `?TOP\.trace_tb\.dut\.owner_q/);
+    const tclPage = await call("wave_tcl", {
+      waveform,
+      script: `waveTool wave_trace_graph_page {${JSON.stringify(pageArgs)}}`,
+    });
+    assert.deepEqual(JSON.parse(tclPage.result), page);
+    const edgePage = await call("wave_trace_graph_page", {
+      graphCursor: pageArgs.graphCursor,
+      section: "edges",
+      limit: 128,
+    });
+    const rootEdge = edgePage.items.find(({ source, target }) =>
+      source !== target && automatic.graphSnapshot.metadata.roots.includes(target),
+    );
+    assert(rootEdge, "The time graph must have an upstream dependency.");
+    const path = await call("wave_trace_graph_path", {
+      graphCursor: pageArgs.graphCursor,
+      nodeIds: [rootEdge.source],
+    });
+    const readPathNodes = (graphCursor) => call("wave_trace_graph_page", {
+      graphCursor,
+      section: "nodes",
+    });
+    const parent = await readPathNodes(path.graphSnapshot.graphCursor);
+    const localId = parent.items.findIndex(({ sourceNode }) => sourceNode === rootEdge.source);
+    assert(localId >= 0);
+    const focused = await call("wave_trace_graph_path", {
+      graphCursor: path.graphSnapshot.graphCursor,
+      nodeIds: [localId],
+    });
+    assert.equal(focused.paths[0].hops, 1);
+    const child = await readPathNodes(focused.graphSnapshot.graphCursor);
+    assert.deepEqual(child.items, parent.items);
     const saves = {
       "static.mmd": drivers.mermaid,
       "temporal.mmd": offline.temporalMermaid,

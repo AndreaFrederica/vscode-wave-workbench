@@ -2,16 +2,9 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { once } from "node:events";
-import {
-  mkdir,
-  mkdtemp,
-  realpath,
-  readdir,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -27,17 +20,10 @@ if (process.platform !== "win32") await mkdir(longTemp);
 const mcp = resolve("dist/mcp.js");
 const hosts = [];
 const windows = process.platform === "win32";
-const windowsDirectory =
-  windows &&
-  join(
-    tmpdir(),
-    "wave-workbench-" +
-      createHash("sha256")
-        .update(await realpath(workspace))
-        .digest("hex")
-        .slice(0, 20),
-  );
-if (windowsDirectory) await mkdir(windowsDirectory);
+const { socketDirectory: workspaceSocketDirectory } = createRequire(
+  import.meta.url,
+)(resolve("dist/mcp-stdio.js"));
+const windowsDirectory = windows ? workspaceSocketDirectory(workspace) : "";
 const hostScript = `
 const { serveWaveMcp } = require(process.argv[1]);
 const waveform = process.argv[3];
@@ -161,6 +147,11 @@ try {
     section: "nodes",
   });
   assert.deepEqual(JSON.parse(page.content[0].text), { waveform: second });
+  const focus = call("wave_trace_graph_path", {
+    graphCursor: other.child.pid + ".7b87c4bc-79fb-4bec-8ac3-ce5174fdc3ec",
+    nodeIds: [1, 2],
+  });
+  assert.deepEqual(JSON.parse(focus.content[0].text), { waveform: second });
   assert.match(
     call("wave_trace_resume", { continuationCursor: "invalid" }).content[0]
       .text,

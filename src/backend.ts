@@ -119,7 +119,8 @@ class Backend {
       const id = ++this.sequence;
       const line = JSON.stringify({ id, method, ...args }) + "\n";
       const timer = setTimeout(() => {
-        this.dispose();
+        if (method === "cacheStats") this.pending.delete(id);
+        else this.dispose();
         reject(
           new Error(
             "Wave read exceeded 120 seconds; reduce the selected window/signals.",

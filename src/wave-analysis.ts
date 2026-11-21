@@ -9,8 +9,24 @@ import type { Signal, Location } from "./shared/protocol";
 import type * as vscode from "vscode";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { traceSchematic } from "./rtl-schematic";
+import {
+  selectTracePathNodes,
+  traceGraphPaths,
+  tracePathReport,
+} from "./rtl-trace-path";
+import {
+  isBitPathSelector,
+  staticBitMermaid,
+  staticBitPaths,
+  staticBitReport,
+} from "./rtl-static-bit-path";
+import {
+  staticTracePaths,
+  staticPathReport,
+  type StaticPathGraph,
+} from "./rtl-static-path";
 import { kdbModuleSchematic, kdbSchematicRoots } from "./kdb-schematic";
 import { fileURLToPath } from "node:url";
 
@@ -34,6 +50,7 @@ import { isMissingKdbDeclaration, KdbSession, mapPrefix } from "./kdb";
 
 import {
   appendContinuationReport,
+  automaticTraceContinuationLimit,
   declarationColumns,
   declaredSignalName,
   continuationMermaidPages,
@@ -51,10 +68,12 @@ import {
   traceSignalScope,
   staticTracePage,
   temporalMermaidOutput,
+  temporalContinuationHistoryStart,
   temporalTraceReferences,
   temporalWaveformSignals,
   packedStructPorts,
   traceFeedback,
+  traceContinuationTimeout,
   traceMermaidPages,
   traceReport,
   UnresolvedTraceSignal,
@@ -102,8 +121,10 @@ import {
   traceCursorWriters,
   type ObservedTraceWord,
   type RecordedOperandHistory,
+  type RecordedValueCallbacks,
   type RecordedTraceField,
   type TemporalLimits,
+  type TraceBindingIssue,
 } from "./rtl-trace-candidates";
 import {
   bindModuleGenerateBranches,
@@ -144,6 +165,7 @@ import {
 import {
   readAdjacentTraceBuildManifest,
   readTraceBuildManifest,
+  vcsPliExecutionGap,
   verilatorArtifactMismatches,
   verifyLiveTraceBuild,
   verifyTraceBuild,
@@ -153,7 +175,8 @@ import {
 type AnalysisView = Pick<
   Viewer,
   "uri" | "disposed" | "backend" | "meta" | "kdb"
-> & { ready: Promise<unknown> };
+> &
+  Partial<Pick<Viewer, "backendKind">> & { ready: Promise<unknown> };
 
 export interface TraceHost {
   file(filename: string): vscode.Uri;
@@ -192,6 +215,17 @@ export function createWaveAnalysis<V extends AnalysisView>(
   ) => Promise<T>,
 ) {
   const traceProjects = new Map<V, ReturnType<typeof openSimulationTrace>>();
+  type TraceRequestProject = {
+    pending?: ReturnType<typeof openSimulationTrace>;
+    build?: {
+      identity: string;
+      traces: Map<string, Awaited<ReturnType<typeof traceWithProject>>>;
+      pending: Promise<{
+        session: VideTraceProject;
+        inputs: Awaited<ReturnType<typeof simulationInputFingerprint>>[];
+      }>;
+    };
+  };
   const portTraceCache = new WeakMap<
     VideTraceProject,
     { revision: string; traces: Map<string, VideTrace> }
@@ -265,6 +299,10 @@ export function createWaveAnalysis<V extends AnalysisView>(
       defines: buildManifest.defines,
       topModules: buildManifest.top_modules,
       parameterOverrides: buildManifest.parameter_overrides ?? [],
+      defaultTimescale: buildManifest.default_timescale,
+      externalSystemCalls: [
+        ...new Set(buildManifest.vcs_pli?.flatMap(({ calls }) => calls ?? [])),
+      ],
     });
   }
 
@@ -347,7 +385,10 @@ export function createWaveAnalysis<V extends AnalysisView>(
         filelist: selection.filelist,
         workingDirectory: selection.workingDirectory,
         ...("rebuild" in selection ? { vcsRebuild: true } : {}),
-        limitations: manifest.unsupported,
+        limitations: manifest.vcsPli?.length
+          ? [...manifest.unsupported, vcsPliExecutionGap]
+          : manifest.unsupported,
+        ...(manifest.vcsPli?.length ? { vcsPli: manifest.vcsPli } : {}),
         unverifiedVcsParameterPaths: manifest.unverifiedVcsParameterPaths,
         ...(manifest.libraryMaps ? { libraryMaps: manifest.libraryMaps } : {}),
         ...(design &&
@@ -375,6 +416,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
     token?: vscode.CancellationToken,
     override?: TraceProjectSelection,
     buildManifest?: TraceBuildManifest,
+    requestProject?: TraceRequestProject,
   ) {
     return trackTask(
       direction === "drivers" ? "追踪驱动" : "追踪负载",
@@ -388,6 +430,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
           token,
           override,
           buildManifest,
+          requestProject,
         ),
     );
   }
@@ -400,6 +443,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
     token?: vscode.CancellationToken,
     override?: TraceProjectSelection,
     buildManifest?: TraceBuildManifest,
+    requestProject?: TraceRequestProject,
   ) {
     await viewer.ready;
     if (token?.isCancellationRequested)
@@ -443,25 +487,99 @@ export function createWaveAnalysis<V extends AnalysisView>(
         );
         return { ...result, buildManifest };
       }
-      const project = await openTraceBuildProject(buildManifest);
-      try {
-        const result = await traceWithProject(
-          viewer,
-          direction,
-          fullname,
-          { ...options, includeCompilation: true },
-          token,
-          project,
-          buildManifest,
-        );
-        result.trace.simulationProject = {
-          buildManifest: buildManifest.filename,
-          workingDirectory: path.dirname(buildManifest.filename),
-          limitations: buildManifest.unsupported ?? [],
+      let scoped = requestProject?.build;
+      if (requestProject) {
+        const identity = JSON.stringify(buildManifest);
+        if (scoped && scoped.identity !== identity)
+          throw new TraceContextChanged(
+            "The trace build manifest changed during continuation.",
+          );
+        scoped ??= requestProject.build = {
+          identity,
+          traces: new Map(),
+          pending: (async () => {
+            const manifest = buildManifest;
+            const files = new Set([
+              viewer.uri.fsPath,
+              manifest.filename,
+              ...manifest.roots,
+              ...manifest.files.map(({ path }) => path),
+              ...manifest.include_dirs,
+              ...(manifest.library_files ?? []),
+              ...(manifest.library_maps ?? []),
+              ...(manifest.compilation_unit_options ?? []).flatMap(
+                ({ include_dirs }) => include_dirs ?? [],
+              ),
+            ]);
+            const inputs = await Promise.all(
+              [...files].map(simulationInputFingerprint),
+            );
+            return { session: await openTraceBuildProject(manifest), inputs };
+          })(),
         };
-        return { ...result, buildManifest };
+      }
+      const batch = await scoped?.pending;
+      const project =
+        batch?.session ?? (await openTraceBuildProject(buildManifest));
+      const validateBatch = async () => {
+        if (
+          batch &&
+          (project.closed ||
+            !selectionCurrent() ||
+            !(await simulationFilelistsCurrent(batch.inputs)) ||
+            !selectionCurrent())
+        )
+          throw new TraceContextChanged(
+            "The trace build inputs changed during continuation.",
+          );
+      };
+      try {
+        await validateBatch();
+        // The enclosing batch validates the same build and can revisit a
+        // signal at several ticks. Only its RTL trace is shared across ticks.
+        const key = JSON.stringify([direction, fullname, options]);
+        let result = scoped?.traces.get(key);
+        if (!result) {
+          if (batch) portTraceCache.delete(project);
+          result = await traceWithProject(
+            viewer,
+            direction,
+            fullname,
+            { ...options, includeCompilation: true },
+            token,
+            project,
+            buildManifest,
+          );
+        }
+        await validateBatch();
+        if (token?.isCancellationRequested)
+          throw Error("The RTL trace was cancelled.");
+        scoped?.traces.set(key, result);
+        return {
+          ...result,
+          buildManifest,
+          trace: {
+            ...result.trace,
+            simulationProject: {
+              buildManifest: buildManifest.filename,
+              workingDirectory: path.dirname(buildManifest.filename),
+              limitations: [
+                ...(buildManifest.unsupported ?? []),
+                ...(buildManifest.vcs_pli?.length ? [vcsPliExecutionGap] : []),
+              ],
+              ...(buildManifest.vcs_pli?.length
+                ? {
+                    vcsPli: buildManifest.vcs_pli.map(({ table, library }) => ({
+                      table: table.path,
+                      library: library?.path,
+                    })),
+                  }
+                : {}),
+            },
+          },
+        };
       } finally {
-        project.dispose();
+        if (!batch) project.dispose();
       }
     }
     if (!override && !selectionCurrent())
@@ -469,10 +587,16 @@ export function createWaveAnalysis<V extends AnalysisView>(
         "The simulation filelist selection changed during the trace query.",
       );
     const rebuild = "rebuild" in selection ? selection.rebuild : undefined;
-    let pending = override ? undefined : traceProjects.get(viewer);
+    // Each MCP batch owns its explicit filelist session. A resumed batch opens
+    // a new session after validating the retained trace's input fingerprints.
+    const scopedProject =
+      override && "filelist" in override ? requestProject : undefined;
+    const reused = scopedProject?.pending;
+    let pending = override ? reused : traceProjects.get(viewer);
     if (!pending) {
       pending = openSimulationTrace(selection, viewer);
-      if (!override) traceProjects.set(viewer, pending);
+      if (scopedProject) scopedProject.pending = pending;
+      else if (!override) traceProjects.set(viewer, pending);
     }
     try {
       let project: Awaited<ReturnType<typeof openSimulationTrace>>;
@@ -518,7 +642,20 @@ export function createWaveAnalysis<V extends AnalysisView>(
           };
           return { ...result, buildManifest, simulationInputs: rebuild.inputs };
         }
-        if (override) break;
+        if (override) {
+          if (scopedProject && pending === reused) {
+            if (!(await simulationFilelistsCurrent(project.inputs)))
+              throw new TraceContextChanged(
+                "The simulation filelist or RTL changed during continuation.",
+              );
+            if (project.session.closed) {
+              pending = openSimulationTrace(selection, viewer);
+              scopedProject.pending = pending;
+              continue;
+            }
+          }
+          break;
+        }
         if (token?.isCancellationRequested)
           throw Error("The RTL trace was cancelled.");
         const current = await simulationFilelistsCurrent(project.inputs);
@@ -568,6 +705,8 @@ export function createWaveAnalysis<V extends AnalysisView>(
       }
       if (project.design !== viewer.kdb)
         throw Error("The waveform design changed during the trace query.");
+      // Keep port lookups local to each segment of an explicit filelist trace.
+      if (scopedProject) portTraceCache.delete(project.session);
       const result = await traceWithProject(
         viewer,
         direction,
@@ -584,8 +723,11 @@ export function createWaveAnalysis<V extends AnalysisView>(
         (!override &&
           (traceProjects.get(viewer) !== pending || !selectionCurrent())) ||
         project.design !== viewer.kdb
-      )
-        throw Error("The simulation inputs changed during the trace query.");
+      ) {
+        const message = "The simulation inputs changed during the trace query.";
+        if (scopedProject) throw new TraceContextChanged(message);
+        throw Error(message);
+      }
       result.trace.simulationProject = project.projectInfo;
       return { ...result, buildManifest, simulationInputs: project.inputs };
     } catch (error) {
@@ -597,7 +739,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
         dropTraceProject(viewer);
       throw error;
     } finally {
-      if (override)
+      if (override && !scopedProject)
         void pending.then(
           ({ session }) => session.dispose(),
           () => undefined,
@@ -610,6 +752,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
     result: Awaited<ReturnType<typeof traceWaveSignal>>,
     live: LiveTraceSession | undefined,
     executionFile?: string,
+    retainCheckpoint = false,
   ) {
     const backend = viewer.backend;
     const project = traceProjects.get(viewer);
@@ -640,11 +783,39 @@ export function createWaveAnalysis<V extends AnalysisView>(
         ?.filter((uri) => uri.startsWith("file:"))
         .map((uri) => fileURLToPath(uri)) ?? []),
       ...(result.buildManifest?.files.map(({ path }) => path) ?? []),
+      ...(result.buildManifest?.vcs_pli?.flatMap(({ table, library }) =>
+        library ? [table.path, library.path] : [table.path],
+      ) ?? []),
     ]);
+    if (result.buildManifest?.vcs_trace_library)
+      files.add(result.buildManifest.vcs_trace_library.path);
     if (executionFile) files.add(executionFile);
     const projectInfo = result.trace.simulationProject;
     if (projectInfo && "videManifest" in projectInfo)
       files.add(projectInfo.videManifest);
+    const design = result.design;
+    if (retainCheckpoint && design && !live) {
+      files.add(design.path);
+      if (design.kind === "verilator")
+        files.add(design.path.replace(/\.json$/i, ".meta.json"));
+      if (design.kind === "kdb") {
+        const database = path.join(design.path, "kdb.elab++");
+        files.add(path.join(design.path, "simv.kdb"));
+        files.add(path.join(design.path, "vcs_rebuild"));
+        files.add(database);
+        const addDesignFiles = async (directory: string) => {
+          const entries = await fs.promises.readdir(directory, {
+            withFileTypes: true,
+          });
+          for (const entry of entries) {
+            const filename = path.join(directory, entry.name);
+            files.add(filename);
+            if (entry.isDirectory()) await addDesignFiles(filename);
+          }
+        };
+        if (fs.existsSync(database)) await addDesignFiles(database);
+      }
+    }
     const openEdits = () =>
       JSON.stringify(
         host.workspace.textDocuments
@@ -675,7 +846,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
       selection === JSON.stringify(traceProjectSelection(viewer)) &&
       mappingIdentity() === mappings &&
       openEdits() === edits;
-    return async () => {
+    const assertCurrent = async () => {
       if (
         !current() ||
         !(await simulationFilelistsCurrent(fingerprints)) ||
@@ -685,6 +856,29 @@ export function createWaveAnalysis<V extends AnalysisView>(
           "The waveform, RTL or simulation context changed during continuation.",
         );
     };
+    const checkpoint =
+      retainCheckpoint && !live && edits === "[]" && result.trace.compilation
+        ? {
+            inputs: fingerprints,
+            identity: createHash("sha256")
+              .update(
+                JSON.stringify([
+                  viewer.uri.fsPath,
+                  viewer.backendKind,
+                  design?.kind,
+                  design?.path,
+                  executionFile,
+                  selection,
+                  mappings,
+                  fingerprints.sort((left, right) =>
+                    left.path.localeCompare(right.path),
+                  ),
+                ]),
+              )
+              .digest("hex"),
+          }
+        : undefined;
+    return { assertCurrent, checkpoint };
   }
 
   async function createStaticWalk(
@@ -695,11 +889,18 @@ export function createWaveAnalysis<V extends AnalysisView>(
     options: TraceOptions,
     override?: TraceProjectSelection,
     assertActive?: () => void,
+    retainCheckpoint = false,
   ) {
-    const guard = await createContinuationGuard(viewer, result, undefined);
+    const guard = await createContinuationGuard(
+      viewer,
+      result,
+      undefined,
+      undefined,
+      retainCheckpoint,
+    );
     const assertCurrent = async () => {
       assertActive?.();
-      await guard();
+      await guard.assertCurrent();
     };
     const compilationIdentity = (trace: VideTrace) =>
       trace.compilation &&
@@ -713,6 +914,8 @@ export function createWaveAnalysis<V extends AnalysisView>(
       operation: AbortSignal,
       deadline: AbortSignal,
       previous?: StaticWalk["segments"],
+      requestProject?: TraceRequestProject,
+      selected?: readonly string[],
     ) =>
       followStaticFrontier(
         root,
@@ -736,6 +939,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
                 cancellation.token,
                 override,
                 result.buildManifest,
+                requestProject,
               ),
               signal,
               direction,
@@ -758,8 +962,9 @@ export function createWaveAnalysis<V extends AnalysisView>(
         },
         assertCurrent,
         previous,
+        selected,
       );
-    return { run, assertCurrent };
+    return { run, assertCurrent, checkpoint: guard.checkpoint };
   }
 
   async function traceWithProject(
@@ -818,8 +1023,11 @@ export function createWaveAnalysis<V extends AnalysisView>(
     let declarationName = signal.name;
     if (
       record?.instance &&
-      record.fullname !== scope + "." + name &&
-      record.fullname.startsWith(record.instance + ".")
+      record.fullname.startsWith(record.instance + ".") &&
+      (record.fullname !== scope + "." + name ||
+        (design.kind === "kdb" &&
+          viewer.meta?.backend === "rust-vcd" &&
+          record.instance.startsWith(scope + ".")))
     )
       declarationName = record.fullname.slice(record.instance.length + 1);
     if (!record?.file || !Number.isInteger(record.line) || record.line < 1) {
@@ -1151,6 +1359,17 @@ export function createWaveAnalysis<V extends AnalysisView>(
         ? elementIndex
         : undefined,
     );
+    if (
+      record.packedRange &&
+      !alias &&
+      designMatches &&
+      !unverifiedVcsParameterPaths &&
+      !document.isDirty &&
+      matchesTraceDeclaration(local, document.uri, line, character)
+    ) {
+      const root = trace.signals.find(({ id }) => id === trace.root);
+      if (root && !root.packedRange) root.packedRange = record.packedRange;
+    }
     if (reusedPortTrace) {
       const current = await traceRtlPosition(
         direction,
@@ -1208,14 +1427,30 @@ export function createWaveAnalysis<V extends AnalysisView>(
   ) {
     const { trace, instance, design, signal } = result;
     const bindings = new Map([[trace.root, signal]]);
+    const packedRanges = new Map<number, [number, number]>();
+    const dirtyUris = new Set(
+      host.workspace.textDocuments
+        .filter((document) => document.isDirty)
+        .map((document) => document.uri.toString()),
+    );
+    const issues = new Map<number, TraceBindingIssue>();
     const byInstance = new Map<string, VideTrace["signals"]>();
     for (const candidate of trace.signals) {
       if (
         candidate.id === trace.root ||
-        !candidate.declaration ||
+        candidate.enumValue ||
+        candidate.enumValueUnavailable ||
+        candidate.packageParameterValue ||
+        candidate.packageParameterValueUnavailable ||
+        candidate.instanceParameter ||
+        candidate.parameterValue ||
         (selected && !selected.has(candidate.id))
       )
         continue;
+      if (!candidate.declaration) {
+        issues.set(candidate.id, "missingDeclaration");
+        continue;
+      }
       const scope = traceSignalScope(candidate, instance);
       const group = byInstance.get(scope) ?? [];
       group.push(candidate);
@@ -1224,6 +1459,9 @@ export function createWaveAnalysis<V extends AnalysisView>(
     const config = host.workspace.getConfiguration("waveWorkbench", viewer.uri);
     const sourceMappings =
       config.get<Record<string, string>>("sourcePathMappings");
+    // VCS can encode a generate scope as a prefix of the VCD variable name.
+    const matchVcdPaths =
+      design.kind === "kdb" && viewer.meta?.backend === "rust-vcd";
     for (const [instance, candidates] of byInstance) {
       const dump = dumpScope(viewer, instance);
       const alias = design.kind === "kdb" ? fsdbGenerateScope(dump) : dump;
@@ -1231,11 +1469,11 @@ export function createWaveAnalysis<V extends AnalysisView>(
         const batch = candidates.slice(offset, offset + 64);
         const names = [...new Set(batch.map(({ name }) => name))];
         const { matches } = await viewer.backend.request("matchNames", {
-          query: dump,
-          names,
+          query: matchVcdPaths ? "" : dump,
+          names: matchVcdPaths ? names.map((name) => dump + "." + name) : names,
         });
         const aliasNames =
-          alias === dump
+          matchVcdPaths || alias === dump
             ? []
             : names.filter((name) => !Object.hasOwn(matches, name));
         const aliases = aliasNames.length
@@ -1247,45 +1485,103 @@ export function createWaveAnalysis<V extends AnalysisView>(
             ).matches
           : undefined;
         for (const candidate of batch) {
-          const dumped = Object.hasOwn(matches, candidate.name)
-            ? matches[candidate.name]
+          const full = dump + "." + candidate.name;
+          const lookup = matchVcdPaths ? full : candidate.name;
+          const dumped = Object.hasOwn(matches, lookup)
+            ? matches[lookup]
             : aliases && Object.hasOwn(aliases, candidate.name)
               ? aliases[candidate.name]
               : undefined;
-          const exact = dumped?.filter(
-            (entry) =>
-              entry.supported &&
-              (entry.scope === dump || entry.scope === alias),
+          const scoped = dumped?.filter((entry) =>
+            matchVcdPaths
+              ? entry.scope +
+                  "." +
+                  declaredSignalName(entry.name).replace(/^\\/, "") ===
+                full
+              : entry.scope === dump || entry.scope === alias,
           );
-          if (exact?.length !== 1) continue;
-          const object = await design
-            .resolve(instance + "." + declaredSignalName(exact[0].name))
-            .catch((error) => {
-              if (!isMissingKdbDeclaration(error)) throw error;
-              return undefined;
-            });
+          const exact = scoped?.filter((entry) => entry.supported);
+          if (exact?.length !== 1) {
+            issues.set(
+              candidate.id,
+              !scoped?.length
+                ? "waveformMissing"
+                : exact?.length
+                  ? "waveformAmbiguous"
+                  : "waveformUnsupported",
+            );
+            continue;
+          }
+          const designPath =
+            instance +
+            "." +
+            (matchVcdPaths
+              ? candidate.name
+              : declaredSignalName(exact[0].name));
+          const object = await design.resolve(designPath).catch((error) => {
+            if (!isMissingKdbDeclaration(error)) throw error;
+            return undefined;
+          });
+          if (!object) {
+            issues.set(candidate.id, "designObjectMissing");
+            continue;
+          }
+          if (!object.file || object.line < 1) {
+            issues.set(candidate.id, "designLocationMissing");
+            continue;
+          }
           if (
-            !object?.file ||
             (object.instance !== instance &&
               !(
                 candidate.lexicalScope?.length &&
-                object.fullname ===
-                  instance + "." + declaredSignalName(exact[0].name) &&
+                object.fullname === designPath &&
                 instance.startsWith(object.instance + ".")
               )) ||
             object.line !== candidate.declaration!.range.start.line + 1
-          )
+          ) {
+            issues.set(candidate.id, "declarationMismatch");
             continue;
+          }
           const mapped = path.resolve(
             path.dirname(design.path),
             mapPrefix(object.file, sourceMappings),
           );
-          if (host.file(mapped).toString() === candidate.declaration!.uri)
+          if (host.file(mapped).toString() === candidate.declaration!.uri) {
             bindings.set(candidate.id, exact[0]);
+            if (
+              object.packedRange &&
+              !candidate.packedRange &&
+              !object.interfaceRange &&
+              !dirtyUris.has(candidate.declaration!.uri)
+            )
+              packedRanges.set(candidate.id, object.packedRange);
+          } else issues.set(candidate.id, "declarationMismatch");
         }
       }
     }
-    return bindings;
+    return { bindings, issues, packedRanges };
+  }
+
+  function withElaboratedPackedRanges(
+    trace: VideTrace,
+    ranges: ReadonlyMap<number, [number, number]>,
+  ): VideTrace {
+    if (
+      !ranges.size ||
+      trace.frontier.some(
+        ({ reason }) =>
+          reason === "mismatchedDesign" ||
+          reason === "unverifiedVcsParameterPath",
+      )
+    )
+      return trace;
+    return {
+      ...trace,
+      signals: trace.signals.map((signal) => {
+        const packedRange = ranges.get(signal.id);
+        return packedRange ? { ...signal, packedRange } : signal;
+      }),
+    };
   }
 
   async function bindStaticFrontier(
@@ -1303,34 +1599,41 @@ export function createWaveAnalysis<V extends AnalysisView>(
     const backend = viewer.backend;
     const bindings =
       existingBindings ??
-      (await bindTraceObservations(viewer, result, selected));
+      (await bindTraceObservations(viewer, result, selected)).bindings;
     if (viewer.disposed || viewer.backend !== backend || viewer.kdb !== design)
       throw Error("The waveform design changed during the trace query.");
-    const frontier = trace.frontier.map((item) => {
-      if (!isStaticBudgetStop(item.reason)) return item;
-      const binding = bindings.get(item.signal);
-      if (!binding?.supported) return { ...item, continuation: null };
-      const { bit, projected, range } = tracePackedSelection(binding);
-      const base = binding.scope + "." + declaredSignalName(binding.name);
-      const projectedBit = projected ? (bit ?? binding.bitOffset) : undefined;
-      if (!item.bits?.length) {
-        const signal =
+    const frontier = trace.frontier.flatMap<VideTrace["frontier"][number]>(
+      (item) => {
+        if (!isStaticBudgetStop(item.reason)) return [item];
+        const binding = bindings.get(item.signal);
+        if (!binding?.supported) return [{ ...item, continuation: null }];
+        const { bit, projected, range } = tracePackedSelection(binding);
+        const base = binding.scope + "." + declaredSignalName(binding.name);
+        const projectedBit = projected ? (bit ?? binding.bitOffset) : undefined;
+        if (!item.bits?.length) {
+          const signal =
+            projectedBit === undefined
+              ? base
+              : base + selectionText(undefined, projectedBit);
+          return [{ ...item, continuation: { signal } }];
+        }
+        const [first, last] = range ?? [binding.width - 1, 0];
+        const available = (index: number) =>
           projectedBit === undefined
-            ? base
-            : base + selectionText(undefined, projectedBit);
-        return { ...item, continuation: { signal } };
-      }
-      const [first, last] = range ?? [binding.width - 1, 0];
-      const bits = item.bits.filter((index) =>
-        projectedBit === undefined
-          ? index >= Math.min(first, last) && index <= Math.max(first, last)
-          : index === projectedBit,
-      );
-      return {
-        ...item,
-        continuation: bits.length ? { signal: base, bits } : null,
-      };
-    });
+            ? index >= Math.min(first, last) && index <= Math.max(first, last)
+            : index === projectedBit;
+        const bits = item.bits.filter(available);
+        const missing = item.bits.filter((index) => !available(index));
+        return [
+          ...(bits.length
+            ? [{ ...item, bits, continuation: { signal: base, bits } }]
+            : []),
+          ...(missing.length
+            ? [{ ...item, bits: missing, continuation: null }]
+            : []),
+        ];
+      },
+    );
     return { ...trace, frontier };
   }
 
@@ -1381,12 +1684,20 @@ export function createWaveAnalysis<V extends AnalysisView>(
         ))
     )
       return result;
-    const bindings = await bindTraceObservations(viewer, result);
+    const { bindings, packedRanges } = await bindTraceObservations(
+      viewer,
+      result,
+    );
     if (viewer.disposed || viewer.kdb !== result.design)
       throw Error("The waveform design changed during the trace query.");
     return {
       ...result,
-      trace: focusPackedTrace(result.trace, selection, direction, bindings),
+      trace: focusPackedTrace(
+        withElaboratedPackedRanges(result.trace, packedRanges),
+        selection,
+        direction,
+        bindings,
+      ),
     };
   }
 
@@ -1582,19 +1893,19 @@ export function createWaveAnalysis<V extends AnalysisView>(
     tick: string,
     historyStart?: string,
     verification?: Awaited<ReturnType<typeof verifyTraceBuild>>,
-    bindings?: Awaited<ReturnType<typeof bindTraceObservations>>,
+    bindingResult?: Awaited<ReturnType<typeof bindTraceObservations>>,
     operation?: AbortSignal,
     executionFile?: string,
     expandReachable?: boolean,
     limits?: TemporalLimits,
   ) {
     const { trace } = result;
-    bindings ??= await bindTraceObservations(viewer, result);
+    bindingResult ??= await bindTraceObservations(viewer, result);
     const observations = (anchor?: string) =>
       readTraceObservations(
         viewer.backend,
         viewer.meta,
-        bindings,
+        bindingResult.bindings,
         tick,
         historyStart,
         trace.root,
@@ -1609,7 +1920,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
         viewer,
         result,
         evidence,
-        bindings,
+        bindingResult,
         verification,
         operation,
         executionFile,
@@ -1669,7 +1980,11 @@ export function createWaveAnalysis<V extends AnalysisView>(
     viewer: V,
     result: Awaited<ReturnType<typeof traceWaveSignal>>,
     evidence: Awaited<ReturnType<typeof readTraceObservations>>,
-    bindings: Awaited<ReturnType<typeof bindTraceObservations>>,
+    {
+      bindings,
+      issues,
+      packedRanges,
+    }: Awaited<ReturnType<typeof bindTraceObservations>>,
     verification?:
       | Awaited<ReturnType<typeof verifyTraceBuild>>
       | ReturnType<typeof verifyLiveTraceBuild>,
@@ -1680,7 +1995,23 @@ export function createWaveAnalysis<V extends AnalysisView>(
     runtimeMismatches?: string[],
     limits?: TemporalLimits,
   ) {
-    const { trace, design, instance, signal } = result;
+    const { design, instance, signal } = result;
+    const trace = withElaboratedPackedRanges(result.trace, packedRanges);
+    function buildObservedTrace(
+      ...args: Parameters<typeof buildTemporalTrace>
+    ) {
+      const [trace, evidence, ...options] = args;
+      return buildTemporalTrace(
+        trace,
+        {
+          ...evidence,
+          bindingIssues: issues,
+          externalPliCallbacks: !!verification?.vcsPli?.length,
+        },
+        ...options,
+      );
+    }
+    const waveformBindings = new Map(bindings);
     const mismatched =
       verification?.status === "mismatched" ||
       trace.frontier.some(
@@ -1689,10 +2020,13 @@ export function createWaveAnalysis<V extends AnalysisView>(
     const readRecording =
       executionFile &&
       (!live ||
-        (verification?.status === "matched" && !runtimeMismatches?.length));
+        (verification &&
+          "executionReplayEligible" in verification &&
+          verification.executionReplayEligible &&
+          !runtimeMismatches?.length));
     let temporalTrace = mismatched
       ? undefined
-      : buildTemporalTrace(
+      : buildObservedTrace(
           trace,
           evidence,
           undefined,
@@ -1710,6 +2044,8 @@ export function createWaveAnalysis<V extends AnalysisView>(
         operation,
       );
       if (extra.words.length) {
+        for (const [id, binding] of extra.bindings)
+          waveformBindings.set(id, binding);
         const sampledWords = await readTraceObservations(
           viewer.backend,
           viewer.meta,
@@ -1728,7 +2064,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
             ...sampledWords.observations,
           ],
         };
-        temporalTrace = buildTemporalTrace(
+        temporalTrace = buildObservedTrace(
           trace,
           evidence,
           undefined,
@@ -1756,7 +2092,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
           ...evidence,
           observations: [...evidence.observations, ...recorded.observations],
         };
-        temporalTrace = buildTemporalTrace(
+        temporalTrace = buildObservedTrace(
           trace,
           evidence,
           undefined,
@@ -1802,7 +2138,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
                 ...samples.observations,
               ],
             };
-            temporalTrace = buildTemporalTrace(
+            temporalTrace = buildObservedTrace(
               trace,
               evidence,
               undefined,
@@ -1877,7 +2213,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
       }
       if (wordChanges.size) {
         evidence = { ...evidence, observations: [...observations.values()] };
-        temporalTrace = buildTemporalTrace(
+        temporalTrace = buildObservedTrace(
           trace,
           evidence,
           undefined,
@@ -2053,6 +2389,37 @@ export function createWaveAnalysis<V extends AnalysisView>(
         ({ id, recording }) => [id, recording] as const,
       ),
     ]);
+    const valueCallbackCache = new Map<
+      number,
+      Map<string, { ordinal: number; value: string }[]>
+    >();
+    const recordedValueCallbacks: RecordedValueCallbacks = (id, tick) => {
+      const recording = recordings.get(id);
+      if (
+        !recording ||
+        recording.waveformMatch !== "verified" ||
+        recording.observationCoverage?.status !== "complete" ||
+        BigInt(tick) < BigInt(recording.start) ||
+        BigInt(tick) > BigInt(recording.end)
+      )
+        return;
+      let byTick = valueCallbackCache.get(id);
+      if (!byTick) {
+        byTick = new Map();
+        for (const event of recording.events) {
+          if (
+            event.kind !== "signal-value-changed" ||
+            event.value === undefined
+          )
+            continue;
+          const slot = byTick.get(event.tick) ?? [];
+          slot.push({ ordinal: event.ordinal, value: event.value });
+          byTick.set(event.tick, slot);
+        }
+        valueCallbackCache.set(id, byTick);
+      }
+      return byTick.get(tick) ?? [];
+    };
     const canRestoreHistory = live
       ? replayMatch?.status === "matched"
       : isFsdb(viewer.uri.fsPath);
@@ -2072,7 +2439,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
       );
       if (restored) {
         evidence = restored;
-        temporalTrace = buildTemporalTrace(
+        temporalTrace = buildObservedTrace(
           trace,
           evidence,
           undefined,
@@ -2154,14 +2521,23 @@ export function createWaveAnalysis<V extends AnalysisView>(
             dirtySources,
           )
         : undefined;
+    const callbackDriven =
+      execution &&
+      trace.assignments.some(
+        ({ delayFreeContinuous }) => delayFreeContinuous,
+      ) &&
+      [execution, ...upstreamRecordings.map(({ recording }) => recording)].some(
+        ({ observationCoverage }) => observationCoverage?.status === "complete",
+      );
     if (
       temporalTrace &&
-      cursorWrite &&
-      BigInt(cursorWrite.tick) <= BigInt(evidence.historyEnd)
+      (callbackDriven ||
+        (cursorWrite &&
+          BigInt(cursorWrite.tick) <= BigInt(evidence.historyEnd)))
     )
-      temporalTrace = buildTemporalTrace(
+      temporalTrace = buildObservedTrace(
         trace,
-        evidence,
+        { ...evidence, recordedValueCallbacks },
         undefined,
         expandReachable,
         operandHistory,
@@ -2239,9 +2615,9 @@ export function createWaveAnalysis<V extends AnalysisView>(
         for (const [key, writer] of writers) attributed.set(key, writer);
         for (const [key, component] of nextComponents ?? [])
           components.set(key, component);
-        temporalTrace = buildTemporalTrace(
+        temporalTrace = buildObservedTrace(
           trace,
-          evidence,
+          { ...evidence, recordedValueCallbacks },
           attributed,
           expandReachable,
           operandHistory,
@@ -2336,11 +2712,11 @@ export function createWaveAnalysis<V extends AnalysisView>(
           ...(historyCutoff === undefined
             ? {}
             : { historyStart: "auto" as const }),
-          ...(live
-            ? { liveSessionId: live.id }
-            : gap.orderAtTick === undefined
-              ? {}
-              : { changeOrder: gap.orderAtTick }),
+          ...(live ? { liveSessionId: live.id } : {}),
+          ...(gap.orderAtTick !== undefined &&
+          (!live || gap.use?.evidence?.waitResumeCause === "orderedCallbacks")
+            ? { changeOrder: gap.orderAtTick }
+            : {}),
         };
         if (
           gap.bit === undefined ||
@@ -2385,6 +2761,9 @@ export function createWaveAnalysis<V extends AnalysisView>(
             transitions,
             bit,
           );
+          for (const { valueChangeOrdinal } of writeEvents)
+            if (valueChangeOrdinal !== undefined)
+              ordinals.add(valueChangeOrdinal);
           return {
             id,
             instance,
@@ -2437,12 +2816,30 @@ export function createWaveAnalysis<V extends AnalysisView>(
       orderAtTick: selectedNode.orderAtTick ?? 1,
     };
     const { wholeRoot: _wholeRoot, ...observations } = waveformEvidence;
+    const waveformSelections: Record<string, string> = {};
+    for (const { signal, bit } of temporalTrace?.nodes ?? []) {
+      const binding = waveformBindings.get(signal);
+      if (!binding?.supported) continue;
+      const name =
+        bit !== undefined &&
+        binding.bitOffset === undefined &&
+        binding.width > 1
+          ? declaredSignalName(binding.name) + "[" + bit + "]"
+          : WaveSignal.label({ ...binding, displayName: undefined });
+      waveformSelections[signal + ":" + (bit ?? "")] = [binding.scope, name]
+        .filter(Boolean)
+        .join(".");
+    }
     return {
       context: {
         ...observations,
         schemaVersion: 1 as const,
         provider: live
-          ? { kind: "live" as const, sampling: "endOfSlot" as const }
+          ? {
+              kind: "live" as const,
+              sampling: "endOfSlot" as const,
+              liveSessionId: live.id,
+            }
           : {
               kind: "waveform" as const,
               sampling: viewer.meta.supportsOrderedHistory
@@ -2469,8 +2866,12 @@ export function createWaveAnalysis<V extends AnalysisView>(
           ? undefined
           : traceCursorWriters(trace, evidence),
         temporalTrace,
+        waveformBindings: waveformSelections,
         unmapped: trace.signals
-          .filter(({ id }) => !bindings.has(id))
+          .filter(
+            ({ id, enumValue, enumValueUnavailable }) =>
+              !enumValue && !enumValueUnavailable && !bindings.has(id),
+          )
           .map(({ id }) => id),
       },
       execution,
@@ -2587,7 +2988,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
     limits?: TemporalLimits,
     tick?: string,
   ) {
-    const bindings = await bindTraceObservations(viewer, result);
+    const bindingResult = await bindTraceObservations(viewer, result);
     const verification = await verifyWaveTrace(viewer, result);
     operation.throwIfAborted();
     if (live !== getLive()) throw Error("The live simulation session changed.");
@@ -2604,7 +3005,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
       paths,
       historyStart,
       traceSignedness(trace),
-      bindings,
+      bindingResult.bindings,
       tick,
       trace.root,
     );
@@ -2632,7 +3033,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
       viewer,
       result,
       sampled,
-      bindings,
+      bindingResult,
       buildVerification,
       operation,
       executionFile,
@@ -2672,6 +3073,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
       traceExecutionComparisonReport(evidence, execution),
       "## Live execution coverage",
       "",
+      "- Live session · " + context.provider.liveSessionId,
       executionCoverage.available
         ? "Recorded events available."
         : "The harness did not declare execution events.",
@@ -2718,7 +3120,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
     )
       return;
     const model = traceSchematic(result.trace);
-    const bindings = await bindTraceObservations(viewer, result);
+    const { bindings } = await bindTraceObservations(viewer, result);
     if (
       token?.isCancellationRequested ||
       viewer.disposed ||
@@ -2770,9 +3172,11 @@ export function createWaveAnalysis<V extends AnalysisView>(
     rootReport: () => string;
     walk: ContinuationWalk;
     assertCurrent: () => Promise<void>;
+    defaultHistoryStart?: string;
     query: (
       point: TemporalContinuation,
       abort: AbortSignal,
+      requestProject: TraceRequestProject,
     ) => Promise<ContinuationTrace>;
   };
   type StaticContinuationState = Awaited<
@@ -2908,17 +3312,20 @@ export function createWaveAnalysis<V extends AnalysisView>(
   // A single request can visit many shallow frontiers while preserving the existing resume protocol.
   function continuationLimit(args: Record<string, unknown>, fallback?: number) {
     const requested = args.followContinuations as number | undefined;
+    const minimum = fallback === undefined ? 0 : 1;
     if (
       requested !== undefined &&
-      (!Number.isInteger(requested) || requested < 1 || requested > 8)
+      (!Number.isInteger(requested) || requested < minimum || requested > 8)
     )
-      throw Error("followContinuations must be an integer from 1 to 8.");
+      throw Error(
+        `followContinuations must be an integer from ${minimum} to 8.`,
+      );
     if (args.followAllContinuations === true) {
       if (requested !== undefined)
         throw Error(
           "Choose either followAllContinuations or followContinuations.",
         );
-      return 64;
+      return automaticTraceContinuationLimit;
     }
     return requested ?? fallback;
   }
@@ -2943,26 +3350,57 @@ export function createWaveAnalysis<V extends AnalysisView>(
       busy?: boolean;
     };
     const retained = new Map<string, RetainedContinuation>();
-    const graphs = new Map<string, Record<string, readonly unknown[]>>();
+    const graphs = new Map<
+      string,
+      {
+        sections: Record<string, readonly unknown[]>;
+        temporal?: Parameters<typeof traceGraphPaths>[0];
+        staticTrace?: {
+          graph: StaticPathGraph;
+          direction: TraceDirection;
+          bitExpressions?: Parameters<typeof staticBitPaths>[5];
+        };
+        mermaid: () => readonly string[];
+        report: () => readonly string[];
+      }
+    >();
     function saveGraph(
       snapshot:
         | ReturnType<typeof staticGraphSnapshot>
         | ReturnType<typeof temporalGraphSnapshot>,
-      mermaid?: string[],
-      report?: string,
+      options: {
+        format: unknown;
+        fullReport: boolean;
+        temporal?: Parameters<typeof traceGraphPaths>[0];
+        staticTrace?: {
+          graph: StaticPathGraph;
+          direction: TraceDirection;
+          bitExpressions?: Parameters<typeof staticBitPaths>[5];
+        };
+        mermaid: () => string[];
+        report: (pages: () => string[]) => string;
+      },
       walk?: StaticWalk | ContinuationWalk,
     ) {
-      const sections = {
+      const sections: Record<string, readonly unknown[]> = {
         ...snapshot.sections,
         ...(walk ? continuationSections(walk) : {}),
-        ...(mermaid ? { mermaid } : {}),
-        ...(report !== undefined
-          ? { report: report.match(/[\s\S]{1,32768}/gu) ?? [] }
-          : {}),
       };
+      let pages: string[] | undefined;
+      const mermaid = () => (pages ??= options.mermaid());
+      const report = () =>
+        options.report(mermaid).match(/[\s\S]{1,32768}/gu) ?? [];
+      if (options.format === "mermaid") sections.mermaid = mermaid();
+      if (options.fullReport) sections.report = report();
       if (graphs.size >= 4) graphs.delete(graphs.keys().next().value!);
       const graphCursor = process.pid + "." + randomUUID();
-      graphs.set(graphCursor, sections);
+      graphs.set(graphCursor, {
+        sections,
+        mermaid,
+        report,
+        temporal: options.temporal,
+        staticTrace: options.staticTrace,
+      });
       return {
         graphCursor,
         kind: snapshot.kind,
@@ -2970,33 +3408,10 @@ export function createWaveAnalysis<V extends AnalysisView>(
         sections: Object.fromEntries(
           Object.entries(sections).map(([name, items]) => [name, items.length]),
         ),
+        deferredSections: ["mermaid", "report"].filter(
+          (section) => !Object.hasOwn(sections, section),
+        ),
       };
-    }
-    function pagedStatic(
-      graph: ReturnType<typeof mergeStaticContinuationGraph>,
-      format: unknown,
-      report?: string,
-      walk?: StaticWalk | ContinuationWalk,
-    ) {
-      return saveGraph(
-        staticGraphSnapshot(graph),
-        format === "mermaid" ? mergedStaticMermaid(graph) : undefined,
-        report,
-        walk,
-      );
-    }
-    function pagedTemporal(
-      graph: ReturnType<typeof mergeTemporalContinuationGraph>,
-      format: unknown,
-      report?: string,
-      walk?: StaticWalk | ContinuationWalk,
-    ) {
-      return saveGraph(
-        temporalGraphSnapshot(graph),
-        format === "mermaid" ? combinedTemporalMermaid(graph) : undefined,
-        report,
-        walk,
-      );
     }
     const retain = (state: RetainedContinuation) => {
       if (
@@ -3023,27 +3438,70 @@ export function createWaveAnalysis<V extends AnalysisView>(
       const diagrams =
         report || mermaid ? continuationMermaidPages(root, walk) : [];
       const combined = mergeTemporalContinuationGraph(initial, walk);
+      const combinedPages =
+        report || mermaid ? combinedTemporalMermaid(combined) : [];
       return {
         continuationWalk: walk,
         temporalContinuationGraph: combined,
         ...(mermaid
           ? {
               ...mermaidOutput("continuationMermaid", diagrams),
-              ...mermaidOutput(
-                "temporalContinuationMermaid",
-                combinedTemporalMermaid(combined),
-              ),
+              ...mermaidOutput("temporalContinuationMermaid", combinedPages),
             }
           : {}),
         walkReport: report
-          ? continuationReport(walk, diagrams, combined)
+          ? continuationReport(
+              walk,
+              diagrams,
+              combined,
+              undefined,
+              combinedPages,
+            )
           : undefined,
       };
     };
-    return async function request(
+    function pagedTemporal(
+      initial: ContinuationTrace,
+      format: unknown,
+      fullReport: boolean,
+      rootReport: () => string,
+      continuation?: { root: TemporalContinuation; walk: ContinuationWalk },
+    ) {
+      const walk = continuation?.walk ?? {
+        segments: [],
+        links: [],
+        remaining: [],
+        stopReasons: [],
+      };
+      const graph = mergeTemporalContinuationGraph(initial, walk);
+      return saveGraph(
+        temporalGraphSnapshot(graph),
+        {
+          format,
+          fullReport,
+          temporal: graph,
+          mermaid: () => combinedTemporalMermaid(graph),
+          report: (pages) =>
+            appendContinuationReport(
+              rootReport(),
+              continuation &&
+                continuationReport(
+                  walk,
+                  continuationMermaidPages(continuation.root, walk),
+                  graph,
+                  undefined,
+                  pages(),
+                ),
+            ),
+        },
+        continuation?.walk,
+      );
+    }
+    async function request(
       name: string,
       args: Record<string, unknown>,
       operation: AbortSignal,
+      requestProject: TraceRequestProject,
     ): Promise<unknown> {
       const viewer = findView(args.waveform);
       const pagedGraph =
@@ -3056,15 +3514,124 @@ export function createWaveAnalysis<V extends AnalysisView>(
         throw Error(
           "Paged graph output uses wave_trace_graph_page for page bounds.",
         );
-      if (name === "wave_trace_graph_page") {
+      if (
+        name === "wave_trace_graph_page" ||
+        name === "wave_trace_graph_path"
+      ) {
         operation.throwIfAborted();
         const graphCursor = String(args.graphCursor);
-        const sections = graphs.get(graphCursor);
-        if (!sections)
+        const graph = graphs.get(graphCursor);
+        if (!graph)
           throw Error(
             "This trace graph cursor is unavailable. Start a new trace.",
           );
+        if (name === "wave_trace_graph_path") {
+          const mode = args.mode === "all" ? "all" : "shortest";
+          const ids = (args.nodeIds as number[] | undefined) ?? [];
+          const selectors = (args.nodeSelectors as unknown[] | undefined) ?? [];
+          if (graph.staticTrace) {
+            const {
+              graph: parent,
+              direction,
+              bitExpressions,
+            } = graph.staticTrace;
+            if (selectors.some(isBitPathSelector)) {
+              if (ids.length)
+                throw Error("Use bit selectors alone for a static bit path.");
+              const result = staticBitPaths(
+                parent,
+                direction,
+                selectors,
+                mode,
+                operation,
+                bitExpressions,
+              );
+              const snapshot = staticGraphSnapshot(result.graph);
+              const bitSnapshot = {
+                ...snapshot,
+                sections: { ...snapshot.sections, bitEdges: result.edges },
+              };
+              const graphSnapshot = saveGraph(bitSnapshot, {
+                format: args.format,
+                fullReport: args.detail === "full",
+                mermaid: () => staticBitMermaid(result),
+                report: (pages) => staticBitReport(result, pages()),
+              });
+              return {
+                graphSnapshot,
+                paths: result.paths,
+                pathScope: "recordedBits",
+                assignmentsWithoutBitMappings:
+                  result.assignmentsWithoutBitMappings,
+                mode,
+                direction,
+              };
+            }
+            const selection = staticTracePaths(
+              parent,
+              direction,
+              ids,
+              selectors,
+              mode,
+              operation,
+            );
+            const focused = selection.graph;
+            const graphSnapshot = saveGraph(staticGraphSnapshot(focused), {
+              format: args.format,
+              fullReport: args.detail === "full",
+              staticTrace: { graph: focused, direction, bitExpressions },
+              mermaid: () => mergedStaticMermaid(focused),
+              report: (pages) =>
+                staticPathReport(selection, direction, pages()),
+            });
+            return {
+              graphSnapshot,
+              paths: selection.paths,
+              mode,
+              direction,
+              pathScope: "declaration",
+              ...(selection.matches.length
+                ? { matches: selection.matches }
+                : {}),
+            };
+          }
+          if (!graph.temporal)
+            throw Error("Select a paged RTL trace graph snapshot.");
+          if (selectors.some(isBitPathSelector))
+            throw Error(
+              "Use the full waveform signal path, including any bit index, for a time graph selector.",
+            );
+          const { nodeIds, matches } = selectTracePathNodes(
+            graph.temporal,
+            ids,
+            selectors,
+            operation,
+          );
+          const selection = traceGraphPaths(
+            graph.temporal,
+            nodeIds,
+            operation,
+            mode,
+          );
+          const { paths, graph: focused } = selection;
+          const graphSnapshot = saveGraph(temporalGraphSnapshot(focused), {
+            format: args.format,
+            fullReport: args.detail === "full",
+            temporal: focused,
+            mermaid: () => combinedTemporalMermaid(focused),
+            report: (pages) => tracePathReport(selection, pages()),
+          });
+          return {
+            graphSnapshot,
+            paths,
+            mode: selection.mode,
+            ...(matches.length ? { matches } : {}),
+          };
+        }
         const section = String(args.section);
+        const { sections } = graph;
+        if (section === "mermaid" || section === "report")
+          sections[section] ??= graph[section]();
         if (!Object.hasOwn(sections, section))
           throw Error("This section is unavailable in the graph snapshot.");
         const page = traceGraphPage(
@@ -3083,7 +3650,33 @@ export function createWaveAnalysis<V extends AnalysisView>(
           );
         if (state.busy)
           throw Error("This trace continuation is already running.");
-        const limit = continuationLimit(args, 4)!;
+        const indices = args.frontierIndices as number[] | undefined;
+        if (indices !== undefined) {
+          if (
+            args.followContinuations !== undefined ||
+            args.followAllContinuations === true
+          )
+            throw Error(
+              "Choose either frontierIndices or an automatic continuation budget.",
+            );
+          const { remaining } = state.walk;
+          if (
+            !Array.isArray(indices) ||
+            indices.length < 1 ||
+            indices.length > 8 ||
+            new Set(indices).size !== indices.length ||
+            indices.some(
+              (index) =>
+                !Number.isSafeInteger(index) ||
+                index < 0 ||
+                index >= remaining.length,
+            )
+          )
+            throw Error(
+              "Choose one to eight distinct indices from the current frontier.",
+            );
+        }
+        const limit = indices?.length ?? continuationLimit(args, 4)!;
         if (
           (state.kind === "static" && args.output === "temporal") ||
           (state.kind === "temporal" && args.output === "graph")
@@ -3095,7 +3688,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
         try {
           await state.assertCurrent();
           operation.throwIfAborted();
-          const deadline = AbortSignal.timeout(100_000);
+          const deadline = AbortSignal.timeout(traceContinuationTimeout);
           const reportOnly = args.output === "report";
           if (state.kind === "static") {
             const walk = await state.run(
@@ -3103,31 +3696,42 @@ export function createWaveAnalysis<V extends AnalysisView>(
               operation,
               deadline,
               state.walk.segments,
+              requestProject,
+              indices?.map((index) => state.walk.remaining[index]),
             );
             await state.assertCurrent();
             operation.throwIfAborted();
-            const graph = mergeStaticContinuationGraph(state.initial, walk);
+            const bitExpressions = pagedGraph ? new Map() : undefined;
+            const graph = mergeStaticContinuationGraph(
+              state.initial,
+              walk,
+              bitExpressions,
+            );
             const fullReport = reportOnly || args.detail === "full";
-            const graphMermaid =
-              fullReport || args.format === "mermaid"
-                ? mergedStaticMermaid(graph)
-                : [];
-            const report = fullReport
-              ? appendContinuationReport(
-                  traceReport(state.initial, state.direction, state.root),
-                  staticContinuationReport(
-                    state.direction,
-                    walk,
-                    staticContinuationMermaid(state.root, walk),
-                    graphMermaid,
-                  ),
-                )
-              : undefined;
+            const buildReport = (pages: () => string[]) =>
+              appendContinuationReport(
+                traceReport(state.initial, state.direction, state.root),
+                staticContinuationReport(
+                  state.direction,
+                  walk,
+                  staticContinuationMermaid(state.root, walk),
+                  pages(),
+                ),
+              );
             if (pagedGraph) {
               const graphSnapshot = saveGraph(
                 staticGraphSnapshot(graph),
-                args.format === "mermaid" ? graphMermaid : undefined,
-                report,
+                {
+                  format: args.format,
+                  fullReport,
+                  staticTrace: {
+                    graph,
+                    direction: state.direction,
+                    bitExpressions,
+                  },
+                  mermaid: () => mergedStaticMermaid(graph),
+                  report: buildReport,
+                },
                 walk,
               );
               retained.delete(cursor);
@@ -3150,6 +3754,13 @@ export function createWaveAnalysis<V extends AnalysisView>(
                 },
               };
             }
+            const graphMermaid =
+              fullReport || args.format === "mermaid"
+                ? mergedStaticMermaid(graph)
+                : [];
+            const report = fullReport
+              ? buildReport(() => graphMermaid)
+              : undefined;
             const diagrams =
               args.format === "mermaid"
                 ? mermaidOutput("staticContinuationGraphMermaid", graphMermaid)
@@ -3188,30 +3799,23 @@ export function createWaveAnalysis<V extends AnalysisView>(
             limit,
             operation,
             deadline,
-            state.query,
-            state.assertCurrent,
-            state.walk.segments,
+            (point, abort) => state.query(point, abort, requestProject),
+            {
+              assertCurrent: state.assertCurrent,
+              previous: state.walk.segments,
+              defaultHistoryStart: state.defaultHistoryStart,
+              selected: indices?.map((index) => state.walk.remaining[index]),
+            },
           );
           await state.assertCurrent();
           operation.throwIfAborted();
           if (pagedGraph) {
-            const graph = mergeTemporalContinuationGraph(state.initial, walk);
-            const report =
-              args.detail === "full"
-                ? appendContinuationReport(
-                    state.rootReport(),
-                    continuationReport(
-                      walk,
-                      continuationMermaidPages(state.root, walk),
-                      graph,
-                    ),
-                  )
-                : undefined;
             const graphSnapshot = pagedTemporal(
-              graph,
+              state.initial,
               args.format,
-              report,
-              walk,
+              args.detail === "full",
+              state.rootReport,
+              { root: state.root, walk },
             );
             retained.delete(cursor);
             return {
@@ -3219,6 +3823,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
               waveform: state.waveform,
               signal: state.root.signal,
               tick: state.root.tick,
+              liveSessionId: state.root.liveSessionId,
               graphSnapshot,
               continuationCursor: retain({
                 ...state,
@@ -3250,6 +3855,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
             waveform: state.waveform,
             signal: state.root.signal,
             tick: state.root.tick,
+            liveSessionId: state.root.liveSessionId,
             continuationCursor,
             ...(reportOnly
               ? {
@@ -3471,7 +4077,9 @@ export function createWaveAnalysis<V extends AnalysisView>(
           throw Error("The live simulation session changed.");
         const followLimit = continuationLimit(args);
         const continuationDeadline =
-          followLimit === undefined ? undefined : AbortSignal.timeout(100_000);
+          followLimit === undefined
+            ? undefined
+            : AbortSignal.timeout(traceContinuationTimeout);
         const direction = name === "wave_trace_loads" ? "loads" : "drivers";
         const signal = String(args.signal);
         const filelist =
@@ -3519,6 +4127,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
         const limits = {
           nodes: args.maxTemporalNodes as number | undefined,
           edges: args.maxTemporalEdges as number | undefined,
+          gaps: args.maxTemporalGaps as number | undefined,
           changeOrder: args.changeOrder as number | undefined,
         };
         let result = await traceWaveSignal(
@@ -3529,6 +4138,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
           cancellation.token,
           override,
           buildManifest,
+          requestProject,
         ).finally(() => {
           operation.removeEventListener("abort", cancel);
           cancellation.dispose();
@@ -3578,6 +4188,8 @@ export function createWaveAnalysis<V extends AnalysisView>(
             followLimit,
             operation,
             continuationDeadline,
+            undefined,
+            requestProject,
           );
           operation.throwIfAborted();
           if (args.pageCursor === undefined)
@@ -3593,27 +4205,12 @@ export function createWaveAnalysis<V extends AnalysisView>(
             });
         }
         if (staticQuery && pagedGraph) {
-          const graph = mergeStaticContinuationGraph(trace, staticWalk);
-          const report =
-            args.detail === "full"
-              ? appendContinuationReport(
-                  traceReport(
-                    trace,
-                    direction,
-                    signal,
-                    feedbackEdges,
-                    staticCoverage,
-                  ),
-                  staticWalk
-                    ? staticContinuationReport(
-                        direction,
-                        staticWalk,
-                        staticContinuationMermaid(signal, staticWalk),
-                        mergedStaticMermaid(graph),
-                      )
-                    : undefined,
-                )
-              : undefined;
+          const bitExpressions = new Map();
+          const graph = mergeStaticContinuationGraph(
+            trace,
+            staticWalk,
+            bitExpressions,
+          );
           return {
             output: "paged",
             signal,
@@ -3621,7 +4218,33 @@ export function createWaveAnalysis<V extends AnalysisView>(
             direction,
             buildVerification: verification,
             continuationCursor: staticOutput.continuationCursor,
-            graphSnapshot: pagedStatic(graph, args.format, report, staticWalk),
+            graphSnapshot: saveGraph(
+              staticGraphSnapshot(graph),
+              {
+                format: args.format,
+                fullReport: args.detail === "full",
+                staticTrace: { graph, direction, bitExpressions },
+                mermaid: () => mergedStaticMermaid(graph),
+                report: (pages) =>
+                  appendContinuationReport(
+                    traceReport(
+                      trace,
+                      direction,
+                      signal,
+                      feedbackEdges,
+                      staticCoverage,
+                    ),
+                    staticWalk &&
+                      staticContinuationReport(
+                        direction,
+                        staticWalk,
+                        staticContinuationMermaid(signal, staticWalk),
+                        pages(),
+                      ),
+                  ),
+              },
+              staticWalk,
+            ),
             ...(staticWalk
               ? {
                   continuation: {
@@ -3787,6 +4410,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
             runtimeInputs,
             runtimeInputSource,
             runtimeMismatches,
+            waveformBindings,
           } = context;
           return {
             output: "temporal",
@@ -3809,6 +4433,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
               runtimeInputs,
               runtimeInputSource,
               runtimeMismatches,
+              waveformBindings,
             },
           };
         };
@@ -3818,20 +4443,12 @@ export function createWaveAnalysis<V extends AnalysisView>(
         ) => {
           if (followLimit === undefined || !continuationDeadline) {
             if (pagedGraph) {
-              const graph = mergeTemporalContinuationGraph(
-                temporalOutput(context),
-                {
-                  segments: [],
-                  links: [],
-                  remaining: [],
-                  stopReasons: [],
-                },
-              );
               return {
                 graphSnapshot: pagedTemporal(
-                  graph,
+                  temporalOutput(context),
                   args.format,
-                  fullReport ? rootReport() : undefined,
+                  fullReport,
+                  rootReport,
                 ),
                 walkReport: undefined,
               };
@@ -3848,26 +4465,23 @@ export function createWaveAnalysis<V extends AnalysisView>(
             typeof args.executionLog === "string"
               ? path.resolve(workspace, args.executionLog)
               : undefined;
-          const assertCurrent = await createContinuationGuard(
+          const { assertCurrent } = await createContinuationGuard(
             viewer,
             result,
             live,
             recording,
           );
           const initial = temporalOutput(context);
+          const defaultHistoryStart = args.historyStart as string | undefined;
           const query = async (
             continuation: TemporalContinuation,
             abort: AbortSignal,
+            batchProject: TraceRequestProject,
           ) => {
-            const start = args.historyStart as string | undefined;
-            const historyStart =
-              continuation.historyStart ??
-              (!live &&
-              start &&
-              start !== "auto" &&
-              BigInt(start) > BigInt(continuation.tick)
-                ? "auto"
-                : start);
+            const historyStart = temporalContinuationHistoryStart(
+              continuation,
+              defaultHistoryStart,
+            );
             const reply = await request(
               name,
               {
@@ -3883,6 +4497,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
                 followAllContinuations: undefined,
               },
               abort,
+              batchProject,
             );
             return reply as ReturnType<typeof temporalOutput>;
           };
@@ -3892,24 +4507,19 @@ export function createWaveAnalysis<V extends AnalysisView>(
             followLimit,
             operation,
             continuationDeadline,
-            query,
-            assertCurrent,
+            (point, abort) => query(point, abort, requestProject),
+            { assertCurrent, defaultHistoryStart },
           );
           operation.throwIfAborted();
           if (pagedGraph) {
-            const graph = mergeTemporalContinuationGraph(initial, walk);
-            const markdown = fullReport
-              ? appendContinuationReport(
-                  rootReport(),
-                  continuationReport(
-                    walk,
-                    continuationMermaidPages(root, walk),
-                    graph,
-                  ),
-                )
-              : undefined;
             return {
-              graphSnapshot: pagedTemporal(graph, args.format, markdown, walk),
+              graphSnapshot: pagedTemporal(
+                initial,
+                args.format,
+                fullReport,
+                rootReport,
+                { root, walk },
+              ),
               continuationCursor: retain({
                 kind: "temporal",
                 root,
@@ -3918,6 +4528,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
                 waveform: viewer.uri.fsPath,
                 walk,
                 assertCurrent,
+                defaultHistoryStart,
                 query,
               }),
               continuation: {
@@ -3944,6 +4555,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
               waveform: viewer.uri.fsPath,
               walk,
               assertCurrent,
+              defaultHistoryStart,
               query,
             }),
           };
@@ -3990,8 +4602,10 @@ export function createWaveAnalysis<V extends AnalysisView>(
               signal,
               instance,
               tick: context.tick,
+              liveSessionId: live.id,
               buildVerification,
               executionCoverage,
+              executionReplayMatch,
               ...continuations,
             };
           return {
@@ -4010,6 +4624,7 @@ export function createWaveAnalysis<V extends AnalysisView>(
                   }),
             signal,
             instance,
+            liveSessionId: live.id,
             staticCoverage,
             buildVerification,
             executionCoverage,
@@ -4171,6 +4786,26 @@ export function createWaveAnalysis<V extends AnalysisView>(
         };
       }
       throw Error("Unknown RTL analysis tool: " + name);
+    }
+    return async (
+      name: string,
+      args: Record<string, unknown>,
+      operation: AbortSignal,
+    ) => {
+      const requestProject: TraceRequestProject = {};
+      try {
+        return await request(name, args, operation, requestProject);
+      } finally {
+        await Promise.all(
+          [requestProject.pending, requestProject.build?.pending].map(
+            (pending) =>
+              pending?.then(
+                ({ session }) => session.dispose(),
+                () => undefined,
+              ),
+          ),
+        );
+      }
     };
   }
 

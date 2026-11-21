@@ -28,8 +28,9 @@ export const backendChoices = [
 
 export const isFsdb = (filename: string) => /\.fsdb$/i.test(filename);
 export const isWaveform = (filename: string) =>
-  /\.(?:fsdb|fst|vcd|wdb|wlf|shm|raw|psfascii|tran)$/i.test(filename) ||
-  /\.shm[\\/][^\\/]+\.dsn$/i.test(filename);
+  /\.(?:fsdb|fst|vcd|wdb|wlf|shm|raw|psfascii|tran|tran\.dat|psfxl|psfbin|psf|ac|dc|noise|info|pz|xf|stb|sparam|sp|sweep)$/i.test(
+    filename,
+  ) || /\.shm[\\/][^\\/]+\.(?:dsn|trn)$/i.test(filename);
 
 export function backendPlan(
   context: Pick<vscode.ExtensionContext, "asAbsolutePath">,
@@ -70,14 +71,15 @@ export function backendPlan(
   };
   const createIndependentKdb = () =>
     new KdbSession(independentBinary, undefined, log, independentOptions);
-  const proprietary = /\.(shm|dsn|wdb|wlf|raw|psfascii|tran)$/i
-    .exec(filename)?.[1]
-    .toLowerCase();
+  const proprietary =
+    /\.(shm|dsn|trn|wdb|wlf|raw|psfascii|tran|tran\.dat|psfxl|psfbin|psf|ac|dc|noise|info|pz|xf|stb|sparam|sp|sweep)$/i
+      .exec(filename)?.[1]
+      .toLowerCase();
   if (proprietary) {
     const xcelium = cfg.get<string>("xceliumHome");
     const vivado = cfg.get<string>("vivadoHome") || env.XILINX_VIVADO;
     const converter = cfg.get<string>("wlf2vcdPath");
-    if (xcelium && /^(shm|dsn)$/.test(proprietary))
+    if (xcelium && /^(shm|dsn|trn)$/.test(proprietary))
       independentEnv.XCELIUM_HOME = xcelium;
     if (proprietary === "wdb" && vivado) {
       independentEnv.XILINX_VIVADO = vivado;
@@ -94,7 +96,10 @@ export function backendPlan(
     return {
       kind: "analog" as const,
       kdbKind: "independent" as const,
-      label: (proprietary === "dsn" ? "shm" : proprietary).toUpperCase(),
+      label: (/^(dsn|trn)$/.test(proprietary)
+        ? "shm"
+        : proprietary
+      ).toUpperCase(),
       createWave: () => new Backend(independentBinary, independentOptions),
       createKdb: createIndependentKdb,
     };

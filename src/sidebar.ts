@@ -3,6 +3,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import { localizeHtml } from "./shared/localization";
 import type * as VSCode from "vscode";
 import type {
   Signal,
@@ -29,6 +30,7 @@ interface Hooks {
     offset?: number;
     limit?: number;
   }) => Promise<SearchResult>;
+  searchSignals?: (query: string, offset: number) => Promise<SearchResult>;
   addSignals?: (signals: Signal[], editAnnotation?: boolean) => Promise<void>;
   taggedFocus?: (signal: TaggedSignal) => Promise<void>;
   tagAppearance?: (options: {
@@ -107,8 +109,9 @@ class Sidebar implements VSCode.WebviewViewProvider {
           ),
         )
         .toString();
-    view.webview.html = fs
-      .readFileSync(context.asAbsolutePath("media/sidebar.html"), "utf8")
+    view.webview.html = localizeHtml(
+      fs.readFileSync(context.asAbsolutePath("media/sidebar.html"), "utf8"),
+    )
       .replaceAll("{{csp}}", view.webview.cspSource)
       .replaceAll("{{nonce}}", nonce)
       .replace("{{css}}", resource("sidebar.css"))
@@ -134,6 +137,28 @@ class Sidebar implements VSCode.WebviewViewProvider {
               request: m.request,
               ...result,
             });
+        } else if (
+          m.type === "signalSearch" &&
+          typeof m.query === "string" &&
+          m.query.length <= 512 &&
+          Number.isSafeInteger(m.offset) &&
+          m.offset >= 0
+        ) {
+          try {
+            const result = await this.hooks.searchSignals?.(m.query, m.offset);
+            await view.webview.postMessage({
+              type: m.type,
+              request: m.request,
+              result,
+            });
+          } catch {
+            await view.webview.postMessage({
+              type: m.type,
+              request: m.request,
+              error: true,
+            });
+          }
+          return;
         } else if (m.type === "addSignals" && Array.isArray(m.signals))
           await this.hooks.addSignals?.(m.signals, m.editAnnotation === true);
         else if (m.type === "taggedFocus" && m.signal)

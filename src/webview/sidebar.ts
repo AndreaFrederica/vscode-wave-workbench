@@ -3,6 +3,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import { localize } from "../shared/localization";
 import { getElement as $ } from "./dom";
 import { renderTags, tagColor } from "./tags";
 import { baseKey, label as signalLabel } from "../shared/signals";
@@ -19,8 +20,65 @@ let pending = false,
   running = false,
   instanceNodes: Location[] = [],
   lastReveal = "";
+let lastError = "";
 let tagState: TagState = { taggedSignals: [], tagColors: {}, tagStyle: "pill" };
 let taggedLimit = 50;
+const searchInput = $("sidebarSearch");
+const searchRows = $("sidebarSearchRows");
+const searchStatus = $("sidebarSearchStatus");
+const searchPrev = $("sidebarSearchPrev");
+const searchNext = $("sidebarSearchNext");
+let searchRequest = 0,
+  searchOffset = 0,
+  searchTimer = 0;
+let searchSession = "";
+function searchSignals(offset = 0, delay = 0) {
+  clearTimeout(searchTimer);
+  const request = ++searchRequest;
+  const query = searchInput.value.trim();
+  searchRows.replaceChildren();
+  searchPrev.disabled = searchNext.disabled = true;
+  const visible = !!query && !searchInput.disabled;
+  $("sidebarSearchResults").hidden = !visible;
+  if (!visible) return;
+  searchStatus.textContent = localize("正在搜索…");
+  searchTimer = window.setTimeout(() => {
+    vscode.postMessage({ type: "signalSearch", request, query, offset });
+  }, delay);
+}
+searchInput.oninput = () => searchSignals(0, 140);
+searchInput.onkeydown = (event) => {
+  if (event.key === "Enter") {
+    const first = searchRows.querySelector<HTMLButtonElement>("button:enabled");
+    if (first) first.click();
+    else searchSignals();
+  }
+};
+searchPrev.onclick = () => searchSignals(Math.max(0, searchOffset - 32));
+searchNext.onclick = () => searchSignals(searchOffset + 32);
+const menus = [
+  ...document.querySelectorAll<HTMLDetailsElement>(".sidebarMenu details"),
+];
+for (const menu of menus) {
+  menu.querySelector("summary").onclick = () => {
+    for (const other of menus) if (other !== menu) other.open = false;
+  };
+  menu.addEventListener("click", (event) => {
+    if ((event.target as HTMLElement).closest("button")) menu.open = false;
+  });
+}
+document.addEventListener("pointerdown", (event) => {
+  if (!(event.target as HTMLElement).closest(".sidebarMenu"))
+    for (const menu of menus) menu.open = false;
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const menu = menus.find((item) => item.open);
+  if (menu) {
+    menu.open = false;
+    menu.querySelector("summary").focus();
+  }
+});
 const instanceTags = new Map<string, Set<string>>();
 const descendantTags = new Map<string, Set<string>>();
 const scopeSignalTags = new Map<string, Set<string>>();
@@ -53,7 +111,7 @@ function applyTagState(state: TagState | undefined, session: string) {
   const filter = $("tagFilter");
   const old = filter.value;
   const options = document.createDocumentFragment();
-  options.append(new Option("所有标签", ""));
+  options.append(new Option(localize("所有标签"), ""));
   for (const tag of [...all].sort((a, b) => a.localeCompare(b))) {
     options.append(new Option(tag, tag));
   }
@@ -95,7 +153,7 @@ function renderTaggedSignals() {
   if (!tagged.length) {
     const empty = document.createElement("div");
     empty.className = "taggedEmpty";
-    empty.textContent = "当前波形没有已打标签的信号";
+    empty.textContent = localize("当前波形没有已打标签的信号");
     list.append(empty);
   }
   $("taggedMore").hidden = tagged.length <= taggedLimit;
@@ -149,15 +207,15 @@ function objectIcon(kind) {
   const title = document.createElementNS(icon.namespaceURI, "title");
   title.textContent =
     {
-      npiModule: "模块实例",
-      npiModuleArray: "模块数组",
-      npiInterface: "接口",
-      npiInterfaceArray: "接口数组",
-      npiGenScope: "Generate 层级",
+      npiModule: localize("模块实例"),
+      npiModuleArray: localize("模块数组"),
+      npiInterface: localize("接口"),
+      npiInterfaceArray: localize("接口数组"),
+      npiGenScope: localize("Generate 层级"),
       npiPackage: "Package",
-      npiFunction: "函数",
-      npiTask: "任务",
-    }[kind] || "作用域";
+      npiFunction: localize("函数"),
+      npiTask: localize("任务"),
+    }[kind] || localize("作用域");
   const shape = document.createElementNS(icon.namespaceURI, "path");
   shape.setAttribute("d", paths[type]);
   icon.append(title, shape);
@@ -239,10 +297,10 @@ function renderInstanceSignal(
     if (!page) requestInstanceSignals(scope);
     name.disabled = !page || !!page.loading;
     name.textContent = page?.error
-      ? "重试读取信号"
+      ? localize("重试读取信号")
       : name.disabled
-        ? "读取信号…"
-        : "显示更多信号";
+        ? localize("读取信号…")
+        : localize("显示更多信号");
     name.onclick = () => {
       requestInstanceSignals(scope);
       renderInstances();
@@ -267,7 +325,7 @@ function renderInstanceSignal(
   const edit = document.createElement("button");
   edit.className = "treeSignalEdit";
   edit.textContent = "✎";
-  edit.title = "编辑 " + signal.name + " 的标签和注释";
+  edit.title = localize("编辑 ") + signal.name + localize(" 的标签和注释");
   edit.setAttribute("aria-label", edit.title);
   edit.disabled = !signal.supported;
   edit.onclick = () => addScopeSignals([signal], true);
@@ -301,7 +359,7 @@ function renderInstances() {
     const expand = document.createElement("button");
     expand.className = "expand";
     expand.textContent = n.expanded ? "▾" : "▸";
-    expand.title = "展开/折叠 " + n.fullname;
+    expand.title = localize("展开/折叠 ") + n.fullname;
     expand.onclick = () =>
       vscode.postMessage({ type: "tree", action: "expand", scope: n.fullname });
     const name = document.createElement("button");
@@ -338,7 +396,7 @@ function renderInstances() {
     rows.append(row);
   }
   if (!instanceRows.length)
-    rows.textContent = "接入设计数据库 后浏览实例，点击实例打开 RTL";
+    rows.textContent = localize("接入设计数据库 后浏览实例，点击实例打开 RTL");
 }
 $("instanceTree").addEventListener(
   "scroll",
@@ -369,7 +427,8 @@ function send(script) {
 }
 function updateButton() {
   $("execute").disabled = pending || running;
-  $("execute").textContent = pending || running ? "执行中…" : "执行 Ctrl+Enter";
+  $("execute").textContent =
+    pending || running ? localize("执行中…") : localize("执行 Ctrl+Enter");
 }
 $("form").onsubmit = (e) => {
   e.preventDefault();
@@ -404,6 +463,34 @@ document
   .forEach((b) => (b.onclick = () => send(b.dataset.script)));
 window.addEventListener("message", (e) => {
   const m = e.data;
+  if (m.type === "signalSearch") {
+    if (m.request !== searchRequest) return;
+    if (!m.result || m.error) {
+      searchStatus.textContent = localize("信号搜索失败");
+      return;
+    }
+    const { signals, offset, total } = m.result;
+    searchOffset = offset;
+    searchStatus.textContent = total
+      ? `${offset + 1}–${offset + signals.length} / ${total}`
+      : localize("没有匹配信号");
+    searchPrev.disabled = offset === 0;
+    searchNext.disabled = offset + signals.length >= total;
+    searchRows.scrollTop = 0;
+    for (const signal of signals as Signal[]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.title = [signal.scope, signal.name].filter(Boolean).join(".");
+      button.textContent = "+ " + signal.name;
+      button.disabled = !signal.supported;
+      const scope = document.createElement("small");
+      scope.textContent = signal.scope;
+      button.append(scope);
+      button.onclick = () => addScopeSignals([signal]);
+      searchRows.append(button);
+    }
+    return;
+  }
   if (m.type === "instanceSignals") {
     const page = instanceSignals.get(m.scope);
     if (m.request !== instanceRevision || !page?.loading) return;
@@ -440,6 +527,16 @@ window.addEventListener("message", (e) => {
     activeSession?.kdb,
     activeSession?.backend,
   ]);
+  searchInput.disabled = !activeSession?.ready;
+  const nextSearchSession = JSON.stringify([
+    m.activeId,
+    activeSession?.backend,
+    activeSession?.ready,
+  ]);
+  if (searchSession !== nextSearchSession) {
+    searchSession = nextSearchSession;
+    searchSignals();
+  }
   applyTagState(m.tagState, nextSession);
   $("showOtherObjects").checked = !!m.includeOther;
   setSignalScope(m.scope || "", nextSession);
@@ -471,7 +568,7 @@ window.addEventListener("message", (e) => {
   $("session").replaceChildren();
   if (!m.sessions.length) {
     const o = document.createElement("option");
-    o.textContent = "尚未打开波形";
+    o.textContent = localize("尚未打开波形");
     o.value = "";
     $("session").append(o);
   }
@@ -487,12 +584,25 @@ window.addEventListener("message", (e) => {
   running = !!session?.running;
   updateButton();
   $("sessionStatus").textContent = session
-    ? `${session.running ? "执行中 · " : ""}${session.ready ? "已加载" : "加载中"} · 设计数据库 ${session.kdb || "未接入"}\n${session.id}`
-    : "先打开 FSDB / FST / VCD，再输入 nWave 命令。waveHelp 可直接查看帮助。";
+    ? session.running
+      ? localize("执行 Tcl 中…")
+      : !session.ready
+        ? localize("正在打开波形…")
+        : session.kdb
+          ? localize("已接入设计数据库")
+          : localize("未接入设计数据库")
+    : "";
+  $("sessionStatus").title = session
+    ? [session.id, session.kdb].filter(Boolean).join("\n")
+    : "";
+  const latest = m.logs.at(-1)?.text || "";
+  if (latest.startsWith("ERROR:") && latest !== lastError)
+    $("sidebarConsole").open = true;
+  lastError = latest;
   $("history").replaceChildren();
   const placeholder = document.createElement("option");
   placeholder.value = "";
-  placeholder.textContent = "选择历史指令填入输入框…";
+  placeholder.textContent = localize("选择历史指令填入输入框…");
   $("history").append(placeholder);
   for (const script of [...m.history].reverse()) {
     const o = document.createElement("option");
@@ -534,7 +644,8 @@ function setSignalScope(scope, session) {
   signalSelection.clear();
   signalFlight = false;
   $("sidebarSignals").scrollTo(0, 0);
-  $("sidebarScope").textContent = "Signals · " + (scope || "选择实例");
+  $("sidebarScope").textContent =
+    "Signals · " + (scope || localize("选择实例"));
   $("sidebarScope").title = scope;
   if (scope) requestSignalPage(0);
   renderSignals();
@@ -574,7 +685,9 @@ function renderSignals() {
     b.disabled = !s || !s.supported;
     const label = document.createElement("span");
     label.className = "scopeSignalName";
-    label.textContent = s ? `${s.name} · ${s.width} bit` : "读取信号…";
+    label.textContent = s
+      ? `${s.name} · ${s.width} bit`
+      : localize("读取信号…");
     b.append(label);
     if (s) {
       const tags = scopeSignalTags.get(baseKey(s));
@@ -596,8 +709,8 @@ function renderSignals() {
   if (missing !== null) requestSignalPage(missing);
   if (!signalTotal && !signalFlight)
     rows.textContent = signalScope
-      ? "没有已 dump 的直属信号"
-      : "点击上方实例查看信号";
+      ? localize("没有已 dump 的直属信号")
+      : localize("点击上方实例查看信号");
 }
 $("addScopeSignals").onclick = () =>
   addScopeSignals([...signalSelection.values()]);

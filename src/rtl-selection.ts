@@ -22,9 +22,18 @@ export function vscOperandExpression(text: string) {
   const code = text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (comment) =>
     comment.replace(/[^\r\n]/g, " "),
   );
-  const tokens = code.match(/&&|\|\||~[&|^]|\^~|[A-Za-z_][\w$]*|[^\s]/g);
+  const fixedSelection =
+    /^\s*([A-Za-z_][\w$]{0,63})\s*\[\s*-?\d+\s*(?::\s*-?\d+\s*)?\]\s*$/.exec(
+      code,
+    );
+  if (fixedSelection && !KEYWORDS.has(fixedSelection[1]))
+    return { code, names: [fixedSelection[1]] };
+  const tokens = code.match(
+    /<<<|>>>|<<|>>|&&|\|\||~[&|^]|\^~|[A-Za-z_][\w$]*|[^\s]/g,
+  );
   if (!tokens) return;
   const names = new Set<string>();
+  const conditionalDepths: number[] = [];
   let expectOperand = true;
   let depth = 0;
   for (const token of tokens) {
@@ -42,15 +51,22 @@ export function vscOperandExpression(text: string) {
         names.add(token);
         expectOperand = false;
       }
-    } else if (token === ")" && depth) {
+    } else if (token === ")" && depth && conditionalDepths.at(-1) !== depth) {
       depth--;
-    } else if (/^(?:[&|^]|~\^|\^~)$/.test(token)) {
+    } else if (token === "?") {
+      conditionalDepths.push(depth);
+      expectOperand = true;
+    } else if (token === ":" && conditionalDepths.at(-1) === depth) {
+      conditionalDepths.pop();
+      expectOperand = true;
+    } else if (/^(?:[&|^]|~\^|\^~|<<<|>>>|<<|>>)$/.test(token)) {
       expectOperand = true;
     } else {
       return;
     }
   }
-  if (!depth && !expectOperand) return { code, names: [...names] };
+  if (!depth && !conditionalDepths.length && !expectOperand)
+    return { code, names: [...names] };
 }
 
 export function vcsGuardEntry(
@@ -116,6 +132,134 @@ export function vcsGuardEntry(
   }
   return { at: entry, bare: false };
 }
+
+export function vcsCaseEntry(
+  code: string,
+  first: number,
+  last: number,
+  body: number,
+  end: number,
+  assignment: number,
+  source = code,
+) {
+  if (
+    first < 0 ||
+    last <= first ||
+    body <= last ||
+    assignment < body ||
+    assignment >= end ||
+    !/\bcase[xz]?\s*\(\s*$/.test(code.slice(Math.max(0, first - 256), first)) ||
+    !/^\s*\)/.test(code.slice(last, body))
+  )
+    return;
+  if (assignment === body) return { at: assignment, bare: true };
+
+  const begin = /^begin\b(?:\s*:\s*[A-Za-z_][\w$]*)?/.exec(
+    code.slice(body, assignment),
+  );
+  if (!begin) return;
+  const at = body + begin[0].length;
+  // Use the simulator timestamp saved at entry for standalone decimal
+  // delays. codeOnly can mask numeric literals in the examined source.
+  const prior = code.slice(at, assignment);
+  const writes =
+    /\s*(?:#\s*(?:\d[\d_]*(?:\.[\d_]+)?)?\s*|[A-Za-z_][\w$]*\s*(?:<=|=(?!=))[^;#@()`]*);/gy;
+  let consumed = 0;
+  while (writes.exec(prior)) consumed = writes.lastIndex;
+  const remaining = prior.slice(consumed);
+  const wait = /^\s*wait\s*\(([\s\S]*)\)\s*$/.exec(remaining);
+  if (
+    !remaining.trim() ||
+    (wait &&
+      vcsWaitOperands(
+        source.slice(
+          at + consumed + remaining.indexOf("(") + 1,
+          at + consumed + remaining.lastIndexOf(")"),
+        ),
+      ))
+  )
+    return { at, bare: false };
+}
+
+const waitInteger =
+  /(?:[0-9][\d_]*)?'(?:s?[bBoOdDhH]\s*[0-9a-fA-F_xXzZ?]+)|'[01xXzZ]|[0-9][\d_]*/i;
+const waitToken = new RegExp(
+  waitInteger.source +
+    String.raw`|===|!==|==|!=|<=|>=|&&|\|\||[A-Za-z_][\w$]*|\S`,
+  "gi",
+);
+
+export function vcsWaitOperands(source: string) {
+  if (source.length > 4096) return;
+  const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, " ");
+  const tokens = code.match(waitToken);
+  if (!tokens) return;
+  const names = new Set<string>();
+  let depth = 0;
+  let expectOperand = true;
+  for (const token of tokens) {
+    if (expectOperand) {
+      if (token === "(") depth++;
+      else if (token !== "!" && token !== "~") {
+        if (/^[\d']/.test(token) && token.match(waitInteger)?.[0] === token) {
+          expectOperand = false;
+          continue;
+        }
+        if (!/^[A-Za-z_][\w$]{0,63}$/.test(token) || KEYWORDS.has(token))
+          return;
+        names.add(token);
+        if (names.size > 8) return;
+        expectOperand = false;
+      }
+    } else if (token === ")" && depth) depth--;
+    else if (/^(?:&&|\|\||[&|^]|===?|!==?|[<>]=?)$/.test(token))
+      expectOperand = true;
+    else return;
+  }
+  if (names.size && !depth && !expectOperand)
+    return { names: [...names], compound: tokens.length > 1 };
+}
+
+export function vcsWaitEntry(
+  code: string,
+  first: number,
+  last: number,
+  assignment: number,
+) {
+  if (
+    first >= 0 &&
+    last > first &&
+    assignment > last &&
+    /\bwait\s*\(\s*$/.test(code.slice(Math.max(0, first - 256), first)) &&
+    /^\s*\)\s*$/.test(code.slice(last, assignment))
+  )
+    return { at: assignment, bare: true };
+}
+
+export function vcsStandaloneWait(
+  code: string,
+  first: number,
+  last: number,
+  assignment: number,
+) {
+  if (first < 0 || last <= first || assignment <= last) return;
+  const prefixStart = Math.max(0, first - 256);
+  const header = /\bwait\s*\(\s*$/.exec(code.slice(prefixStart, first));
+  const tail = code.slice(last, assignment);
+  const end = /^\s*\)\s*;/.exec(tail);
+  if (
+    header &&
+    end &&
+    /^(?:\s*#\s*(?:\d[\d_]*(?:\.[\d_]+)?)?\s*;)*\s*$/.test(
+      tail.slice(end[0].length),
+    )
+  )
+    return {
+      start: prefixStart + header.index,
+      semicolon: last + end[0].length - 1,
+    };
+}
+
 function identifiers(text: string) {
   if (text.length > 2 * 1024 * 1024) throw Error("选区超过 2 MiB，请分批添加");
   const clean = codeOnly(text);

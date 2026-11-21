@@ -66,11 +66,16 @@ interp alias wave unknown {} unknownWave
 set commandBudget 0
 while {[gets stdin line] >= 0} {
     set fields [split $line \t]
+    set script [decode [lindex $fields 0]]
+    if {[lindex $fields 2] eq "CHECK"} {
+        puts "DONE\tOK\t[encode [info complete $script]]"
+        continue
+    }
     set ::scriptDir [decode [lindex $fields 1]]
     incr commandBudget 200000
     interp limit wave command -value $commandBudget
     # Match the host's 120-second deadline, including time spent in SDK RPCs.
     interp limit wave time -seconds [expr {[clock seconds]+120}]
-    set code [catch {interp eval wave [decode [lindex $fields 0]]} result]
+    set code [catch {interp eval wave $script} result]
     puts "DONE\t[expr {$code ? {ERROR} : {OK}}]\t[encode $result]"
 }

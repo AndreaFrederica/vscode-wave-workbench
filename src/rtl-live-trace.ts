@@ -33,6 +33,7 @@ export interface LiveSnapshot {
   valueChangeEvents?: boolean;
   statementEntryEvents?: boolean;
   nbaCommitEvents?: boolean;
+  modportCommitEvents?: boolean;
 }
 
 interface VcsLiveOptions {
@@ -305,6 +306,8 @@ export class LiveTraceSession {
             typeof snapshot.statementEntryEvents !== "boolean") ||
           (snapshot.nbaCommitEvents !== undefined &&
             typeof snapshot.nbaCommitEvents !== "boolean") ||
+          (snapshot.modportCommitEvents !== undefined &&
+            typeof snapshot.modportCommitEvents !== "boolean") ||
           typeof snapshot.scale !== "string" ||
           !snapshot.values ||
           typeof snapshot.values !== "object" ||
@@ -463,6 +466,7 @@ export class LiveTraceSession {
         nbaCommitEvents:
           this.snapshot?.nbaCommitEvents === true ||
           (!this.vcs && this.supportsExecutionEvents()),
+        modportCommitEvents: this.snapshot?.modportCommitEvents === true,
       },
       failure: this.failure,
       discardedEvents: this.discardedEvents,
@@ -540,7 +544,7 @@ export class LiveTraceSession {
     const historyTruncated = requested < first && this.discardedSnapshots > 0;
     function observe(
       signal: number,
-      waveformSignal: string,
+      watchedSignal: string,
       snapshots: readonly LiveSnapshot[],
       binding?: Signal,
     ): Awaited<
@@ -548,8 +552,8 @@ export class LiveTraceSession {
     >["observations"][number] {
       const selection = tracePackedSelection(binding);
       const liveValue = (snapshot: LiveSnapshot) => {
-        const raw = Object.hasOwn(snapshot.values, waveformSignal)
-          ? snapshot.values[waveformSignal]
+        const raw = Object.hasOwn(snapshot.values, watchedSignal)
+          ? snapshot.values[watchedSignal]
           : undefined;
         if (!binding || binding.real) return raw;
         return project(
@@ -569,12 +573,17 @@ export class LiveTraceSession {
         else history.push(previous);
       }
       const value = liveValue(cursor);
+      const rangeLabel =
+        !binding?.real && !selection.projected
+          ? /\[\s*-?\d+\s*:\s*-?\d+\s*\]$/.exec(binding?.name ?? "")?.[0]
+          : undefined;
+      const waveformSignal =
+        selection.bit === undefined
+          ? watchedSignal + (rangeLabel ?? "")
+          : watchedSignal + "[" + selection.bit + "]";
       return {
         signal,
-        waveformSignal:
-          selection.bit === undefined
-            ? waveformSignal
-            : waveformSignal + "[" + selection.bit + "]",
+        waveformSignal,
         width: binding?.width ?? value?.length ?? 0,
         real: binding?.real || undefined,
         signed: signedness?.get(signal),
@@ -641,10 +650,11 @@ export class LiveTraceSession {
       if (
         breakpoint.timing === "simulator-commit" &&
         this.vcs &&
-        !this.snapshot?.nbaCommitEvents
+        !this.snapshot?.nbaCommitEvents &&
+        !this.snapshot?.modportCommitEvents
       )
         throw Error(
-          "The running VCS simulation does not provide NBA commit events.",
+          "The running VCS simulation does not provide simulator commit events.",
         );
     } else if (breakpoint && "signal" in breakpoint) {
       if (

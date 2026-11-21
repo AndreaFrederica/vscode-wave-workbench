@@ -27,6 +27,7 @@ export interface SchematicNode {
   direction?: SchematicPortDirection;
   instance?: string;
   signal?: string;
+  waveformSignal?: string;
   location?: { file: string; line: number };
   wave?: boolean;
   source?: boolean;

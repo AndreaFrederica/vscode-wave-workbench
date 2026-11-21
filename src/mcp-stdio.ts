@@ -50,7 +50,7 @@ type InputProperty = {
   maximum?: number;
   minItems?: number;
   maxItems?: number;
-  items?: { type: string };
+  items?: { type: string; minimum?: number };
   description?: string;
 };
 
@@ -76,9 +76,7 @@ function validArgument(value: unknown, property: InputProperty) {
     Array.isArray(value) &&
     value.length >= (property.minItems ?? 0) &&
     value.length <= (property.maxItems ?? Infinity) &&
-    value.every(
-      (item) => typeof item === property.items?.type && item.length > 0,
-    )
+    value.every((item) => property.items && validArgument(item, property.items))
   );
 }
 

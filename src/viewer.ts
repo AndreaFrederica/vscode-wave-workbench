@@ -36,6 +36,7 @@ export interface WaveDocument extends vscode.CustomDocument {
 export interface Viewer {
   document: WaveDocument;
   panel: vscode.WebviewPanel;
+  mountDock?: (view: vscode.WebviewView) => () => void;
   backend: Backend;
   backendKind: "independent" | "verdi" | "vcd" | "fst" | "analog";
   switchBackend: (choice: FsdbBackend) => Promise<string>;

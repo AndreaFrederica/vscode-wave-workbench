@@ -10,9 +10,11 @@ import {
   traceReport,
   traceSignalScope,
   type StaticTraceDiagram,
+  type AssignmentValue,
   type TraceDirection,
   type VideTrace,
 } from "./rtl-trace";
+import { remapValue } from "./rtl-trace-instances";
 import { createMermaidFlowchart, mermaidMarkdown } from "./trace-mermaid";
 
 type Coverage = ReturnType<typeof staticTraceCoverage>;
@@ -29,10 +31,12 @@ export async function followStaticFrontier(
   query: (signal: string, abort: AbortSignal) => Promise<VideTrace>,
   assertCurrent: () => Promise<void>,
   previous: readonly Segment[] = [],
+  selected?: readonly string[],
 ) {
-  const queued = [root];
   const indices = new Map([[root, 0]]);
-  const links: { segment: number; stop: number; nextSegment: number }[] = [];
+  const pending = new Set<string>();
+  const discoveredLinks: { segment: number; stop: number; signal: string }[] =
+    [];
   const segments = [...previous];
   const stopReasons = new Set<string>();
   function enqueue(segment: number, coverage: Coverage) {
@@ -52,28 +56,35 @@ export async function followStaticFrontier(
         continue;
       }
       for (const signal of item.continuationSignals ?? [item.waveformSignal]) {
-        let nextSegment = indices.get(signal);
-        if (nextSegment === undefined) {
-          nextSegment = queued.push(signal) - 1;
-          indices.set(signal, nextSegment);
-        }
+        const nextSegment = indices.get(signal);
+        if (nextSegment === undefined) pending.add(signal);
         if (nextSegment === segment) stopReasons.add("noProgress");
-        links.push({ segment, stop, nextSegment });
+        discoveredLinks.push({ segment, stop, signal });
       }
     }
   }
+  function recordSegment(segment: Segment, index: number) {
+    pending.delete(segment.signal);
+    indices.set(segment.signal, index);
+    if ("coverage" in segment) enqueue(index, segment.coverage);
+    else stopReasons.add("queryFailed");
+  }
   enqueue(0, staticTraceCoverage(initial));
   previous.forEach((segment, index) => {
-    if ("coverage" in segment) enqueue(index + 1, segment.coverage);
-    else stopReasons.add("queryFailed");
+    recordSegment(segment, index + 1);
   });
+  if (selected?.some((signal) => !pending.has(signal)))
+    throw Error("A selected continuation is no longer pending.");
   const abort = AbortSignal.any([operation, deadline]);
   while (
-    segments.length + 1 < queued.length &&
+    pending.size &&
     segments.length - previous.length < limit &&
     !abort.aborted
   ) {
-    const signal = queued[segments.length + 1];
+    const signal = selected
+      ? selected[segments.length - previous.length]
+      : pending.values().next().value;
+    if (signal === undefined) break;
     try {
       await assertCurrent();
       abort.throwIfAborted();
@@ -81,22 +92,30 @@ export async function followStaticFrontier(
       await assertCurrent();
       abort.throwIfAborted();
       const coverage = staticTraceCoverage(trace);
-      segments.push({ signal, trace, coverage });
-      enqueue(segments.length, coverage);
+      const segment = { signal, trace, coverage };
+      recordSegment(segment, segments.push(segment));
     } catch (error) {
       if (abort.aborted) break;
       if (error instanceof TraceContextChanged) {
         stopReasons.add("contextChanged");
         break;
       }
-      stopReasons.add("queryFailed");
-      segments.push({
+      const segment = {
         signal,
         error: error instanceof Error ? error.message : String(error),
-      });
+      };
+      recordSegment(segment, segments.push(segment));
     }
   }
-  const remaining = queued.slice(segments.length + 1);
+  const remaining = [...pending];
+  remaining.forEach((signal, index) =>
+    indices.set(signal, segments.length + index + 1),
+  );
+  const links = discoveredLinks.map(({ segment, stop, signal }) => ({
+    segment,
+    stop,
+    nextSegment: indices.get(signal)!,
+  }));
   if (operation.aborted) stopReasons.add("cancelled");
   else if (remaining.length && !stopReasons.has("contextChanged"))
     stopReasons.add(deadline.aborted ? "timeBudget" : "requestBudget");
@@ -181,10 +200,11 @@ function projectedFeedback(
 export function mergeStaticContinuationGraph(
   initial: VideTrace,
   walk?: StaticWalk,
+  bitExpressions?: Map<number, AssignmentValue | undefined>,
 ) {
   type Signal = VideTrace["signals"][number];
   type Assignment = VideTrace["assignments"][number];
-  type Relation = StaticTraceDiagram["assignments"][number] &
+  type Relation = Omit<StaticTraceDiagram["assignments"][number], "inputs"> &
     Pick<
       Assignment,
       | "process"
@@ -212,6 +232,7 @@ export function mergeStaticContinuationGraph(
       signal: number;
       reason: string;
       waveformUnavailable?: true;
+      unavailableBits?: number[];
       locations: Assignment["location"][];
       continuationSignals: string[];
       stops: { segment: number; stop: number; nextSegments: number[] }[];
@@ -257,6 +278,8 @@ export function mergeStaticContinuationGraph(
         combined = signals.length;
         signals.push({ ...signal, id: combined });
         signalIds.set(key, combined);
+      } else if (!signals[combined].packedRange && signal.packedRange) {
+        signals[combined].packedRange = signal.packedRange;
       }
       localSignals.set(id, combined);
     }
@@ -349,10 +372,29 @@ export function mergeStaticContinuationGraph(
       };
       const key = JSON.stringify(dependencies);
       let combined = relationIds.get(key);
+      const bitExpression =
+        bitExpressions &&
+        !relation.targetIndex &&
+        !relation.targetElementIndex &&
+        !relation.targetField &&
+        !relation.fieldRead &&
+        !relation.wordRead &&
+        !relation.inputs.some(({ interfaceRange }) => interfaceRange) &&
+        !relation.port &&
+        value
+          ? remapValue(value, localSignals)
+          : undefined;
       if (combined === undefined) {
         combined = assignments.length;
         assignments.push({ ...dependencies, id: combined, sources: [] });
         relationIds.set(key, combined);
+        if (bitExpression) bitExpressions?.set(combined, bitExpression);
+      } else if (
+        bitExpressions?.has(combined) &&
+        JSON.stringify(bitExpressions.get(combined)) !==
+          JSON.stringify(bitExpression)
+      ) {
+        bitExpressions.set(combined, undefined);
       }
       assignments[combined].sources.push({ segment, assignment });
       localAssignments.set(assignment, combined);
@@ -383,7 +425,7 @@ export function mergeStaticContinuationGraph(
         )
       )
         continue;
-      const { reason, waveformUnavailable } = item;
+      const { reason, waveformUnavailable, unavailableBits } = item;
       const key = JSON.stringify([signal, reason, waveformUnavailable]);
       let gap = gaps.get(key);
       if (!gap) {
@@ -391,11 +433,16 @@ export function mergeStaticContinuationGraph(
           signal,
           reason,
           waveformUnavailable,
+          ...(unavailableBits ? { unavailableBits } : {}),
           stops: [],
           locations: [],
           continuationSignals: [],
         };
         gaps.set(key, gap);
+      } else if (gap.unavailableBits) {
+        gap.unavailableBits = unavailableBits
+          ? [...new Set([...gap.unavailableBits, ...unavailableBits])]
+          : undefined;
       }
       gap.stops.push({ segment, stop, nextSegments });
       for (const location of item.locations ?? [])
@@ -486,14 +533,19 @@ export function pageStaticContinuationGraph(
 export function mergedStaticMermaid(
   graph: ReturnType<typeof mergeStaticContinuationGraph>,
 ) {
-  const gaps = graph.gaps.map(({ signal, reason, waveformUnavailable }) => ({
-    signal,
-    reason: waveformUnavailable
-      ? "Waveform signal unavailable"
-      : isStaticBudgetStop(reason)
-        ? "Frontier · " + reason
-        : reason,
-  }));
+  const gaps = graph.gaps.map(
+    ({ signal, reason, waveformUnavailable, unavailableBits }) => ({
+      signal,
+      reason: waveformUnavailable
+        ? "Waveform signal unavailable" +
+          (unavailableBits?.length
+            ? " · bits " + unavailableBits.join(", ")
+            : "")
+        : isStaticBudgetStop(reason)
+          ? "Frontier · " + reason
+          : reason,
+    }),
+  );
   const localAssignments = new Map(
     graph.assignments.map(({ id }, index) => [id, index]),
   );

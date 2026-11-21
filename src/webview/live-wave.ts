@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+import { localize } from "../shared/localization";
 import type {
   LiveWaveSample,
   LiveWaveUpdate,
@@ -28,11 +29,11 @@ const zoomOut = byId<HTMLButtonElement>("zoom-out");
 const rulerHeight = 24;
 const rowHeight = 27;
 const stateLabels = {
-  paused: "已暂停",
-  running: "运行中",
-  stepping: "单步执行中",
-  exited: "已结束",
-  error: "仿真出错",
+  paused: localize("已暂停"),
+  running: localize("运行中"),
+  stepping: localize("单步执行中"),
+  exited: localize("已结束"),
+  error: localize("仿真出错"),
 };
 let sessionId: string | undefined;
 let revision = -1;
@@ -170,8 +171,8 @@ function display() {
   wave.hidden = !hasRows;
   empty.hidden = hasRows;
   empty.textContent = active
-    ? "从「信号」菜单选择要显示的信号。"
-    : "启动或附加在线仿真后，采样的信号会显示在这里。";
+    ? localize("从「信号」菜单选择要显示的信号。")
+    : localize("启动或附加在线仿真后，采样的信号会显示在这里。");
 }
 
 function receive(update: LiveWaveUpdate) {
@@ -208,7 +209,7 @@ function receive(update: LiveWaveUpdate) {
   scale = update.scale ?? "";
   summary =
     stateLabels[update.state] +
-    (update.historyFailure ? " · 波形记录已停止" : "");
+    (update.historyFailure ? localize(" · 波形记录已停止") : "");
   summaryTitle = update.historyFailure ?? update.failure ?? "";
   if (lastTick !== undefined) alignWindow();
   if (follow.checked) {
@@ -291,15 +292,24 @@ function draw() {
     start + " → " + (end > lastTick! ? lastTick : end) + " × " + scale;
   time.textContent = follow.checked
     ? rangeLabel
-    : "游标 " + cursor + " · 最新 " + latest.tick + " × " + scale;
+    : localize("游标 ") +
+      cursor +
+      localize(" · 最新 ") +
+      latest.tick +
+      " × " +
+      scale;
   status.textContent =
     summary +
-    (windowError ? " · 读取采样失败" : approximate ? " · 采样概览" : "");
+    (windowError
+      ? localize(" · 读取采样失败")
+      : approximate
+        ? localize(" · 采样概览")
+        : "");
   status.title = windowError ?? summaryTitle;
   for (const [signal, element] of rowValues) {
     const value = sampledValue(exactCursor, signal);
     element.textContent = displayValue(value);
-    element.title = value ?? "缺少采样";
+    element.title = value ?? localize("缺少采样");
   }
   if (wave.hidden) return;
   const width = canvas.clientWidth;

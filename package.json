@@ -1,7 +1,7 @@
 {
   "name": "wave-workbench",
   "displayName": "Wave Workbench — Verilator Waveforms & RTL Debugging",
-  "version": "0.9.23",
+  "version": "0.9.33",
   "publisher": "andreafrederica",
   "description": "Debug Verilator FST and VCD in VS Code with elaborated RTL hierarchy, waveform projects, Tcl and MCP. Supports Verdi FSDB and KDB.",
   "license": "MPL-2.0",
@@ -180,22 +180,22 @@
       },
       {
         "command": "waveWorkbench.traceWaveDrivers",
-        "title": "追踪波形信号的驱动",
+        "title": "%command.traceWaveDrivers%",
         "icon": "$(arrow-up)"
       },
       {
         "command": "waveWorkbench.traceWaveLoads",
-        "title": "追踪波形信号的负载",
+        "title": "%command.traceWaveLoads%",
         "icon": "$(arrow-down)"
       },
       {
         "command": "waveWorkbench.traceWaveAtCursor",
-        "title": "追踪 A 游标处的波形信号",
+        "title": "%command.traceWaveAtCursor%",
         "icon": "$(target)"
       },
       {
         "command": "waveWorkbench.openTraceSchematic",
-        "title": "打开本次追踪原理图",
+        "title": "%command.openTraceSchematic%",
         "icon": "$(type-hierarchy)"
       },
       {
@@ -220,7 +220,7 @@
       },
       {
         "command": "waveWorkbench.showLiveWave",
-        "title": "Wave Workbench: 显示实时波形"
+        "title": "%command.showLiveWave%"
       },
       {
         "command": "waveWorkbench.debugLiveTrace",
@@ -240,12 +240,12 @@
       },
       {
         "command": "waveWorkbench.traceAddSignal",
-        "title": "添加到波形",
+        "title": "%command.traceAddSignal%",
         "icon": "$(add)"
       },
       {
         "command": "waveWorkbench.traceOpenNodeSource",
-        "title": "跳转到 RTL 源码",
+        "title": "%command.traceOpenNodeSource%",
         "icon": "$(go-to-file)"
       },
       {
@@ -266,27 +266,27 @@
       },
       {
         "command": "waveWorkbench.openPicker",
-        "title": "Wave Workbench: 打开波形文件…",
+        "title": "%command.openPicker%",
         "icon": "$(folder-open)"
       },
       {
         "command": "waveWorkbench.openLast",
-        "title": "Wave Workbench: 一键打开上次波形",
+        "title": "%command.openLast%",
         "icon": "$(history)"
       },
       {
         "command": "waveWorkbench.openRecent",
-        "title": "Wave Workbench: 最近打开的波形和工程…",
+        "title": "%command.openRecent%",
         "icon": "$(history)"
       },
       {
         "command": "waveWorkbench.runTcl",
-        "title": "Wave Workbench: 执行 nWave Tcl 命令…",
+        "title": "%command.runTcl%",
         "icon": "$(terminal)"
       },
       {
         "command": "waveWorkbench.runScript",
-        "title": "Wave Workbench: 运行 nWave Tcl 脚本…",
+        "title": "%command.runScript%",
         "icon": "$(play)"
       },
       {
@@ -336,34 +336,50 @@
       },
       {
         "command": "waveWorkbench.cacheStats",
-        "title": "Wave Workbench: 查看波形缓存统计",
+        "title": "%command.cacheStats%",
         "icon": "$(database)"
       },
       {
         "command": "waveWorkbench.showSidebar",
-        "title": "Wave Workbench: 打开波形侧边栏",
+        "title": "%command.showSidebar%",
         "icon": "$(layout-sidebar)"
       },
       {
         "command": "waveWorkbench.debugLayout",
-        "title": "Wave Workbench: 上方代码 / 下方波形",
+        "title": "%command.debugLayout%",
         "icon": "$(layout)"
       },
       {
+        "command": "waveWorkbench.dockWave",
+        "title": "%command.dockWave%"
+      },
+      {
+        "command": "waveWorkbench.showTclConsole",
+        "title": "%command.showTclConsole%"
+      },
+      {
+        "command": "waveWorkbench.showPanelTrace",
+        "title": "%command.showPanelTrace%"
+      },
+      {
+        "command": "waveWorkbench.configureLayout",
+        "title": "%command.configureLayout%"
+      },
+      {
         "command": "waveWorkbench.saveProject",
-        "title": "Wave Workbench: 保存波形工程…"
+        "title": "%command.saveProject%"
       },
       {
         "command": "waveWorkbench.openProject",
-        "title": "Wave Workbench: 打开波形工程…"
+        "title": "%command.openProject%"
       },
       {
         "command": "waveWorkbench.exportClip",
-        "title": "Wave Workbench: 截取 / 导出波形…"
+        "title": "%command.exportClip%"
       },
       {
         "command": "waveWorkbench.selectBackend",
-        "title": "Wave Workbench: 选择 FSDB 后端…",
+        "title": "%command.selectBackend%",
         "icon": "$(server-process)"
       }
     ],
@@ -378,7 +394,7 @@
       "explorer/context": [
         {
           "command": "waveWorkbench.open",
-          "when": "resourceExtname == .fsdb || resourceExtname == .fst || resourceExtname == .vcd || resourceExtname == .wdb || resourceExtname == .wlf || resourceExtname == .raw || resourceExtname == .psfascii || resourceExtname == .tran || resourceExtname == .dsn",
+          "when": "resourceExtname == .fsdb || resourceExtname == .fst || resourceExtname == .vcd || resourceExtname == .wdb || resourceExtname == .wlf || resourceExtname == .raw || resourceExtname == .psfascii || resourceExtname == .tran || resourceFilename =~ /\\.tran\\.dat$/i || resourceExtname == .dsn || resourceExtname == .trn || resourceExtname == .psfxl || resourceExtname == .shm || resourceExtname == .psfbin || resourceExtname == .psf || resourceExtname == .ac || resourceExtname == .dc || resourceExtname == .noise || resourceExtname == .info || resourceExtname == .pz || resourceExtname == .xf || resourceExtname == .stb || resourceExtname == .sparam || resourceExtname == .sp || resourceExtname == .sweep",
           "group": "navigation"
         },
         {
@@ -415,47 +431,47 @@
       "view/item/context": [
         {
           "command": "waveWorkbench.traceOpenNodeSource",
-          "when": "view == waveWorkbench.traceExplorer && viewItem =~ /traceSource/",
+          "when": "(view == waveWorkbench.traceExplorer || view == waveWorkbench.panelTrace) && viewItem =~ /traceSource/",
           "group": "navigation@1"
         },
         {
           "command": "waveWorkbench.traceAddSignal",
-          "when": "view == waveWorkbench.traceExplorer && viewItem =~ /traceSignal.*traceWaveform/",
+          "when": "(view == waveWorkbench.traceExplorer || view == waveWorkbench.panelTrace) && viewItem =~ /traceSignal.*traceWaveform/",
           "group": "inline"
         },
         {
           "command": "waveWorkbench.traceAddSignal",
-          "when": "view == waveWorkbench.traceExplorer && viewItem =~ /traceWaveform/",
+          "when": "(view == waveWorkbench.traceExplorer || view == waveWorkbench.panelTrace) && viewItem =~ /traceWaveform/",
           "group": "navigation@2"
         },
         {
           "command": "waveWorkbench.traceCopySignal",
-          "when": "view == waveWorkbench.traceExplorer && viewItem =~ /traceSignal/"
+          "when": "(view == waveWorkbench.traceExplorer || view == waveWorkbench.panelTrace) && viewItem =~ /traceSignal/"
         },
         {
           "command": "waveWorkbench.traceFromSignal",
-          "when": "view == waveWorkbench.traceExplorer && viewItem =~ /traceSignal|traceTemporalFrontier/"
+          "when": "(view == waveWorkbench.traceExplorer || view == waveWorkbench.panelTrace) && viewItem =~ /traceSignal|traceTemporalFrontier/"
         }
       ],
       "view/title": [
         {
           "command": "waveWorkbench.traceWaveDrivers",
-          "when": "view == waveWorkbench.traceExplorer",
+          "when": "view == waveWorkbench.traceExplorer || view == waveWorkbench.panelTrace",
           "group": "navigation@1"
         },
         {
           "command": "waveWorkbench.traceWaveLoads",
-          "when": "view == waveWorkbench.traceExplorer",
+          "when": "view == waveWorkbench.traceExplorer || view == waveWorkbench.panelTrace",
           "group": "navigation@2"
         },
         {
           "command": "waveWorkbench.traceWaveAtCursor",
-          "when": "view == waveWorkbench.traceExplorer",
+          "when": "view == waveWorkbench.traceExplorer || view == waveWorkbench.panelTrace",
           "group": "navigation@3"
         },
         {
           "command": "waveWorkbench.openTraceSchematic",
-          "when": "view == waveWorkbench.traceExplorer",
+          "when": "view == waveWorkbench.traceExplorer || view == waveWorkbench.panelTrace",
           "group": "navigation@4"
         },
         {
@@ -493,6 +509,51 @@
             "filenamePattern": "**/*.shm/*.dsn"
           },
           {
+            "filenamePattern": "**/*.shm/*.trn"
+          },
+          {
+            "filenamePattern": "*.psfxl"
+          },
+          {
+            "filenamePattern": "*.tran.dat"
+          },
+          {
+            "filenamePattern": "*.psfbin"
+          },
+          {
+            "filenamePattern": "*.psf"
+          },
+          {
+            "filenamePattern": "*.ac"
+          },
+          {
+            "filenamePattern": "*.dc"
+          },
+          {
+            "filenamePattern": "*.noise"
+          },
+          {
+            "filenamePattern": "*.info"
+          },
+          {
+            "filenamePattern": "*.pz"
+          },
+          {
+            "filenamePattern": "*.xf"
+          },
+          {
+            "filenamePattern": "*.stb"
+          },
+          {
+            "filenamePattern": "*.sparam"
+          },
+          {
+            "filenamePattern": "*.sweep"
+          },
+          {
+            "filenamePattern": "*.sp"
+          },
+          {
             "filenamePattern": "*.wdb"
           },
           {
@@ -514,6 +575,12 @@
     "configuration": {
       "title": "Wave Workbench",
       "properties": {
+        "waveWorkbench.autoSplit": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "description": "%setting.autoSplit%"
+        },
         "waveWorkbench.xceliumHome": {
           "type": "string",
           "scope": "machine",
@@ -612,16 +679,30 @@
         },
         "waveWorkbench.cacheSizeMB": {
           "type": "integer",
+          "default": 128,
+          "minimum": 0,
+          "maximum": 1048576,
+          "description": "%setting.cacheSizeMB%"
+        },
+        "waveWorkbench.psfxlMemoryCacheSizeMB": {
+          "type": "integer",
           "default": 64,
           "minimum": 0,
-          "maximum": 512,
-          "description": "Rust decoded waveform LRU cache budget in MiB per waveform backend. Reopen waveform to apply. Does not bound SDK or total process memory."
+          "maximum": 1048576,
+          "description": "%setting.psfxlMemoryCacheSizeMB%"
+        },
+        "waveWorkbench.psfxlCacheSizeMB": {
+          "type": "integer",
+          "default": 768,
+          "minimum": 0,
+          "maximum": 1048576,
+          "description": "%setting.psfxlCacheSizeMB%"
         },
         "waveWorkbench.mcpEnabled": {
           "type": "boolean",
           "default": false,
           "scope": "window",
-          "description": "Enable the same-user local Wave Workbench MCP bridge. Reload the VS Code window after changing this setting."
+          "description": "%setting.mcpEnabled%"
         },
         "waveWorkbench.lzoLibraryPath": {
           "type": "string",
@@ -647,8 +728,23 @@
     "viewsContainers": {
       "panel": [
         {
+          "id": "waveWorkbenchWavePanel",
+          "title": "%container.waveWorkbenchWavePanel%",
+          "icon": "media/activity-wave.svg"
+        },
+        {
+          "id": "waveWorkbenchTclPanel",
+          "title": "%container.waveWorkbenchTclPanel%",
+          "icon": "media/activity-wave.svg"
+        },
+        {
+          "id": "waveWorkbenchTracePanel",
+          "title": "%container.waveWorkbenchTracePanel%",
+          "icon": "media/activity-wave.svg"
+        },
+        {
           "id": "waveWorkbenchLive",
-          "title": "实时波形",
+          "title": "%container.waveWorkbenchLive%",
           "icon": "media/activity-wave.svg"
         }
       ],
@@ -663,15 +759,35 @@
     "viewsWelcome": [
       {
         "view": "waveWorkbench.traceExplorer",
-        "contents": "选中一条 RTL 波形信号，再开始追踪。\n[追踪驱动](command:waveWorkbench.traceWaveDrivers)\n[追踪负载](command:waveWorkbench.traceWaveLoads)\n[追踪 A 游标](command:waveWorkbench.traceWaveAtCursor)"
+        "contents": "%trace.welcome%"
       }
     ],
     "views": {
+      "waveWorkbenchWavePanel": [
+        {
+          "type": "webview",
+          "id": "waveWorkbench.panelWave",
+          "name": "%view.waveWorkbench.panelWave%"
+        }
+      ],
+      "waveWorkbenchTclPanel": [
+        {
+          "type": "webview",
+          "id": "waveWorkbench.panelTcl",
+          "name": "%view.waveWorkbench.panelTcl%"
+        }
+      ],
+      "waveWorkbenchTracePanel": [
+        {
+          "id": "waveWorkbench.panelTrace",
+          "name": "%view.waveWorkbench.panelTrace%"
+        }
+      ],
       "waveWorkbenchLive": [
         {
           "type": "webview",
           "id": "waveWorkbench.liveWave",
-          "name": "在线仿真",
+          "name": "%view.waveWorkbench.liveWave%",
           "icon": "media/activity-wave.svg"
         }
       ],
@@ -679,7 +795,7 @@
         {
           "type": "webview",
           "id": "waveWorkbench.control",
-          "name": "波形与 Tcl 指令",
+          "name": "%view.waveWorkbench.control%",
           "contextualTitle": "Wave Workbench"
         },
         {
@@ -708,6 +824,7 @@
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^4.1.1",
     "esbuild": "^0.27.7",
+    "monaco-editor": "0.57.0",
     "prettier": "3.6.2",
     "pureimage": "0.4.20",
     "typescript": "~5.9.3"

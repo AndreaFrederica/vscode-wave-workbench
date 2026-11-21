@@ -7,6 +7,7 @@ import * as path from "node:path";
 import type {
   ConstantPortDriver,
   DesignGenerateLabel,
+  DesignGenerateScope,
   DesignHierarchicalAccess,
   DesignPortLink,
   DesignSession,
@@ -50,6 +51,7 @@ interface AstNode {
   level?: number;
   inLibrary?: boolean;
   implied?: boolean;
+  unnamed?: boolean;
   isTemp?: boolean;
   modp?: string;
   modName?: string;
@@ -72,6 +74,7 @@ interface AstNode {
   lsbp?: AstNode[];
   widthConst?: number;
   declRange?: string;
+  range?: string;
   declElWidth?: number;
   stmtsp?: AstNode[];
   itemsp?: AstNode[];
@@ -81,6 +84,7 @@ interface AstNode {
 
 interface Contents {
   scopes: AstNode[];
+  impliedBranches: AstNode[];
   variables: Map<string, AstNode>;
 }
 
@@ -221,6 +225,7 @@ export class VerilatorDesign implements DesignSession {
   private definitions = new Map<string, AstNode>();
   private definitionsByName = new Map<string, AstNode | null>();
   private interfaceTypes = new Map<string, AstNode>();
+  private packedRanges = new Map<string, [number, number]>();
   private scopes = new Map<string, Scope>();
   private roots: Scope[] = [];
   private contents = new WeakMap<AstNode, Contents>();
@@ -290,6 +295,17 @@ export class VerilatorDesign implements DesignSession {
     for (const type of types) {
       if (type.type === "IFACEREFDTYPE" && type.addr)
         this.interfaceTypes.set(type.addr, type);
+      if (
+        type.type === "BASICDTYPE" &&
+        type.addr &&
+        typeof type.range === "string"
+      ) {
+        const match = /^(-?\d+):(-?\d+)$/.exec(type.range);
+        if (!match) continue;
+        const bounds: [number, number] = [Number(match[1]), Number(match[2])];
+        if (bounds.every(Number.isSafeInteger))
+          this.packedRanges.set(type.addr, bounds);
+      }
     }
     for (const [id, file] of Object.entries(files)) {
       const original = file.realpath || file.filename;
@@ -407,7 +423,11 @@ export class VerilatorDesign implements DesignSession {
   private members(node: AstNode): Contents {
     const cached = this.contents.get(node);
     if (cached) return cached;
-    const result: Contents = { scopes: [], variables: new Map() };
+    const result: Contents = {
+      scopes: [],
+      impliedBranches: [],
+      variables: new Map(),
+    };
     const pending = [...(node.stmtsp || []), ...(node.itemsp || [])];
     while (pending.length) {
       const member = pending.pop();
@@ -415,6 +435,17 @@ export class VerilatorDesign implements DesignSession {
         result.variables.set(rtlName(member), member);
       } else if (isHierarchyNode(member)) {
         result.scopes.push(member);
+      } else if (
+        member.type === "GENBLOCK" &&
+        member.implied &&
+        instanceName(member)
+      ) {
+        // Verilator also emits an implied block containing only the loop genvar.
+        const items = [...(member.stmtsp ?? []), ...(member.itemsp ?? [])];
+        if (
+          items.some((item) => item.type !== "VAR" || item.varType !== "GENVAR")
+        )
+          result.impliedBranches.push(member);
       } else if (!member.implied) {
         for (const child of member.stmtsp || []) pending.push(child);
         for (const child of member.itemsp || []) pending.push(child);
@@ -633,17 +664,59 @@ export class VerilatorDesign implements DesignSession {
     const pending = [definition];
     while (pending.length) {
       const node = pending.pop()!;
-      if (node.type === "GENBLOCK" && !node.implied) {
+      if (node.type === "GENBLOCK" && (!node.implied || node.unnamed)) {
         const name = instanceName(node);
         const position = this.sourcePosition(node.loc);
         if (name && position.file && position.line && position.column)
-          labels.push({ ...position, name });
+          labels.push({
+            ...position,
+            name,
+            unnamed: node.unnamed || undefined,
+          });
       }
       for (const child of node.stmtsp ?? []) pending.push(child);
       for (const child of node.itemsp ?? []) pending.push(child);
     }
     this.generateLabelsByDefinition.set(definition, labels);
     return labels;
+  }
+
+  private generateScopeNodes(container: AstNode) {
+    const { scopes, impliedBranches } = this.members(container);
+    return [
+      ...scopes.filter((node) => node.type === "GENBLOCK"),
+      ...impliedBranches,
+    ];
+  }
+
+  private generateContainer(instance: string): AstNode | undefined {
+    const physical = this.lookup(instance);
+    if (physical)
+      return physical.node.type === "CELL"
+        ? physical.definition
+        : physical.node;
+    const dot = instance.lastIndexOf(".");
+    if (dot < 0) return;
+    const parent = this.generateContainer(instance.slice(0, dot));
+    if (!parent) return;
+    const name = instance.slice(dot + 1);
+    const matches = this.generateScopeNodes(parent).filter(
+      (node) => instanceName(node) === name,
+    );
+    if (matches.length === 1) return matches[0];
+  }
+
+  generateScopes(instance: string): readonly DesignGenerateScope[] {
+    const container = this.generateContainer(instance);
+    if (!container) return [];
+    return this.generateScopeNodes(container)
+      .map((node) => ({
+        fullname: instance + "." + instanceName(node),
+        ...this.sourcePosition(node.loc),
+      }))
+      .sort((a, b) =>
+        a.fullname.localeCompare(b.fullname, "en", { numeric: true }),
+      );
   }
 
   private childScopes(scope: Scope) {
@@ -705,6 +778,7 @@ export class VerilatorDesign implements DesignSession {
       fullname,
       kind: node.varType === "WIRE" ? "npiNet" : "npiReg",
       module: rtlName(parent.definition),
+      packedRange: node.dtypep && this.packedRanges.get(node.dtypep),
     };
   }
 

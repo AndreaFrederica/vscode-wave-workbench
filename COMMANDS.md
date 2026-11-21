@@ -188,9 +188,13 @@ MCP 客户端可以直接使用两个工具，无需编排 Tcl。
 
 到达静态遍历预算时，`staticCoverage.stops[].continuationSignals` 给出已与当前波形核对的带位下标路径，可以直接作为下一次 Driver 或 Load 查询的 `signal`。整信号可使用 `canRetrace` 为真的停止项中的 `path`。路径采用波形层级名称，包括已配置的层级映射。前沿信号未 dump 或无法核对时，停止项带有 `waveformUnavailable`，并保留 RTL 位置或路径供检查。每页均保留前沿节点的信号信息。
 
-Trace Explorer 在可续查的静态前沿显示 **Continue from**。选择该项可用对应的信号或位继续当前方向的查询。
+同一总线只采集部分位时，已采集位仍可自动续查。缺位以 `unavailableBits` 保留在 `staticCoverage.stops` 和合并图 `gaps` 中。即使待查队列耗尽，覆盖仍为 `partial`。位依赖可使用修改版 VIDE 提供的固定字面量声明范围，或用 VCS KDB、Verilator 展开树提供的一维总线实例范围。
 
-`wave_trace_drivers` 和 `wave_trace_loads` 可传入 `followContinuations` 自动续查，取值为 1 到 8，表示根查询之后最多执行的不同信号查询数。深度、信号数和赋值数预算分别应用于每次查询。`staticContinuationWalk` 包含各次查询的静态图、前沿链接、未查入口及停止原因。链接的 `segment` 和 `nextSegment` 使用 0 表示根查询，其余编号按续查顺序排列。`format: "mermaid"` 附加总览，`detail: "full"` 附加每段依赖图及源码位置。波形源码菜单的 **自动续查上游驱动** 使用四次续查预算，并在 VS Code 打开报告。
+在时间因果图中，若 RTL 声明范围已确认，`waveformBitsUnavailable` 表示表达式需要的位未包含在波形采样中。图仍保留已采集位的观测和续查入口。需要缺失位的表达式求值保持未确认。
+
+Trace Explorer 在可续查的静态前沿显示 **Continue from**。在合并静态图中选择待查信号或位时，只续查该分支，并将结果接回原图。重新打开 VS Code 后，已保存且通过输入核验的静态图也支持这项操作。
+
+`wave_trace_drivers` 和 `wave_trace_loads` 可传入 `followContinuations` 自动续查，取值为 0 到 8，表示根查询之后最多执行的不同信号查询数。设为 0 时可在续查前用 `output: "paged"` 查看静态前沿。深度、信号数和赋值数预算分别应用于每次查询。`staticContinuationWalk` 包含各次查询的静态图、前沿链接、未查入口及停止原因。链接的 `segment` 和 `nextSegment` 使用 0 表示根查询，其余编号按续查顺序排列。`format: "mermaid"` 附加总览，`detail: "full"` 附加每段依赖图及源码位置。波形源码菜单的 **自动续查上游驱动** 使用四次续查预算，并在 VS Code 打开报告。
 
 `staticContinuationGraph` 将根查询和续查合成一张静态依赖图。相同实例中的同一声明共用节点，赋值保留读写位、源码位置和 `sources` 中的原始查询编号及赋值索引。未解决的停止项保存在 `gaps`，并在 `staticContinuationGraphMermaid` 中以虚线连接。涉及位投影时，`feedbackScope` 为 `segmentsAndKnownBits`，反馈来自原始查询或可跨段核对的位依赖。详细报告也包含合并图。
 
@@ -205,6 +209,34 @@ MCP 客户端可取消进行中的 Trace 查询，桥接进程会释放该请求
 Trace Explorer 的 **Observed transitions** 列出时间因果图中的变化。选择一行会定位波形 A 游标，展开该行可打开关联赋值的源码。移动 A 游标会刷新侧栏的值和时间证据。
 
 运行离线或在线的自动续查后，Trace Explorer 的 **Combined time graph** 从原查询的变化开始显示因果路径。展开赋值可查看上游采样和已接上的续查，选择采样可定位波形 A 游标，选择赋值可打开其对应的 RTL。**Remaining trace gaps** 提供尚待续查及无法核对的证据。合并图固定在原查询的时间点，选中上游采样后仍可继续展开。
+
+合并 Mermaid 时间图的证据边会标出对应的 RTL 赋值。比如 `S2/A5` 表示第 2 次续查的第 5 条赋值，`S0` 表示根查询。详细 Markdown 的 **RTL assignment source index** 列出实例和源文件行列。MCP 分页的 `assignmentSources` 可按 `segment: 2` 和从 0 开始的 `assignment: 4` 查到同一位置。
+
+**Remaining trace gaps** 在缺口超过 128 条时按范围分组。展开一组即可检查对应缺口，带续查入口的缺口行仍可直接发起查询。
+
+合并时间图的 `gapSummary` 和分页 `graphSnapshot.metadata.gapSummary` 按原因统计已接合、待查、未匹配和未解决的缺口。详细报告显示同一张汇总表。多个缺口可共享同一个待查入口，因此 `pending` 统计缺口，`frontier` 列出不同的续查请求。遇到 `gapBudget` 时，汇总只覆盖已保留的缺口。
+
+当自动历史搜索能沿连续采样回溯到 tick 0，且总线只变动过其他位时，位级续查可以接回该位的初始波形采样。合并时间图的节点带有 `initialSample: true`，Mermaid 和 Trace Explorer 会标注初始采样。搜索未覆盖到起点或首次采样晚于 tick 0 时，沿用可核实的历史和缺口。
+
+`unprovenInitialOrder` 表示输入有 tick 0 的初始采样，求值时是否已经读到该值仍待核实。缺口保留采样值、关联的 RTL 赋值及目标时间节点，详细报告和图表显示同一原因。
+
+传入 `executionLog` 后，初始波形采样可以关联同槽中可核实的提交。`initialSampleMatched` 表示记录确认了初始值的写入。对于整条 packed 总线，`initialPackedSampleMatched` 表示部分或全部位已按回调查到改变该位的提交，图中标出每次提交贡献的位段及仍未核对的位。若探针记录了赋值求值时的操作数，时间图会显示实际读取的值。完整的执行覆盖可把该值进一步连接到本次求值前已确认的同槽阻塞写入。
+
+在线 `wave_live_trace` 在分页响应中返回 `executionReplayMatch`。根信号和上游各自核对在线事件序列。合并图标注操作数的采集求值序号，以及已确认写入的求值和提交。
+
+有绑定核对结果的 `unmapped` 缺口带有 `bindingIssue`。`gapSummary.byBindingIssue` 统计未找到波形、波形类型不支持、重名、设计库查找失败、源码位置缺失和声明不匹配等情况。详细报告的 **Waveform binding issue** 表显示相同的细分。
+
+修改版 VIDE 可返回 `packageParameterValue`，包含 RTL package 参数的位串、符号和声明关联。时间图将已确认的参数用作数据与守卫的操作数。无法求值时返回 `packageParameterValueUnavailable`，并保留声明位置。
+
+VIDE 用 `instanceParameter` 标记可在展开时决定的参数。独立 KDB 或 Verdi NPI 提供参数值时，Wave Workbench 核对实例和声明后返回 `instanceParameterValue`，并用实际展开值核对数据和守卫。Verdi NPI 桥接保留整型及位向量参数的位宽、符号和 X/Z。当前提供方无法确认值时，时间图返回 `instanceParameterValueUnavailable` 和 RTL 声明位置。
+
+修改版 VIDE 可为位宽已确认的枚举提供 `enumValue`。支持同宽整数位串、可核对的 package 参数位宽、有符号值的补码，以及从零或已知值开始的隐式递增。最多 128 位且无 X/Z 的整数初始化表达式支持混合位宽、一元 `+`、`-`、`~`，以及加、减、乘和按位与、或、异或、同或。表达式可引用解析到的包枚举项、以整数字面量初始化的推导类型包参数，以及声明位宽和初始化表达式都可核对的包参数。嵌套有符号运算若可能因仿真器的扩展方式而改变值，会在追踪中保留为缺口。时间图将已确认的 RTL 常量用于赋值和守卫核对，并保留枚举项声明位置。
+
+字面量枚举范围支持 `NAME[N]` 和升序或降序的 `NAME[N:M]`。值沿声明顺序递增，各生成项共享原声明位置。遇到无法确认的初始化表达式或范围时，递增序列从下一个可确认值恢复。
+
+修改版 VIDE 返回 `enumValueUnavailable` 时，时间追踪将该枚举项计入同名缺口，并保留枚举声明位置。MCP 的 `gaps`、Mermaid、详细报告、Trace Explorer 与追踪原理图均显示该原因。波形绑定统计继续用于波形对象。
+
+有执行记录时，合并时间节点的 `recordedWordEvidence` 按查询段和段内节点保留整字的写入、待确认位范围和同槽回调。Mermaid 和 **Recorded packed word evidence** 报告显示实际提交与贡献的位段。Trace Explorer 的赋值行和追踪原理图的提交节点可以定位对应 RTL。
 
 游标处的采样值保持时，`wave_trace_context` 的 `cursorWriters` 可显示触发和守卫是否排除已列写入路径，以及是否存在同值写入候选。匹配的执行记录可核对实际提交。当完整执行记录和波形共同确认最近一次提交是同值写入时，离线及在线时间图可从该提交回溯。根节点返回 `sameValueWrite: true`，并附提交序号、求值时刻和赋值索引。自动历史窗口可围绕提交时刻采样，显式 `changeOrder` 仍指向所选波形变化。
 
@@ -238,13 +270,25 @@ VCD 或 FST 在同一 tick 记录根信号的多次变化时，`assignmentCandid
 
 要让 MCP 从一个信号尽量展开可达关系，可在静态、离线或在线追踪请求中传入 `expandReachable: true`。未显式传入的静态限制采用深度 256、信号和赋值各 4096 的上限，动态时间图上限为 1024 个节点和 4096 条边。显式的静态预算优先。遇到预算、未解析关系或证据缺口时，响应会保留已有结果并标明停止原因。
 
-`wave_trace_context` 和 `wave_live_trace` 可通过 `maxTemporalNodes` 与 `maxTemporalEdges` 调整时间图预算，分别最多 4096 和 16384。多个候选赋值连接同一对时间节点且证据属性相同时，会共用一条边。边的 `assignment` 和可选的 `alsoAssignments` 保存全部对应的静态赋值编号。
+`wave_trace_context` 和 `wave_live_trace` 可通过 `maxTemporalNodes` 与 `maxTemporalEdges` 调整时间图预算，分别最多 4096 和 16384。用 `maxTemporalGaps` 可独立设置每段保留的缺口数，默认等于边预算，最多 16384。缺口达到预算时优先保留不同的续查入口，并用 `gapBudget` 标记省略了部分记录。多个候选赋值连接同一对时间节点且证据属性相同时，会共用一条边。边的 `assignment` 和可选的 `alsoAssignments` 保存全部对应的静态赋值编号。
 
 仿真构建也可在波形旁写入同名清单，例如 `trace.fst.wave-build.json`。当查询没有显式或已关联的配置时，插件会自动检查清单与波形的 SHA-256，再加载其 TB、RTL 和编译选项。原有 filelist 关联仍优先。
+
+构建清单只记录了部分编译文件的哈希时，可设置 `"files_complete": false`。VIDE 加载的其余文件会逐项列入核验限制，构建状态为 `unverified`，仍可查询波形时间因果。清单中已列文件缺失或哈希不同，以及编译根、库、宏、顶层或参数发生冲突，仍返回 `mismatched`。完整的哈希清单使用 `true`，省略此字段时默认按完整清单核对。已注明 VCS 重建元数据缺少头文件哈希的旧清单也支持部分核验。
 
 已选 filelist 或 `vide.toml` 时，匹配波形的同名清单仍可用于核对实际编译配置和源码。头文件被替换或删除时，时间追踪保留波形观测，并报告构建差异。若波形旁的清单属于别的仿真，显式选择的项目仍可用于查询。
 
 附加 VCS KDB 后，缺少显式配置和波形清单时，插件可从 VCS 生成的 `vcs_rebuild` 恢复顶层、宏和 filelist，生成隔离的 VIDE 配置。相对路径优先按 `simv.kdb` 记录且与输出路径吻合的编译目录解析，支持源码与 `simv` 产物放在不同目录。编译命令省略 `-top` 时可采用 `simv.kdb` 记录的实际顶层。报告列出元数据来源、采用的编译目录及未映射的选项。选择工作区 VIDE 配置可关闭当前波形的自动发现。
+
+VCS `-timescale=1ns/1ps` 写入构建清单和隔离 VIDE 配置的 `default_timescale`。当前修改版 VIDE 将其用于缺少显式时间声明的设计单元，并在 `compilation.defaultTimescale` 和详细报告中返回该配置。构建核对比较两端的默认时间尺度，波形图的 tick 单位由 VCD、FST 或 FSDB 文件提供。旧清单缺少这一字段时，如果实际配置有默认时间尺度，报告会标为 `unverified`。尚未映射的时间覆盖选项继续列为构建限制。
+
+VCS `-P` 指定的 PLI 表及其链接对象会出现在项目配置预览和追踪报告中。用 `record-trace-run.mjs --vcs-kdb` 启动仿真时，记录可读取文件的 SHA-256 和表中声明的系统调用名称。MCP 的 `buildVerification.vcsPli` 返回各文件相对于本次记录的状态。时间图的 `externalPliCallbacks` 表示回调引起的写入、读入及调用顺序仍缺执行证据。
+
+修改版 VIDE 通过生成配置的 `external_system_calls` 接收 PLI 调用名称。可直接赋值的实参会成为候选读写目标，算式中的信号作为候选输入。Driver、Load 和时间图可定位调用源码。实参访问方向和回调内部行为继续保留为 `unresolvedSubroutineEffects`。
+
+对于可修改 C 源码的同步 PLI 回调，可用 `generate-vcs-pli` 建立调用点和 C 步骤映射，在回调中用 `wave_workbench_pli_evaluate` 与 `wave_workbench_pli_complete` 包住选定的信号写入。探针核对仿真实例与调用行，并采样写入后的实际值。用 `seal-vpi` 封装后，MCP 的 `executionLog` 可将匹配的提交、实参采样和 C 步骤接入时间图与报告。 [VCS PLI 复现步骤](test/fixtures/trace/README.md#vcs-pli-synchronous-write-probes)
+
+`record-trace-run.mjs --vcs-kdb` 直接运行对应的 VCS 可执行文件时会记录可执行文件的 SHA-256，并记录已识别的 Wave Workbench VPI 采集库哈希。在线 `wave_live_trace` 可以用这份波形清单和封装执行日志核验已采集的轨迹。`buildVerification.executionReplayEligible` 表示构建允许尝试逐事件比对，`executionReplayMatch` 返回实际比对结果。已匹配的回调可以归因，整体报告仍保留外部回调覆盖缺口。
 
 VCS 自动配置同时核对 `vcs_rebuild` 和 `simv.kdb`。任一文件变化都会使已加载的 VIDE 会话失效。VIDE 查询进行中发现输入变化时会停止该次查询，下一次查询按当前元数据恢复配置。
 
@@ -258,6 +302,13 @@ filelist 中列出的生成 RTL 暂时缺失时，跨端口追踪保留可解析
 
 ```sh
 node /path/to/scripts/record-trace-run.mjs --manifest build.json --waveform runtime.fsdb \
+  --input stimulus.hex -- ./simv +ENABLE +MODE=3
+```
+
+`--vcs-kdb simv.daidir` 可直接从本次 VCS 构建的重建元数据读取编译根、顶层、宏、库和 include 路径，包含实际编译的生成 testbench。可以同时提供 `--manifest` 复用已有的编译时哈希。如果 KDB 带有 `debug_dump/src_files_verilog`，脚本也保留其中所列 include 的编译时哈希。只有 VCS 源文件清单覆盖编译根与库文件，且现有清单提供完整哈希时，才记录 `files_complete: true`。仿真期间的重建元数据、清单或源码变更会使脚本拒绝写入清单。从源码目录运行此选项前先执行 `npm run build`。
+
+```sh
+node /path/to/scripts/record-trace-run.mjs --vcs-kdb simv.daidir --waveform waves.fsdb \
   --input stimulus.hex -- ./simv +ENABLE +MODE=3
 ```
 
@@ -317,7 +368,9 @@ NPI 模式下，字面量输入会在 Driver 图和详细报告中显示为实�
 
 修改版 VIDE 与独立 KDB 可把命名循环 generate 内的连续赋值绑定到各展开实例，并筛选已展开的命名条件分支。Driver 与 Load 查询显示独立的局部信号和共享的父级信号。无法核对展开位置时，图保留候选并标记 `unresolvedGenerateBranch`。
 
-命名循环 generate 中的 genvar 可用于连续赋值的位选。Driver 与 Load 图记录每个展开实例的写入位，MCP 单比特时间追踪按写入位筛选候选。详细报告显示各赋值实例的 genvar 值。
+修改版 VIDE 回传匿名条件 `generate` 子句的源码范围。Verilator JSON 以文件、行和字节列核对具体实例的子句。VCS KDB 的独立后端与 Verdi NPI 在生成作用域的文件和行能够唯一对应子句时使用该分支。多个匿名子句共用同一行时，KDB 图保留候选并标记 `unresolvedGenerateBranch`。Driver、Load 和时间追踪共用该分支证据。
+
+VCS KDB 和 Verilator JSON 可追踪循环 generate 内使用 genvar 的连续赋值。Verilator 用各迭代的源码位置和父作用域核对命名及匿名块。VCS KDB 使用唯一源码行核对匿名块。Driver 与 Load 图记录每个实例写入的位，MCP 单比特时间追踪沿相应迭代回溯，详细报告保留 genvar 值。VCS 将生成作用域写进 VCD 信号名时，时间追踪按完整路径绑定到 KDB 声明。
 
 `wave_trace_drivers` 和 `wave_trace_loads` 的 `signal` 可指定一维 packed 总线中的单个位或固定范围，例如 `packed_feedback_tb.ascending_bus[1:2]`。范围使用声明的位序，完整声明范围可直接作为整总线信号名。静态结果按所选位传播，以 `inputs[].readBits`、`writtenBits` 和 `bitDependencies` 返回确定的读取位、可能写入的位及已解析的逐位关系。Trace Explorer、Mermaid 和详细报告显示对应的位索引。动态索引或位宽无法确定时保留可能相关的关系，超过按位预算时以 `bitTraceBudget` 报告并返回信号级关系。
 
@@ -337,7 +390,9 @@ NPI 模式下，字面量输入会在 Driver 图和详细报告中显示为实�
 
 如果已捕获的操作数和完整写入记录能确认最近一次提交，而该提交晚于上游最近的波形变化，时间图可连接到实际的同值写入。MCP 在边上返回 `sourceWriteEvidence: "recordedSameValueWrite"`，上游节点保留提交序号、时间和源码位置。同槽还有待定写入或日志覆盖不足时，图保留波形候选。
 
-对关联 VCS KDB 的波形调用 `wave_execution_map`，设置 `captureOperands: true` 后，符合条件的语句会带有 `sampleOperands`，可直接交给 `generate-vcs-nba`。适用于固定写入目标及最多八个各读取一次的简单局部按位操作数。其他语句仍返回普通映射。探针使用保存的局部值求 RHS，并在求值事件的 `operandValues` 中记录各值。MCP 和 Markdown 显示这些值，时间图用它们筛选上游路径。精确值来自同一插桩仿真。
+对关联 VCS KDB 的波形调用 `wave_execution_map`，设置 `captureOperands: true` 后，符合条件的阻塞赋值和 NBA 会带有 `sampleOperands`，可交给 `generate-vcs-nba`。适用于固定写入目标、最多八个各读取一次的局部操作数。支持按位运算、移位、三元选择和单个局部变量的固定 packed 位选或位段。其他语句仍返回普通映射。探针使用保存的局部值求 RHS，并在求值事件的 `operandValues` 中记录各值。MCP 和 Markdown 显示这些值。移位量或三元条件的求值操作数齐全且位宽匹配时，时间图使用该次求值的数值确定数据位和分支。
+
+当波形只保留 tick 0 槽末的一位初始值，回放仍可依据完整的写入记录和该位的前后值变化回调关联阻塞提交。两次回调之间须能确定哪次写入改变了该位，后续同值写入保留在执行报告中。缺少回调、写入或源码证据时保留相应的追踪缺口。
 
 未采集操作数的波形，或波形中找不到与实录值相符的变化时，时间图在求值 tick 显示实录样本，并提供 `operandEvaluationOrdinal`。该节点记录采样值。相关波形缺口仍出现在图和报告中，操作数更早的变化需要独立的历史证据。
 
@@ -357,7 +412,7 @@ VCS 可通过 VPI 为选定的信号记录值变化。同一次仿真的 VCD 或
 
 对同一条阻塞 modport 拼接赋值的重叠固定切片，MCP 可以根据完整的 VPI 回调筛选与该次变化相符的写入组件。位级时间图、Trace Explorer 和详细报告会标注唯一相符的范围，结构化节点同时返回 `compatibleModportComponent` 和对应的回调序号。候选筛选会比较整条目标总线和当时可能的 RHS 取值。 [VCS 复现步骤](test/fixtures/trace/README.md#vcs-value-change-recording)
 
-用同次仿真的 `executionLog` 回放 FSDB 时，如果完整的 VPI 记录与波形保留的变化顺序及槽末值一致，离线时间图可补入被合并的变化。`changeOrder` 可选中其中一次变化，MCP 节点以 `restoredFromCallbacks` 标注回调来源。原始波形样本和序列差异仍可在报告中核对。回调缺失或与波形冲突时继续使用原始波形，带执行提交记录的时间槽沿用提交回放。
+用同次仿真的 `executionLog` 回放 FSDB，或使用已核对的在线执行记录时，若完整的 VPI 回调与已保留变化的顺序及槽末值一致，时间图可补入被合并的变化。有提交记录的时间槽还要核对完整的提交序列能否重现回调变化。`wave_trace_context` 和 `wave_live_trace` 均可用 `changeOrder` 选中某次变化，节点以 `restoredFromCallbacks` 标注回调来源。报告保留原始波形或在线快照的变化。
 
 新版 VPI 记录的 `observationCoverage` 标明选定信号、开始时间和已核对的窗口。若某个信号在覆盖完整的窗口内保持稳定，回放可报告窗口内没有值变化回调。未选信号没有该覆盖项，截断记录则报告覆盖缺口。
 
@@ -370,6 +425,8 @@ VCS 可通过 VPI 为选定的信号记录值变化。同一次仿真的 VCD 或
 从命令面板运行 **Open Execution Recording** 可直接回放 JSONL，输入完整的实例信号路径和 tick。Trace Explorer 会列出执行事件和可用源码链接。通过波形菜单打开匹配记录时，执行事件也可以跳转到对应的波形 tick。MCP 在没有打开波形时也可以回放已有记录。传入 `recordingOnly: true` 可显式使用记录中的时间单位，波形身份在此模式下显示为未验证。
 
 执行记录可为多个实例信号声明覆盖。查询结果给出匹配实例的求值、提交、NBA 覆盖关系及覆盖缺口。标为 `end-of-slot` 的提交来自仿真时间槽结束时的采样。图中的序号表示记录顺序。记录包含源码哈希时，报告同时核对目前磁盘上的文件内容。 [执行记录示例](test/fixtures/trace/README.md#same-tick-writes-in-multiple-instances)
+
+长记录的回放检查点可在 VS Code 和静默 MCP 重启后复用。`scannedAfterOrdinal` 表示本次跳过的前缀中最后一个事件的序号，省略该字段表示从记录开头扫描。默认索引目录为用户主目录下的 `.wave-workbench/execution-index-v1`，最多保存 32 份索引，每份最多 2 MiB。可用 `WAVE_WORKBENCH_REPLAY_CACHE_DIR` 指定绝对路径，设为空可关闭磁盘索引。回放继续校验波形哈希、时基和当前源码，记录变化或索引损坏会触发重新扫描。
 
 `wave_trace_context` 的 `executionAssignments` 给出已关联的执行事件序号和 RTL 赋值数组索引。关联要求语句源码哈希相符，并能用坐标唯一定位到该信号的赋值。
 
@@ -391,7 +448,7 @@ VCS 可通过 VPI 为选定的信号记录值变化。同一次仿真的 VCD 或
 
 在线使用 **Start Live Trace Harness** 和 **Control Live Trace**，MCP 对应 `wave_live_status` 与 `wave_live_control`。`wave_live_trace` 对已绑定设计的信号，以实时 harness 样本生成时间图和报告。报告记录保留的时间窗口。样例包含 Verilator 记录及实时控制 harness。见 [Trace fixture](test/fixtures/trace/README.md)。
 
-在线时间图的预算前沿可以返回 `continuation`，其中的 `signal`、`tick` 和 `liveSessionId` 可直接传给 `wave_live_trace`。Trace Explorer 的 **Continue from** 查询同一会话保留的槽末快照。查询历史快照期间，仿真继续保持当前时间和状态。指定 tick 缺失或会话已替换时，查询返回错误。
+在线追踪结果、分页图的 Provider 和详细报告都会标记 `liveSessionId`。预算前沿返回的 `continuation` 可将 `signal`、`tick` 和 `liveSessionId` 直接传给 `wave_live_trace`。Trace Explorer 的 **Continue from** 和 **Trace Live Signal** 支持停止后保留的历史。查询读取槽末快照，仿真保持当前时间和状态。指定 tick 缺失或会话已替换时，查询返回错误。
 
 启动在线会话时，可以输入 JSON 配置运行目录、plusargs 和要核对哈希的激励文件。相对运行目录以可执行文件所在目录为基准，激励文件以运行目录为基准。留空使用可执行文件所在目录及空的 plusargs 列表。
 
@@ -419,23 +476,43 @@ VCS 离线录制追踪支持直接查询已采集的数组字，也可从读取�
 
 当 VCS 合并同一时间槽内的数组写入时，回放用同次仿真的回调与 FSDB 核对槽末值，并逐位比较变化序列。与未观测写入相交或变化序列不一致的位标为未解析。独立位段保留经核对的提交、求值和上游来源。
 
-对从二进制文件组装的小端数据字，可在 `seal-vpi` 的探针映射之后传入 `--task-transfers TASK_PROBES_JSON`。JSON 包含模块 `instance`、结构体成员 `signal`、调用输入和成员写入的语句 ID（`input`、`write`）、两处紧随相应提交的索引探针 ID（`inputIndex`、`writeIndex`），以及 `fileReads` 中的文件读取位置 ID。索引通过 task 自动形参传递，值为该字最后一个字节的偏移加一。成员回调须发生在对应写入的求值和提交之间。回放核对波形哈希、源码及静态形参与字段关系，再用采集的索引、字节和事件次序确认关联。
+对从二进制文件组装的小端数据字，可在 `seal-vpi` 的探针映射之后传入 `--task-transfers TASK_PROBES_JSON`。JSON 包含模块 `instance`、结构体成员 `signal`、调用输入和成员写入的语句 ID（`input`、`write`）、两处紧随相应提交的索引探针 ID（`inputIndex`、`writeIndex`），以及 `fileReads` 中的文件读取位置 ID。索引通过 task 自动形参传递，值为该字最后一个字节的偏移加一。成员回调须发生在对应写入的求值和提交之间。回放核对波形哈希、源码及静态形参与字段关系，再用采集的索引、字节和事件次序确认关联。续查合并后，时间图和可选报告仍保留关联的入参提交、成员写入、文件字节及源码。
 
 `wave_trace_context` 和 `wave_live_trace` 接受 `output: "report"`。响应包含完整 Markdown 报告及覆盖信息，配合 `format: "mermaid"` 还返回图源。原始图和波形采样可通过默认输出单独获取。
 
 批量续查可设 `output: "temporal"`。响应包含根信号采样、时间图、所引用的信号，以及以原赋值 ID 为键的 `assignmentSources`。时间图中的 `edges[].assignment`、`alsoAssignments` 和写入记录可直接查到源码位置。把 `context.temporalTrace.gaps[].continuation` 中的字段合入同一种查询即可继续。配合 `format: "mermaid"` 可输出时间图和可用的执行图，配合 `detail: "full"` 可附上完整报告。
 
-`wave_trace_context` 和 `wave_live_trace` 可设置 `followContinuations` 为 1 到 8，在一次调用中自动查询对应数量的上游变化。相同信号、tick、变化序号和在线会话的续查只执行一次。各段沿用本次查询的编译配置、波形或在线会话以及图预算。默认返回时间图模式，`format: "mermaid"` 与 `detail: "full"` 同样应用于续查结果。
+`wave_trace_context` 和 `wave_live_trace` 可设置 `followContinuations` 为 0 到 8，在一次调用中自动查询对应数量的上游变化。同一段生成的入口中，有执行回调证据的等待原因优先。接回该事件时会核对回调序号。设为 0 并使用 `output: "paged"` 时可先浏览 `frontier`，再用游标和 `frontierIndices` 按需续查。相同信号、tick、变化序号和在线会话的续查只执行一次。各段沿用本次查询的编译配置、波形或在线会话以及图预算。默认返回时间图模式，`format: "mermaid"` 与 `detail: "full"` 同样应用于续查结果。
 
 `continuationWalk.segments` 含每段的请求和结果或错误。根图编号为 0，续查段从 1 开始编号。`links` 的 `segment` 和 `gap` 指向来源图及其中的缺口，`nextSegment` 指向续查段或按相同编号顺延的 `remaining` 请求。查询数或用时到达预算时，链接和未处理请求仍可用于下一次调用。自动续查最多使用本次调用开始后 100 秒内剩余的时间。各图的覆盖状态继续报告静态和波形证据缺口。
 
-响应含 `continuationCursor` 时，可用 `wave_trace_resume` 将下一批结果接入同一张图。传入最新游标和可选的 `followContinuations`，每批默认续查 4 段，范围为 1 至 8。合并图保留已查询的段、节点编号和原始赋值索引。可加 `format: "mermaid"` 导出图，或用 `output: "report"` 获取根查询正文和各续查段的 Markdown。时间图续查保留初次查询的波形观测、构建校验或在线执行证据。每个 VS Code 扩展宿主最多保留 4 个游标。有效游标只能成功使用一次，仍有待查项时返回新游标。重新加载宿主、改变编译或波形输入、结束原在线会话都会使旧游标失效。
+响应含 `continuationCursor` 时，可用 `wave_trace_resume` 将下一批结果接入同一张图。传入最新游标和可选的 `followContinuations`，每批默认续查 4 段，范围为 1 至 8。合并图保留已查询的段、节点编号和原始赋值索引。可加 `format: "mermaid"` 导出图，或用 `output: "report"` 获取根查询正文和各续查段的 Markdown。时间图续查保留初次查询的波形观测、构建校验或在线执行证据。每个 VS Code 扩展宿主最多保留 4 个游标。有效游标只能成功使用一次，仍有待查项时返回新游标。重新加载宿主、改变编译或波形输入、用新仿真替换在线会话都会使旧游标失效。停止仿真或自然退出后，原会话保留的快照仍可续查。
 
 静态 Driver / Load、离线时间图和在线 Trace 也可设置 `followAllContinuations: true`。工具会持续查询可解析的前沿，直到队列为空、达到每次调用的 64 个续查入口上限，或用完 100 秒续查时限。该选项默认返回分页图。仍有待查入口时，使用返回的 `continuationCursor` 调用 `wave_trace_resume`，可用同一选项继续。自动遍历与 1–8 次的手动预算 `followContinuations` 分别使用。队列耗尽后仍以图的覆盖状态和 `gaps` 判断有无未解析的关系或缺失观测。
 
+显式提供 `filelist` 时，每个 MCP 调用在本批追踪和续查中复用隔离的 VIDE 工程。调用结束后释放工程。下一批 `wave_trace_resume` 会先复核原输入。合并时间节点和缺口中的 `point.signal`、`evidence.signal` 是来源段内编号。跨请求核对信号时使用合并结果中的完整 `signal` 路径。
+
+静态 Driver、Load 和时间图都支持按 `frontierIndices` 指定本批要续查的 1–8 个入口。先读取最新图快照的 `frontier`，用 `offset` 加上条目在页内的位置得到从 0 开始的编号。将编号和同一批返回的 `continuationCursor` 传给 `wave_trace_resume`。按给定顺序查询，其他入口仍留在队列中。每批返回新编号，继续时读取新快照。`frontierIndices` 与 `followContinuations`、`followAllContinuations: true` 互斥。
+
 Driver、Load、离线与在线时间追踪及 `wave_trace_resume` 都支持 `output: "paged"`。响应中的 `graphSnapshot` 给出 `graphCursor`、图的元数据和各部分的条目数。调用 `wave_trace_graph_page` 时传入图游标和 `section`，从 `offset: 0` 读取，再沿 `nextOffset` 翻页。每页默认 64 条，最多 128 条。节点、边和缺口沿用原图的全局编号。时间图的 `assignmentSources` 按 `segment` 和 `assignment` 取回源码，静态赋值直接包含源码位置与原始查询索引。启用续查时，`frontier` 包含未查询的信号或时间请求，`queryFailures` 包含各个失败的查询及诊断。
 
-在分页查询中加 `format: "mermaid"` 或 `detail: "full"` 可通过 `mermaid` 和 `report` 部分取回图源及报告。每条 Mermaid 是一张图，将报告条目按顺序原样拼接可恢复完整 Markdown。每个扩展宿主最多保存 4 张图快照。续查游标推进分析并可生成新图游标，已有图游标读取创建时的快照，直到被替换或宿主重启。
+分页快照可随时用 `wave_trace_graph_page` 读取 `mermaid` 和 `report`。初次查询保留 `format: "mermaid"` 或 `detail: "full"` 时会立即生成相应部分，并在 `sections` 中报告条数。其余部分列在 `deferredSections`，首次读取时从同一快照生成，响应中的 `total` 给出条数。每条 Mermaid 是一张图，将报告条目按顺序原样拼接可恢复完整 Markdown。每个扩展宿主最多保存 4 张图快照。续查游标推进分析并可生成新图游标，已有图游标读取创建时的快照，直到被替换或宿主重启。
+
+用 `wave_trace_graph_path` 从静态 Driver、Load 或时间图快照提取选定信号与追踪根之间的依赖。静态图的 `nodeIds` 使用 `signals` 分页中的 `id`，也可用 `nodeSelectors: [{"signal":"tb.dut.data"}]` 按声明路径选取。静态输出的 `pathScope` 为 `declaration`，跳数按赋值计算。报告逐条列出赋值的读写位范围与源码位置。跨赋值的位级连通性仍需对应的位级证据。
+
+静态位路径可在每项 `nodeSelectors` 中提供整数 `bit`，例如 `{"signal":"tb.dut.data","bit":3}`。先用带位或位范围的根信号建立 Driver 或 Load 快照，可使原图保留更精确的 RTL 映射。结果的 `pathScope` 为 `recordedBits`。`bitEdges` 分页按 RTL 数据流方向列出输入位、输出位和赋值 ID。对范围已核验的直连端口，按右端对齐低位。截断保留低位依赖，已知有符号源的扩展位连接到符号位，零扩展位没有输入信号依赖。符号性未知时保留已确定的低位依赖。`assignmentsWithoutBitMappings` 包含缺少全部或部分位映射的赋值。由端口连接补出的边带 `fromPort: true`，每次查询最多检查 16,384 个端口位。详细报告包含连接的 RTL 位置、转换位宽和两态目标标记。`unreachable` 表示现有位映射中没有路径。
+
+整总线快照也可从支持的 RTL 赋值推导位依赖，例如直接赋值、固定位选和拼接。派生边带 `fromExpression: true`。端口映射和表达式共用 16,384 单位的推导预算，表达式按目标宽度乘以输入数计费。动态目标和当前无法求解的表达式仍计入位映射缺口。对整总线根使用 `mode: "all"` 可以保留关联到多个根位的路径，`paths` 仍返回最近的一个根位。
+
+静态位路径和按位时间追踪支持固定移位量的左移、逻辑右移和算术右移。移位计算使用赋值上下文的位宽。算术右移的符号填充依赖源符号位，零填充没有数据输入依赖。固定条件的三元表达式使用已选分支，常量 X/Z 条件保留两侧合并所需的位。时间图遇到运行时移位量时，使用波形中可核验的稳定采样确定数据位，并保留移位量的因果边。对于核验过的单一无延迟连续驱动，若与输出相符的同槽采样组合都得到同一移位量，时间图沿对应数据位追踪并标记 `sameTickUnordered`。组合给出多个移位量或证据不全时，数据继续以信号级候选显示。
+
+按位时间追踪根据稳定的三元条件选择数据分支，将条件来源标为 `role: "condition"`。稳定条件含 X/Z 且无法归约为真时，保留两路对应的数据位。对核验过的单一无延迟连续驱动，同槽比较使用完整的四态波形值。只有与输出匹配的采样组合都给出相同的条件真假或四态合并结果时，才按该结果追踪数据位，并保留 `sameTickUnordered`。分支存在歧义时保留原信号级候选。
+
+时间图的 `nodeIds` 使用 `nodes` 分页的零起始索引，也可以用页的 `offset` 加上节点在页内的位置。默认 `mode: "shortest"` 为每个选定节点保留一条最短路径。`mode: "all"` 保留快照中选定节点与追踪根之间已有的分支，包括抵达根之前的反馈边。两种模式下，`paths` 都列出每个起点最近的根和最少跳数，或用 `unreachable` 标记不可达起点。
+
+时间图也可以传入 `nodeSelectors`，用完整信号路径与十进制 `tick` 直接选取节点。总线路径可省略声明范围，单个位选择保留位下标。可选的 `changeOrder` 从 1 开始，指定该 tick 内观测到的第几次变化。若节点已有执行回调，可用 `callbackOrdinal` 按记录的非负回调序号选取，例如 `{"signal":"tb.inhibit","tick":"7","callbackOrdinal":7}`。`matches` 返回每个选择器对应的原图节点编号。`nodeIds` 和 `nodeSelectors` 可以一起传入，去重后最多 16 个节点。详细报告保留槽内变化序号、值变化回调编号、求值时捕获的操作数及等待恢复的事件边界。
+
+局部时间图返回的新游标可以再次传给 `wave_trace_graph_path`。`nodeIds`、`matches` 和 `paths` 使用本次传入的快照编号，`sourceNode` 始终指向首次选取路径前的时间图节点。图和可选 Markdown 保留候选状态、已接回的续查、执行提交及 RTL 位置。详细报告也列出已记录的位段写入操作数、分支入口值、外部执行步骤的源码校验，以及从任务成员写入追到固件读取的提交和求值顺序。路径上的节点仍显示其待查、未匹配和未解决的证据缺口，报告提供可用的续查信号和 tick。局部快照沿用原图的覆盖状态。用原图游标查看全部待查入口和缺口，用原续查游标继续追踪。
 
 自动续查会在每段前后核对波形、分析输入和在线会话。检测到变更时，`stopReasons` 包含 `contextChanged`，并保留根图、已核对的段和剩余请求。在线仿真重启后可从根信号发起新查询，原会话的续查入口仍关联原会话 ID。
 
@@ -451,9 +528,9 @@ Driver、Load、离线与在线时间追踪及 `wave_trace_resume` 都支持 `ou
 
 同一 tick 有多个根变化时，未能在节点预算内加入的变化按序号进入续查队列。续查成功后恢复为合并图的根节点。因节点或边预算省略的依赖在 `gaps[].use.evidence` 保留数据、控制、触发或索引角色及原始置信度。Mermaid、Trace Explorer 和报告也会显示适用的同槽顺序与实录采样证据。
 
-在波形中选中一个信号并设置 A 游标，然后选择「追踪 → 自动续查 A 游标的上游」。在线会话可运行 **Wave Workbench: Trace Live Signal with Continuations**。这两个界面入口自动跟进最多四个续查请求，打开带附录的 Markdown。Trace Explorer 显示起始信号，可继续查询图中提供的入口或跳转到 RTL。
+在波形中选中一个信号并设置 A 游标，然后选择「追踪 → 自动续查 A 游标的上游」。在线会话可运行 **Wave Workbench: Trace Live Signal with Continuations**。这两个界面入口在续查时间预算内跟进最多 64 个请求，打开带附录的 Markdown。Trace Explorer 显示起始信号，可继续查询图中提供的入口或跳转到 RTL。
 
-**Combined time graph** 有待查入口时，点 **Continue next batch** 可再查询最多四段，使用同一个根信号和原始时间点。Trace Explorer 更新合并图，并打开含全部已查段的 Markdown。取消本批会保留上一批的图和续查入口。
+**Combined time graph** 有待查入口时，点 **Continue next batch** 可在续查时间预算内再查询最多 64 段。点击一条标有 **Continuation pending** 的缺口，可只查询那条分支。两种操作都保留根信号和原始时间点，更新合并图并打开含全部已查段的 Markdown。关闭 VS Code 后重新打开，已保存且通过输入核验的离线图也可以按缺口继续。
 
 `generate-vcs-nba` 为直接整信号、无赋值内延时的 NBA 生成带求值序号的写入探针。VPI 在观测到序号时核对目标值，匹配后记录 `simulator-commit`，同值写入也可配对。VCS 合并多次更新时，回放用 `assignment-unobserved` 保留缺少独立提交观测的求值，对应 tick 报为部分覆盖。在线可用 `timing: "simulator-commit"` 设断点，会话仍在该时间槽结束时暂停。 [VCS NBA 复现步骤](test/fixtures/trace/README.md#vcs-nba-commit-probes)
 
@@ -465,11 +542,11 @@ VCS 的 `wave_execution_map` 可用 `signal: "mem[36]"` 选择 KDB 中的数组�
 
 `captureGuardEntry: true` 同时启用求值采集，并在可映射的 `if` 或 `else` 分支入口保存守卫操作数。支持显式块和直接的单语句 NBA。原始条件按仿真器语义求值，采样在选中分支入口执行，包含条件求值产生的副作用。图和报告将入口采样连到同一次 NBA 求值，并给出原始条件的行列。宏生成的条件以及无法绑定到局部信号的操作数仍受源码映射限制。
 
-VCS 的 `generate-vcs-nba` 也支持 `q[index] <= data` 形式的动态单个位 NBA，其中下标是简单变量，RHS 无副作用。探针在求值阶段保存下标并在回放中使用实际写入的位。含 X、Z 或越界的下标保留为未观测结果。 [VCS 动态选位复现步骤](test/fixtures/trace/README.md#vcs-dynamic-packed-writes) · [IEEE 1800-2017 非阻塞赋值规则](https://fpga.mit.edu/6205/_static/F25/documentation/1800-2017.pdf)
+VCS 的 `generate-vcs-nba` 也支持 `q[index] <= data` 形式的动态单个位 NBA，其中下标是简单变量，RHS 无副作用。探针在求值阶段保存下标并在回放中使用实际写入的位。探针能确认选择完全越界或下标含 X/Z 时，记录 `assignment-no-target` 并关联求值和 RTL 位置。同一时间槽中的有效提交仍可归因。旧记录中的 `assignment-unobserved` 继续按观测缺口处理。 [VCS 动态选位复现步骤](test/fixtures/trace/README.md#vcs-dynamic-packed-writes) · [IEEE 1800-2017 非阻塞赋值规则](https://fpga.mit.edu/6205/_static/F25/documentation/1800-2017.pdf)
 
-对于 `q[index +: 2]` 和 `q[index -: 2]`，VIDE 保留选择方向和恒定宽度，VCS 探针按实际总线方向记录提交范围。可从输出位追到 RHS 的对应位，并查询求值时使用的下标。与动态单个位相同，探针要求简单变量作为起点和无副作用的 RHS。部分超出总线范围的写入保留 SystemVerilog 原有行为，报告将该次提交标为未观测。 [VCS 动态位段复现步骤](test/fixtures/trace/README.md#vcs-indexed-packed-writes)
+对于 `q[index +: 2]` 和 `q[index -: 2]`，VIDE 保留选择方向和恒定宽度，VCS 探针按实际总线方向记录提交范围。探针要求简单变量作为起点和无副作用的 RHS。部分越界时，求值事件保留完整 RHS 和尝试范围。探针收到提交标记并核对在界位后，提交事件的 `targetRange` 给出实际写入范围，`attemptedTargetRange` 给出原选择。时间图使用 VCS 实测的低位截取规则追踪 RHS。无法核实的提交继续记录为 `assignment-unobserved`。 [VCS 动态位段复现步骤](test/fixtures/trace/README.md#vcs-indexed-packed-writes)
 
-同一 packed 变量可同时插桩重叠的固定位段、动态选择与整信号 NBA。可能重叠的写入共用提交标记，互不重叠的固定范围可各自验证。回调缺失或回调时目标位值尚未吻合的求值记录为 `assignment-unobserved`，并保留已知的实际写入范围。精确归因仍取决于该位与同一时刻的波形和提交证据。 [VCS 重叠写入复现步骤](test/fixtures/trace/README.md#vcs-overlapping-packed-writes)
+VCS 探针为每个 packed 目标分配整信号标记、各固定范围标记，以及按起点表达式、宽度和方向区分的动态选择标记。具有相同范围或选择形式的写入共用对应标记。通过标记和目标位值核对重叠写入的实际提交。回调缺失或目标位值不吻合时记录 `assignment-unobserved`。插桩可使 VCS 波形暴露更多中间值，精确追踪使用同一次插桩仿真的波形与执行记录。 [VCS 重叠写入复现步骤](test/fixtures/trace/README.md#vcs-overlapping-packed-writes)
 
 打开同一构建的参考波形后，执行 **Trace Live Signal**，选择 harness 已采样的信号。可选载入执行 JSONL。命令用参考波形旁的构建清单核对源码与 harness，在 Trace Explorer 展开当前在线时间图，并打开含 Mermaid 和执行证据的 Markdown 报告。
 
@@ -479,7 +556,7 @@ VCS 的 `generate-vcs-nba` 也支持 `q[index] <= data` 形式的动态单个位
 
 向 `wave_live_trace` 同时传入 `buildManifest` 和同一构建的 `executionLog`，可核对在线事件与 JSONL 中的实例、语句、值及事件次序。匹配的日志提供源码映射。时间图对可确认的变化标注实际 RTL 赋值及求值、提交序号，并按同样的规则追踪已记录的上游信号。通过 `executionReplayMatch` 查看根信号和上游信号的核对状态。构建未验证、日志身份或事件不一致，以及任一方记录缺失时，MCP 保留可用的实时采样和事件。同一时槽的中间变化可能只出现在原始事件里，`executionTransitions` 会标出采样与提交序列的差异。
 
-提供执行事件的 harness 支持语句断点。通过 `wave_live_control` 传入 `action: "setStatementBreakpoint"`、`instance` 和 `statementId`。`eventKind` 可匹配分支、求值、提交或 `assignment-superseded`，默认匹配求值。对 `assignment-committed` 可加 `timing: "simulator-commit"` 匹配调度器实际提交，或用 `end-of-slot` 匹配时间槽末尾采样。VS Code 的 **Set Statement Breakpoint** 菜单也可选择事件。仿真在命中事件所在的时间槽结束时暂停，`breakEvent` 给出实际命中的事件和序号。
+提供执行事件的 harness 支持语句断点。通过 `wave_live_control` 传入 `action: "setStatementBreakpoint"`、`instance` 和 `statementId`。`eventKind` 可匹配分支、求值、提交或 `assignment-superseded`，默认匹配求值。对 `assignment-committed` 可加 `timing: "simulator-commit"` 匹配调度器实际提交，或用 `end-of-slot` 匹配时间槽末尾采样。VCS 状态中的 `nbaCommitEvents` 和 `modportCommitEvents` 分别表示 harness 支持的精确提交来源。VS Code 的 **Set Statement Breakpoint** 菜单也可选择事件。仿真在命中事件所在的时间槽结束时暂停，`breakEvent` 给出实际命中的事件和序号。
 
 `wave_live_trace` 可随 `format: "mermaid"` 返回在线执行事件图 `executionMermaid`。详细报告列出事件序号、求值和替换关系，以及可用的提交时机。
 
@@ -561,11 +638,13 @@ Verilator 视图还按语句显示模块内部的 `assign` 和 `always_*`。KDB 
 
 前台 `dist/mcp.js` 使用当前 VS Code 窗口的波形工程和在线仿真。后台 `dist/mcp-headless.js` 在波形所在机器上通过 stdio 启动，使用独立的波形、调试和仿真会话。启动参数为工作区绝对路径。两个服务器提供相同的 `tools/list`，Tcl 可用 `waveTool list` 查看这套接口。
 
+后台 MCP 的 `wave_open` 和 Tcl 的 `wvOpenFile` 使用工作区 `.vscode/settings.json` 中的 `waveWorkbench.fsdbBackend`。在 `wave_open` 显式传入 `backend` 可覆盖该次打开的设置，相应的 KDB 使用同一后端偏好。
+
 | 功能 | 命令 |
 | --- | --- |
 | 波形和工程 | `wave_open`、`wave_close`、`wave_list`、`wave_search`、`wave_view`、`wave_save_project`、`wave_clip`、`wave_export` |
 | 源码和原理图 | `wave_design_attach`、`wave_source`、`wave_schematic`、`wave_module_schematic` |
-| RTL 追踪和记录 | `wave_trace_drivers`、`wave_trace_loads`、`wave_trace_context`、`wave_trace_resume`、`wave_trace_graph_page`、`wave_execution_map`、`wave_execution_trace` |
+| RTL 追踪和记录 | `wave_trace_drivers`、`wave_trace_loads`、`wave_trace_context`、`wave_trace_resume`、`wave_trace_graph_page`、`wave_trace_graph_path`、`wave_execution_map`、`wave_execution_trace` |
 | 模拟和数学 | `wave_math` 的 `measure`、`hysteresis`、`expression`、`derivative`、`integral`、`filter`、`adc`、`dac`、`fft`、`external` |
 | 仿真和 RTL 调试 | `wave_live_start`、`wave_live_debug`、`wave_debug_request`、`wave_live_control`、`wave_live_status`、`wave_live_history`、`wave_live_trace`、`wave_live_stop` |
 | 协议解码 | `wave_decoder_list`、`wave_decoder_query`、`wave_decoder_attach`、`wave_decoder_detach`、`wave_decoder_status`、`wave_decoder_reload` |

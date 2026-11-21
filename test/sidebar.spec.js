@@ -14,6 +14,7 @@ test('sidebar UI: real Tcl/VCD result, history, target selection, action buttons
   const context={extensionUri:uri(root),asAbsolutePath:p=>path.join(root,p)};
   const vscode={Uri:{joinPath:(base,...parts)=>uri(path.join(base.fsPath,...parts))}};
   sidebar=new Sidebar(vscode,context,{state:()=>({sessions,activeId:selected,scope,includeOther,tagState,tree:[{fullname:'top',module:'top_module',kind:'npiModule',depth:0,expanded},...(includeOther?[{fullname:'top.link',module:'link_if',kind:'npiInterface',depth:0},{fullname:'top.gen_fpu',kind:'npiGenScope',depth:1},{fullname:'fpu_pkg',kind:'npiPackage',depth:0}]:[]),...(expanded?[{fullname:'top.core',module:'core_module',kind:'npiModule',depth:1,expanded:coreExpanded}]:[])]}),scopeSignals:async m=>({...await backend.request('scopeSignals',{query:m.scope==='top.core'?'tb.dut':m.scope,offset:m.offset,limit:m.limit||512}),scope:m.scope}),addSignals:async (signals,edit)=>actions.push(...signals.map(s=>edit?'edit:'+s.name:s.name)),
+    searchSignals:(query,offset)=>backend.request('search',{query,offset,limit:32}),
     taggedFocus:async signal=>actions.push(signal.id),
     tagAppearance:async ({style,tag,color})=>{
       if(style) tagState.tagStyle=style;
@@ -26,6 +27,11 @@ test('sidebar UI: real Tcl/VCD result, history, target selection, action buttons
   await page.route('http://sidebar.test/**',async route=>{const name=new URL(route.request().url()).pathname.slice(1);if(!['','sidebar.css','sidebar.js'].includes(name)){await route.abort();return;}await route.fulfill({body:name?fs.readFileSync(path.join(root,name.endsWith('.js')?'dist/webview':'media',name),'utf8'):view.webview.html,contentType:name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html'});});
   try{
     await page.setViewportSize({width:360,height:900});await page.goto('http://sidebar.test/');await expect(page.locator('#session option')).toHaveCount(2);await expect(page.locator('.instanceRow')).toHaveCount(1);await expect(page.locator('.objectIcon.module')).toHaveCount(1);await page.locator('.expand').click();await expect(page.locator('.instanceRow')).toHaveCount(2);await expect(page.locator('.instanceRow').nth(1)).toHaveCSS('padding-left','16px');await page.locator('.instanceName').filter({hasText:'core'}).click();expect(treeActions.at(-1)).toEqual({scope:'top.core',action:'select'});await expect(page.locator('#signalRows button')).toHaveCount(4);await page.locator('#signalRows button').filter({hasText:'data'}).dblclick();await expect.poll(()=>actions).toContain('data[7:0]');
+    await page.getByRole('searchbox',{name:'搜索波形信号'}).fill('tb.dut.clk');
+    await page.locator('#sidebarSearchRows button').filter({hasText:'clk'}).click();
+    await expect.poll(()=>actions).toContain('clk');
+    await page.getByRole('searchbox',{name:'搜索波形信号'}).fill('');
+    await expect(page.locator('#sidebarSearchResults')).toBeHidden();
     const data = (await backend.request('scopeSignals',{query:'tb.dut'})).signals.find(signal=>signal.name==='data[7:0]');
     tagState={tagStyle:'pill',tagColors:{Bus:'#20a080'},taggedSignals:[
       {...data,instanceScope:'top.core',tags:['Bus','TX']},
@@ -57,11 +63,13 @@ test('sidebar UI: real Tcl/VCD result, history, target selection, action buttons
     await signalPane.evaluate(el => { el.scrollLeft = el.scrollWidth; });
     await expect.poll(() => signalPane.evaluate(el => el.scrollLeft)).toBeGreaterThan(100);
     await page.locator('#showOtherObjects').check();await expect(page.locator('.objectIcon.interface')).toHaveCount(1);await expect(page.locator('.objectIcon.interface')).toHaveAttribute('aria-label','npiInterface');await page.screenshot({path:'test-results/sidebar-line-icons.png'});await page.locator('#showOtherObjects').uncheck();await expect(page.locator('.objectIcon.interface')).toHaveCount(0);
+    await page.locator('#sidebarConsole summary').click();
     await page.locator('#input').fill('set n 7; puts {sidebar output}; wvGetSigValueByTime {/tb/dut/data[7:0]} -time 20 -format Hex');await page.locator('#input').press('Control+Enter');
     await expect(page.locator('#output')).toContainText('sidebar output');await expect(page.locator('#output')).toContainText('2a');await expect(page.locator('#execute')).toBeEnabled();
     await page.locator('#session').selectOption('b');await expect.poll(()=>selected).toBe('b');
     await page.locator('#input').fill('expr {7+1}');await page.locator('#execute').click();await expect(page.locator('#output .entry').last()).toContainText('8');
     await page.locator('#history').selectOption({index:2});await expect(page.locator('#input')).toHaveValue(/set n 7/);
+    await page.locator('.sidebarMenu summary').filter({hasText:'文件'}).click();
     await page.locator('[data-action="openPicker"]').click();await expect.poll(()=>actions).toContain('openPicker');
     await page.locator('#input').fill('wvNoSuchCommand');await page.locator('#execute').click();await expect(page.locator('#output .entry').last()).toContainText('ERROR: Unsupported');await expect(page.locator('#execute')).toBeEnabled();
     await page.screenshot({path:'test-results/sidebar-console.png'});

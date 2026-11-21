@@ -35,7 +35,7 @@ export function tracePackedSelection(binding?: Signal) {
   return { range, bit, projected: Number.isInteger(offset) };
 }
 
-async function findProjectedTransition(
+async function findProjectedHistoryAnchor(
   backend: Backend,
   signal: Signal,
   fileStart: bigint,
@@ -46,6 +46,7 @@ async function findProjectedTransition(
   let end = anchor;
   let window = span;
   let dense = false;
+  let observedThroughStart = true;
   for (let attempt = 0; attempt < 8; attempt++) {
     operation?.throwIfAborted();
     const start = end - fileStart > window ? end - window : fileStart;
@@ -67,14 +68,22 @@ async function findProjectedTransition(
     }
     let previous: string | undefined;
     let transition: bigint | undefined;
+    const first = block.events[0];
+    observedThroughStart &&= first !== undefined && BigInt(first[0]) <= start;
     for (const [tick, raw] of block.events) {
       const value = traceSample(raw, signal);
+      observedThroughStart &&= value !== undefined;
       if (previous !== undefined && value !== undefined && value !== previous)
         transition = BigInt(tick);
       previous = value;
     }
-    if (transition !== undefined) return { transition, limited: false };
-    if (start === fileStart) return { limited: false };
+    if (transition !== undefined) return { tick: transition, limited: false };
+    if (start === fileStart)
+      return {
+        // Match the time graph's tick-zero initial sample semantics.
+        tick: observedThroughStart && start === 0n ? start : undefined,
+        limited: false,
+      };
     end = start;
     if (!dense) window *= 4n;
   }
@@ -113,7 +122,7 @@ export async function readTraceObservations(
   // history on that timestamp when a signal has held since its last write.
   let historyEnd = position;
   let automaticSearchLimited = false;
-  let projectedTransition: bigint | undefined;
+  let projectedAnchor: bigint | undefined;
   const rootBinding = root === undefined ? undefined : signals.get(root);
   if (historyStart === "auto" && rootBinding && position > fileStart) {
     const timestamp =
@@ -147,7 +156,7 @@ export async function readTraceObservations(
       BigInt(scale[1]) * units[scale[2].toLowerCase() as keyof typeof units];
     const span = tickFs ? 64_000_000n / tickFs + 2n : 256n;
     if (historyAnchor === undefined && rootBinding.bitOffset !== undefined) {
-      const fallback = await findProjectedTransition(
+      const fallback = await findProjectedHistoryAnchor(
         backend,
         rootBinding,
         fileStart,
@@ -156,8 +165,8 @@ export async function readTraceObservations(
         operation,
       );
       automaticSearchLimited = fallback.limited;
-      projectedTransition = fallback.transition;
-      historyEnd = projectedTransition ?? historyEnd;
+      projectedAnchor = fallback.tick;
+      historyEnd = projectedAnchor ?? historyEnd;
     }
     lower = historyEnd - fileStart > span ? historyEnd - span : fileStart;
   }
@@ -199,17 +208,17 @@ export async function readTraceObservations(
   let focusedRoot: QueryResult[string] | undefined;
   if (
     rootBinding &&
-    projectedTransition !== undefined &&
+    projectedAnchor !== undefined &&
     blocks[rootBinding.id]?.truncated
   ) {
     operation?.throwIfAborted();
     const result = await backend.request("query", {
       signals: [rootBinding.id],
-      start: (orderedStart
-        ? projectedTransition
-        : projectedTransition - 1n
+      start: (orderedStart || projectedAnchor <= fileStart
+        ? projectedAnchor
+        : projectedAnchor - 1n
       ).toString(),
-      end: projectedTransition.toString(),
+      end: projectedAnchor.toString(),
       limit: 128,
       preserveSameTick: true,
     });
@@ -219,8 +228,8 @@ export async function readTraceObservations(
   function observe(signal: number, binding: Signal, narrowed = false) {
     const block = narrowed && focusedRoot ? focusedRoot : blocks[binding.id];
     const observationStart =
-      narrowed && focusedRoot && projectedTransition !== undefined
-        ? projectedTransition
+      narrowed && focusedRoot && projectedAnchor !== undefined
+        ? projectedAnchor
         : lower;
     const samples =
       block?.events.map(([tick, value]) => ({

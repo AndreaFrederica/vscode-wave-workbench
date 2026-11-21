@@ -88,13 +88,15 @@ class TclRunner {
               JSON.parse(decode(b)),
               decode(directory),
             );
-            this.child.stdin.write("OK\t" + encode(result ?? "") + "\n");
+            if (!this.closed)
+              this.child.stdin.write("OK\t" + encode(result ?? "") + "\n");
           } catch (e) {
-            this.child.stdin.write(
-              "ERROR\t" +
-                encode(e instanceof Error ? e.message : String(e)) +
-                "\n",
-            );
+            if (!this.closed)
+              this.child.stdin.write(
+                "ERROR\t" +
+                  encode(e instanceof Error ? e.message : String(e)) +
+                  "\n",
+              );
           }
         } else if (type === "DONE" && this.pending) {
           const p = this.pending;
@@ -106,6 +108,16 @@ class TclRunner {
       });
   }
   run(script: string, directory = process.cwd()): Promise<string> {
+    return this.request(script, directory);
+  }
+  async isComplete(script: string): Promise<boolean> {
+    return (await this.request(script, "", true)) === "1";
+  }
+  private request(
+    script: string,
+    directory: string,
+    check = false,
+  ): Promise<string> {
     if (this.closed)
       return Promise.reject(new Error("Tcl interpreter is closed"));
     if (this.pending)
@@ -120,7 +132,13 @@ class TclRunner {
         this.child.kill();
       }, 120000);
       this.pending = { resolve, reject, timer };
-      this.child.stdin.write(encode(script) + "\t" + encode(directory) + "\n");
+      this.child.stdin.write(
+        encode(script) +
+          "\t" +
+          encode(directory) +
+          (check ? "\tCHECK" : "") +
+          "\n",
+      );
     });
   }
   fail(error: Error) {

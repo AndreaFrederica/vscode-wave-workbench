@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 import type {
   DesignHierarchicalAccess,
+  DesignGenerateScope,
   DesignInterfaceUser,
   DesignPortLink,
   DesignSession,
@@ -166,11 +167,21 @@ function remap(
   return left && right && { op: expression.op, args: [left, right] };
 }
 
+function remapWaitPredicates(
+  predicates: VideTrace["assignments"][number]["waitPredicates"],
+  ids: Map<number, number>,
+) {
+  return predicates?.flatMap(({ location, expression }) => {
+    const mapped = remap(expression, ids);
+    return mapped ? [{ location, expression: mapped }] : [];
+  });
+}
+
 function componentKey(offset: number, component: number) {
   return offset + ":" + component;
 }
 
-function remapValue(
+export function remapValue(
   node: AssignmentValue,
   ids: Pick<ReadonlyMap<number, number>, "get">,
   scopedIds?: ReadonlyMap<number | string, number>,
@@ -289,6 +300,24 @@ function remapValue(
       const value = remapChild(part);
       return value && { op: "repeat", args: [count, value] };
     }
+    case "typeShape":
+      return node;
+    case "caseMatch":
+    case "membership": {
+      const [selector, labels, span] = node.args;
+      const value = remapChild(selector);
+      if (!value) return;
+      const mapped: [AssignmentValue, AssignmentValue?][] = [];
+      for (const [first, last] of labels) {
+        const lower = remapChild(first);
+        const upper = last && remapChild(last);
+        if (!lower || (last && !upper)) return;
+        mapped.push(upper ? [lower, upper] : [lower]);
+      }
+      return node.op === "caseMatch"
+        ? { op: "caseMatch", args: [value, mapped, span, node.args[3]] }
+        : { op: "membership", args: [value, mapped, span] };
+    }
     case "cast": {
       const [width, signed, twoState, input] = node.args;
       const value = remapChild(input);
@@ -382,20 +411,21 @@ export async function expandInstanceTrace(
     uri: sourceUri(file),
     range: { start: { line: line - 1, character: 0 } },
   });
-  async function matchesPortDeclaration(
+  async function portDeclaration(
     { instance, signal }: Port,
     declaration: VideTrace["signals"][number]["declaration"],
   ) {
-    if (!declaration) return false;
+    if (!declaration) return;
     const object = await design
       .resolve(instance + "." + signal)
       .catch(() => undefined);
-    return (
-      !!object?.file &&
+    if (
+      object?.file &&
       object.instance === instance &&
       object.line === declaration.range.start.line + 1 &&
       sourceUri(object.file) === declaration.uri
-    );
+    )
+      return object;
   }
 
   function addAssignment(
@@ -436,6 +466,9 @@ export async function expandInstanceTrace(
     if (existing !== undefined) {
       if (signal.parameterValue)
         result.signals[existing].parameterValue = signal.parameterValue;
+      if (signal.instanceParameterValue)
+        result.signals[existing].instanceParameterValue =
+          signal.instanceParameterValue;
       return existing;
     }
     if (result.signals.length >= discoverySignalLimit) {
@@ -456,7 +489,7 @@ export async function expandInstanceTrace(
     const { instance, depth, trace: local, bound } = pending[index];
     const generated = bound
       ? local
-      : await bindKdbGenerateAssignments(
+      : await bindGenerateAssignments(
           local,
           instance,
           design,
@@ -489,7 +522,7 @@ export async function expandInstanceTrace(
         );
     const scoped = bound
       ? operands
-      : await bindKdbGenerateScope(operands, instance, design, sourceUri);
+      : await bindGenerateScope(operands, instance, design, sourceUri);
     const trace =
       index === 0 && direction === "drivers" && rootElement !== undefined
         ? selectRootElement(scoped, rootElement)
@@ -554,6 +587,10 @@ export async function expandInstanceTrace(
           targets,
           inputs,
           guards,
+          waitPredicates: remapWaitPredicates(
+            assignment.waitPredicates,
+            mapping,
+          ),
           value,
           wordRead: remapWordRead(assignment.wordRead, mapping),
           fieldRead: remapFieldRead(assignment.fieldRead, mapping),
@@ -678,7 +715,7 @@ export async function expandInstanceTrace(
             continue;
           }
           if (!raw.assignments.length && !raw.frontier.length) continue;
-          const generated = await bindKdbGenerateAssignments(
+          const generated = await bindGenerateAssignments(
             raw,
             user.instance,
             design,
@@ -869,7 +906,8 @@ export async function expandInstanceTrace(
           direction === "drivers" ? [link.to] : portSources(link);
         return endpoints.some((endpoint) => key(endpoint) === key(here));
       });
-      if (!(await matchesPortDeclaration(here, declaration))) {
+      const object = await portDeclaration(here, declaration);
+      if (!object) {
         for (const link of relevantLinks)
           result.frontier.push({
             signal: id,
@@ -884,6 +922,8 @@ export async function expandInstanceTrace(
           });
         continue;
       }
+      if (!object.interfaceRange && !result.signals[id].packedRange)
+        result.signals[id].packedRange = object.packedRange;
       ports.set(key(here), id);
       if (constant) {
         if (remainingDepth <= 0)
@@ -959,9 +999,15 @@ export async function expandInstanceTrace(
         if (trace && trace.revision !== initial.revision)
           throw Error("RTL changed during the instance trace.");
         const root = trace?.signals.find(({ id }) => id === trace.root);
-        if (!root || !(await matchesPortDeclaration(operand, root.declaration)))
-          continue;
-        const id = addSignal(root, operand.instance, local);
+        if (!root) continue;
+        const object = await portDeclaration(operand, root.declaration);
+        if (!object) continue;
+        const packedRange =
+          root.packedRange ??
+          (object.interfaceRange ? undefined : object.packedRange);
+        const id = addSignal({ ...root, packedRange }, operand.instance, local);
+        if (id !== undefined && packedRange && !result.signals[id].packedRange)
+          result.signals[id].packedRange = packedRange;
         if (id !== undefined) ports.set(port, id);
       }
     }
@@ -1147,7 +1193,48 @@ function limitInstanceTrace(
 
 type TraceLocation = VideTrace["assignments"][number]["location"];
 
-async function bindKdbGenerateAssignments(
+function hasUniqueGenerateLine(label: GenerateLabel) {
+  return Boolean(label.blockEnd && label.uniqueLine);
+}
+
+function generateSourceLineMatches(
+  label: GenerateLabel,
+  record: Location | undefined,
+  sourceUri: (file: string) => string,
+) {
+  return (
+    record?.kind === "npiGenScope" &&
+    record.line === label.line + 1 &&
+    !!record.file &&
+    sourceUri(record.file) === label.uri
+  );
+}
+
+function generateSourcePositionMatches(
+  label: GenerateLabel,
+  position: { file: string; line: number; column: number } | undefined,
+  sourceUri: (file: string) => string,
+) {
+  if (
+    !position?.file ||
+    !position.line ||
+    !position.column ||
+    sourceUri(position.file) !== label.uri
+  )
+    return false;
+  const line = position.line - 1;
+  const column = position.column - 1;
+  if (!label.blockEnd)
+    return line === label.line && column === label.byteColumn;
+  const [endLine, endColumn] = label.blockEnd;
+  return (
+    (line > label.line ||
+      (line === label.line && column >= label.byteColumn)) &&
+    (line < endLine || (line === endLine && column < endColumn))
+  );
+}
+
+async function bindGenerateAssignments(
   trace: VideTrace,
   instance: string,
   design: DesignSession,
@@ -1155,7 +1242,7 @@ async function bindKdbGenerateAssignments(
   sourceUri: (file: string) => string,
 ): Promise<VideTrace> {
   if (
-    design.kind !== "kdb" ||
+    (design.kind !== "kdb" && !design.generateScopes) ||
     !trace.assignments.some((assignment) =>
       assignment.generateBranches?.some(
         (branch) => branch.loopScope && branch.selected,
@@ -1164,10 +1251,18 @@ async function bindKdbGenerateAssignments(
   )
     return trace;
 
-  const subject = await design.resolve(instance).catch(() => undefined);
-  if (!subject) return trace;
-  const module = subject.kind === "npiGenScope" ? subject.instance : instance;
-  if (!module) return trace;
+  let module = instance;
+  for (;;) {
+    const subject = await design.resolve(module).catch(() => undefined);
+    if (!subject) return trace;
+    if (subject.kind !== "npiGenScope") break;
+    const parent =
+      design.kind === "kdb"
+        ? subject.instance
+        : await design.parent(module).catch(() => "");
+    if (!parent || !module.startsWith(parent + ".")) return trace;
+    module = parent;
+  }
 
   const signals = new Map(trace.signals.map((signal) => [signal.id, signal]));
   const bindings = new Map<string, number | null>();
@@ -1177,73 +1272,132 @@ async function bindKdbGenerateAssignments(
     0,
   );
   const assignments: VideTrace["assignments"] = [];
-  const scopes = new Map<string, ReturnType<DesignSession["children"]>>();
-  const sourceMatches = (
-    label: GenerateLabel,
-    record: Awaited<ReturnType<DesignSession["resolve"]>>,
-  ) =>
-    record?.file &&
-    sourceUri(record.file) === label.uri &&
-    record.line === label.line + 1;
+  const scopes = new Map<
+    string,
+    Promise<readonly (Location | DesignGenerateScope)[]>
+  >();
   let scanBudget = 4096;
+
+  function branchIsInactive(
+    branch: NonNullable<
+      VideTrace["assignments"][number]["generateBranches"]
+    >[number],
+    indices: ReadonlyMap<string, number>,
+  ) {
+    const noSignals = new Map<number, number>();
+    function bits(expression: AssignmentValue) {
+      const value = remapValue(expression, noSignals, undefined, indices);
+      return (
+        value && evaluateTraceValue(value, undefined, () => undefined)?.bits
+      );
+    }
+    if (branch.loneIfCondition) {
+      const condition = bits(branch.loneIfCondition);
+      return condition !== undefined && /^0+$/.test(condition);
+    }
+    const match = branch.caseWithoutDefault;
+    if (!match?.labels.length || match.labels.length > 32) return false;
+    const selector = bits(match.selector);
+    if (!selector) return false;
+    // The width of any case item can affect all comparisons.
+    return match.labels.every((expression) => {
+      const label = bits(expression);
+      return label?.length === selector.length && label !== selector;
+    });
+  }
 
   async function owners(
     branches: NonNullable<VideTrace["assignments"][number]["generateBranches"]>,
   ) {
     let parents = [{ scope: module, indices: new Map<string, number>() }];
     for (const branch of branches) {
+      if (parents.length === 0) break;
       const selected = branch.selected;
       if (!selected) return;
+      const labels = [selected, ...branch.alternatives];
+      if (
+        design.kind === "kdb" &&
+        labels.some((label) => !label.name && !hasUniqueGenerateLine(label))
+      )
+        return;
       const next = [];
       for (const { scope: parent, indices } of parents) {
         let children = scopes.get(parent);
         if (!children) {
-          children = design.children(parent, true);
+          children = design.generateScopes
+            ? Promise.resolve(design.generateScopes(parent))
+            : design.children(parent, true);
           scopes.set(parent, children);
         }
         const records = await children.catch(() => undefined);
         if (!records || records.length >= 1500) return;
-        let found = false;
+        const seen = new Set<number | undefined>();
         let alternative = false;
         for (const child of records) {
           if (
-            child.kind !== "npiGenScope" ||
+            ("kind" in child && child.kind !== "npiGenScope") ||
             !child.fullname.startsWith(parent + ".")
           )
             continue;
           const name = child.fullname.slice(parent.length + 1);
-          const iteration = branch.loopScope ? /\[(-?\d+)\]$/.exec(name) : null;
-          const isSelected = branch.loopScope
-            ? iteration && name.slice(0, iteration.index) === selected.name
-            : name === selected.name;
-          const label = isSelected
-            ? selected
-            : branch.alternatives.find((site) => site.name === name);
-          if (!label) continue;
+          const iteration = /\[(-?\d+)\]$/.exec(name);
+          if (
+            name.includes(".") ||
+            Boolean(branch.loopScope) !== Boolean(iteration)
+          )
+            continue;
+          const base = iteration ? name.slice(0, iteration.index) : name;
+          const candidates = labels.filter(
+            (label) => !label.name || label.name === base,
+          );
+          if (!candidates.length) continue;
           if (--scanBudget < 0) return;
-          const declaration = await design
-            .resolve(child.fullname)
-            .catch(() => undefined);
-          if (!sourceMatches(label, declaration)) return;
-          if (isSelected) {
+          let matches: GenerateLabel[];
+          if (design.kind === "kdb") {
+            const declaration = await design
+              .resolve(child.fullname)
+              .catch(() => undefined);
+            if (!declaration?.file || !declaration.line) return;
+            matches = candidates.filter((label) =>
+              generateSourceLineMatches(label, declaration, sourceUri),
+            );
+          } else {
+            if (
+              !("column" in child) ||
+              !child.file ||
+              !child.line ||
+              !child.column
+            )
+              return;
+            matches = candidates.filter((label) =>
+              generateSourcePositionMatches(label, child, sourceUri),
+            );
+          }
+          if (matches.length > 1) return;
+          const [label] = matches;
+          if (!label) {
+            if (candidates.some(({ name }) => name)) return;
+            continue;
+          }
+          if (label === selected) {
             const locals = new Map(indices);
-            if (iteration && branch.loopVariable) {
-              const index = Number(iteration[1]);
-              if (
-                !Number.isInteger(index) ||
-                index < -0x80000000 ||
-                index > 0x7fffffff
-              )
-                return;
-              locals.set(branch.loopVariable, index);
+            const index = iteration ? Number(iteration[1]) : undefined;
+            if (seen.has(index)) return;
+            seen.add(index);
+            if (index !== undefined) {
+              if (index < -0x80000000 || index > 0x7fffffff) return;
+              if (branch.loopVariable) locals.set(branch.loopVariable, index);
             }
             next.push({ scope: child.fullname, indices: locals });
-            found = true;
           } else {
             alternative = true;
           }
         }
-        if (found === alternative) return;
+        if (
+          Boolean(seen.size) === alternative &&
+          (seen.size || !branchIsInactive(branch, indices))
+        )
+          return;
       }
       parents = next;
     }
@@ -1360,6 +1514,7 @@ async function bindKdbGenerateAssignments(
             guard.expression &&
             remap(guard.expression, ids, undefined, indices),
         })),
+        waitPredicates: remapWaitPredicates(assignment.waitPredicates, ids),
         value,
         wordRead: remapWordRead(assignment.wordRead, ids, undefined, indices),
         fieldRead: remapFieldRead(assignment.fieldRead, ids),
@@ -1488,13 +1643,13 @@ function selectRootElement(trace: VideTrace, element: number): VideTrace {
   };
 }
 
-async function bindKdbGenerateScope(
+async function bindGenerateScope(
   trace: VideTrace,
   instance: string,
   design: DesignSession,
   sourceUri: (file: string) => string,
 ): Promise<VideTrace> {
-  if (design.kind !== "kdb") return trace;
+  if (design.kind !== "kdb" && !design.generateScopes) return trace;
   const ancestors: string[] = [instance];
   for (;;) {
     const scope = ancestors[ancestors.length - 1];
@@ -1716,6 +1871,14 @@ async function resolveInterfacePaths(
             ),
           )),
       };
+    }),
+  );
+  await Promise.all(
+    [...declarations.values()].map(async (signal) => {
+      if (signal.instanceParameter && !signal.parameterValue) {
+        const value = await parameter(signal.id, instance);
+        if (value) signal.instanceParameterValue = value;
+      }
     }),
   );
   return { ...trace, assignments, signals: [...declarations.values()] };
@@ -2067,6 +2230,9 @@ function bindHierarchicalOperands(
           ? null
           : guard.expression && remap(guard.expression, localIds, scopedIds),
       })),
+      waitPredicates: unresolved
+        ? undefined
+        : remapWaitPredicates(assignment.waitPredicates, localIds),
     };
     if (
       assignment.hierarchicalTargets?.some(
@@ -2171,7 +2337,7 @@ export async function bindModuleGenerateBranches(
   design: DesignSession,
   sourceUri: (file: string) => string,
 ) {
-  const bound = await bindKdbGenerateAssignments(
+  const bound = await bindGenerateAssignments(
     trace,
     instance,
     design,
@@ -2192,33 +2358,87 @@ async function applyGenerateBranches(
     return trace;
   const labelKey = ({ uri, name, line, byteColumn }: GenerateLabel) =>
     JSON.stringify([uri, name, line, byteColumn]);
+  const sites = design.generateLabels?.(instance) ?? [];
   const elaborated = new Set(
-    design.generateLabels?.(instance).map(({ file, name, line, column }) =>
-      labelKey({
-        uri: sourceUri(file),
-        name,
-        line: line - 1,
-        byteColumn: column - 1,
-      }),
-    ),
+    sites
+      .filter(({ unnamed }) => !unnamed)
+      .map(({ file, name, line, column }) =>
+        labelKey({
+          uri: sourceUri(file),
+          name,
+          line: line - 1,
+          byteColumn: column - 1,
+        }),
+      ),
   );
+  const unnamedSites = sites
+    .filter(({ unnamed }) => unnamed)
+    .map((site) => ({
+      ...site,
+      uri: sourceUri(site.file),
+      line: site.line - 1,
+      column: site.column - 1,
+    }));
   const uncertain = new Set<VideTrace["assignments"][number]>();
   const assignments: VideTrace["assignments"] = [];
-  const kdbLabels = new Map<string, Promise<boolean>>();
+  const kdbLabels = new Map<string, Promise<string | undefined>>();
+  const kdbScopes = new Map<string, Promise<Location[]>>();
   function selectedInDesign(label: GenerateLabel, scope: string) {
-    if (design.kind !== "kdb") return elaborated.has(labelKey(label));
+    const { blockEnd } = label;
+    if (design.kind !== "kdb") {
+      if (label.name)
+        return elaborated.has(labelKey(label)) ? scope : undefined;
+      if (!blockEnd) return;
+      const [endLine, endColumn] = blockEnd;
+      const matches = unnamedSites.filter(
+        ({ uri, line, column }) =>
+          uri === label.uri &&
+          (line > label.line ||
+            (line === label.line && column >= label.byteColumn)) &&
+          (line < endLine || (line === endLine && column < endColumn)),
+      );
+      return matches.length === 1 ? scope : undefined;
+    }
+    if (!label.name) {
+      if (!hasUniqueGenerateLine(label)) return;
+      let children = kdbScopes.get(scope);
+      if (!children) {
+        children = (async () => {
+          const records = await design.children(scope, true).catch(() => []);
+          if (records.length >= 1500) return [];
+          const scopes = records.filter(
+            ({ kind, fullname }) =>
+              kind === "npiGenScope" && fullname.startsWith(scope + "."),
+          );
+          if (scopes.length > 256) return [];
+          return (
+            await Promise.all(
+              scopes.map(({ fullname }) =>
+                design.resolve(fullname).catch(() => undefined),
+              ),
+            )
+          ).filter((record): record is Location => !!record);
+        })();
+        kdbScopes.set(scope, children);
+      }
+      return children.then((records) => {
+        const matches = records.filter((record) =>
+          generateSourceLineMatches(label, record, sourceUri),
+        );
+        return matches.length === 1 ? matches[0].fullname : undefined;
+      });
+    }
     const fullname = scope + "." + label.name;
     const key = JSON.stringify([fullname, labelKey(label)]);
     let resolved = kdbLabels.get(key);
     if (!resolved) {
       resolved = design.resolve(fullname).then(
         (object) =>
-          object?.kind === "npiGenScope" &&
-          object.fullname === fullname &&
-          object.line === label.line + 1 &&
-          !!object.file &&
-          sourceUri(object.file) === label.uri,
-        () => false,
+          object?.fullname === fullname &&
+          generateSourceLineMatches(label, object, sourceUri)
+            ? fullname
+            : undefined,
+        () => undefined,
       );
       kdbLabels.set(key, resolved);
     }
@@ -2242,7 +2462,7 @@ async function applyGenerateBranches(
           break;
         }
       // Absence alone gives no proof. An elaborated sibling proves exclusion
-      // only when the assignment has its own identifiable source label.
+      // only when both alternatives have source locations.
       if (branch.selected && !selected && alternative) {
         excluded = true;
         break;
@@ -2250,7 +2470,7 @@ async function applyGenerateBranches(
       if (!selected || alternative) resolved = false;
       if (design.kind === "kdb") {
         if (!resolved) break;
-        scope += "." + branch.selected!.name;
+        scope = selected!;
       }
     }
     if (excluded) continue;

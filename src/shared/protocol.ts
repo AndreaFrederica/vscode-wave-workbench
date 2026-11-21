@@ -35,6 +35,7 @@ export interface Signal {
   supported: boolean;
   real?: boolean;
   unit?: string;
+  analogScale?: AnalogScale;
   group?: string;
   displayName?: string;
   displayRadix?: Radix;
@@ -48,6 +49,18 @@ export interface Signal {
   decoder?: DecoderProfile;
   annotation?: Annotation;
 }
+export type AnalogScale =
+  | { mode: "manual"; min: number; max: number }
+  | { mode: "window"; start: number; end: number }
+  | { mode: "cursors" };
+
+export type OverviewBin = [
+  start: string,
+  end: string,
+  min: string,
+  max: string,
+  samples?: [tick: string, value: number, segment: number][],
+];
 export interface Marker {
   name: string;
   time: number;
@@ -65,8 +78,10 @@ export interface Metadata {
   end: string;
   scale: string;
   backend: string;
+  warnings?: string[];
   supportsOrderedHistory?: boolean;
-  axis?: "time" | "frequency";
+  axis?: "time" | "frequency" | "sweep";
+  sweep?: { origin: number; step: number; name: string; unit?: string | null };
   title?: string;
   vide?: string;
 }
@@ -91,6 +106,7 @@ export interface Location {
   definitionLine: number;
   instance: string;
   parameterValue?: { bits: string; signed: boolean };
+  packedRange?: [number, number];
   interfaceRange?: [number, number];
   interfaceWidth?: number;
   interfaceTwoState?: boolean;
@@ -112,6 +128,16 @@ export interface IndexedPartSelect {
   ascendingIndices: boolean;
 }
 export type AssignmentValue =
+  | { op: "typeShape"; args: [number, boolean] }
+  | {
+      op: "caseMatch";
+      args: [
+        AssignmentValue,
+        [AssignmentValue, AssignmentValue?][],
+        [number, number],
+        "equal" | "wildcardZ" | "wildcardX" | "inside",
+      ];
+    }
   | { op: "signal"; args: number }
   | { op: "scopedSignal"; args: [number, number] }
   | { op: "scopedSelect"; args: [number, number, number, number] }
@@ -132,6 +158,14 @@ export type AssignmentValue =
       args: [number, AssignmentValue, IndexedPartSelect];
     }
   | { op: "concat"; args: AssignmentValue[] }
+  | {
+      op: "membership";
+      args: [
+        AssignmentValue,
+        [AssignmentValue, AssignmentValue?][],
+        [number, number],
+      ];
+    }
   | { op: "repeat"; args: [number, AssignmentValue] }
   | { op: "cast"; args: [number | null, boolean, boolean, AssignmentValue] }
   | { op: "unary"; args: [ValueUnary, AssignmentValue] }
@@ -252,15 +286,31 @@ export interface SearchResult {
   total: number;
   scope?: string;
 }
-export interface CacheStats {
+export interface CacheUsage {
   entries: number;
   bytes: number;
   budget: number;
   hits: number;
-  reads: number;
   misses: number;
   evictions: number;
+}
+export interface CacheStats extends CacheUsage {
+  reads: number;
   containingHits: number;
+  digital?: Omit<CacheUsage, "budget" | "evictions">;
+  real?: Omit<CacheUsage, "budget" | "evictions">;
+  psfxl?: CacheUsage & { memory?: CacheUsage };
+}
+export interface WaveCacheProjectUsage {
+  name: string;
+  path: string;
+  active: boolean;
+  sessions: number;
+  pending: number;
+  failed: number;
+  decoded: number;
+  samples: number;
+  disk: number;
 }
 export interface BackendProtocol {
   decoderInit: {
@@ -299,6 +349,10 @@ export interface BackendProtocol {
     };
     result: QueryResult;
   };
+  overview: {
+    args: { name: string; start: string; end: string; bins: number };
+    result: OverviewBin[];
+  };
   describe: {
     args: { descriptors?: Operand[]; signals?: string[]; query?: string };
     result: Signal[];
@@ -320,7 +374,10 @@ export interface BackendProtocol {
     result: { signal: Signal; definitions: Signal[] };
   };
   cacheStats: { args: Record<string, never>; result: CacheStats };
-  cacheConfigure: { args: { bytes: number }; result: CacheStats };
+  cacheConfigure: {
+    args: { bytes: number; psfxl_bytes?: number; psfxl_memory_bytes?: number };
+    result: CacheStats;
+  };
   kdbOpen: {
     args: { path: string };
     result: {

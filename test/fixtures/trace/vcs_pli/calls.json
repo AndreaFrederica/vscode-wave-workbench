@@ -1,0 +1,15 @@
+{
+  "calls": [
+    {
+      "site": "drive",
+      "instance": "tb",
+      "signal": "target",
+      "call": "$wb_drive",
+      "location": { "file": "tb.sv", "line": 9, "column": 8 }
+    }
+  ],
+  "steps": {
+    "read-input": { "file": "driver.c", "line": 7, "column": 23 },
+    "write-target": { "file": "driver.c", "line": 15, "column": 24 }
+  }
+}

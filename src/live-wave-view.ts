@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+import { localizeHtml } from "./shared/localization";
 import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import type * as vscode from "vscode";
@@ -58,9 +59,8 @@ export class LiveWaveView
       localResourceRoots: [media, scripts],
     };
     const nonce = randomBytes(16).toString("hex");
-    view.webview.html = readFileSync(
-      context.asAbsolutePath("media/live-wave.html"),
-      "utf8",
+    view.webview.html = localizeHtml(
+      readFileSync(context.asAbsolutePath("media/live-wave.html"), "utf8"),
     )
       .replaceAll("{{csp}}", view.webview.cspSource)
       .replaceAll("{{nonce}}", nonce)

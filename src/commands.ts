@@ -49,6 +49,21 @@ wvSaveSignal file.tcl; wvRestoreSignal file.tcl; source file.tcl
 srcGetFileName full.name; srcSetScope full.name
 All wv commands except wvCreateWindow accept -win 1. Unsupported commands/options raise errors.
 Saved signal files are replayable Tcl scripts, not native Verdi .sav files.`;
+const WAVE_COMMAND_OPTIONS: Record<string, Record<string, number>> = {
+  wvAddSignal: { "-group": 1, "-clear": 0, "-delim": 1 },
+  wvSetCursor: { "-begin": 0, "-end": 0 },
+  wvSetMarker: { "-name": 1, "-keepViewRange": 0 },
+  wvSetRadix: { "-format": 1, "-Unsigned": 0, "-2Com": 0, "-delim": 1 },
+  wvSelectSignal: { "-delim": 1 },
+  wvDeleteSignal: { "-delim": 1 },
+  wvGetSigValueByTime: {
+    "-format": 1,
+    "-time": 1,
+    "-lz": 0,
+    "-delim": 1,
+  },
+  wvIsSignalExistInWaveform: { "-signal": 1, "-delim": 1 },
+};
 function parse(nodes: TclNode[], spec: Record<string, number> = {}) {
   const options: Record<string, TclNode> = {},
     position = [];
@@ -161,21 +176,7 @@ class WaveCommands<V extends CommandViewer = Viewer> {
     let viewer = this.getViewer();
     const p = parse(nodes, {
       "-win": 1,
-      ...({
-        wvAddSignal: { "-group": 1, "-clear": 0, "-delim": 1 },
-        wvSetCursor: { "-begin": 0, "-end": 0 },
-        wvSetMarker: { "-name": 1, "-keepViewRange": 0 },
-        wvSetRadix: { "-format": 1, "-Unsigned": 0, "-2Com": 0, "-delim": 1 },
-        wvSelectSignal: { "-delim": 1 },
-        wvDeleteSignal: { "-delim": 1 },
-        wvGetSigValueByTime: {
-          "-format": 1,
-          "-time": 1,
-          "-lz": 0,
-          "-delim": 1,
-        },
-        wvIsSignalExistInWaveform: { "-signal": 1, "-delim": 1 },
-      }[command] || {}),
+      ...WAVE_COMMAND_OPTIONS[command],
     });
     const { options: o, position: a } = p;
     const args = a.map(text);
@@ -763,4 +764,4 @@ class WaveCommands<V extends CommandViewer = Viewer> {
     }
   }
 }
-export { WaveCommands, HELP, formatValue, quote };
+export { WaveCommands, HELP, WAVE_COMMAND_OPTIONS, formatValue, quote };

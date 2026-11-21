@@ -3,10 +3,20 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import { localize } from "../shared/localization";
 import { getElement as $ } from "./dom";
 import { renderClipImage } from "./clip-image";
+import { measurementPanel } from "./measurements";
+import { amplitudeCursors } from "./amplitude-cursors";
+import type { Measurement } from "../shared/measurements";
 import { interpolateReal, realLabel } from "../shared/analog";
-import { drawAnalog } from "./analog-render";
+import {
+  drawAnalog,
+  drawAnalogOverview,
+  drawAnalogOverviewSamples,
+  overviewRange,
+  type AnalogRange,
+} from "./analog-render";
 import {
   validDecoderInstances,
   type DecoderInstance,
@@ -48,9 +58,10 @@ import {
   type BusLabelMode,
   type Marker,
   type QueryResult,
+  type OverviewBin,
 } from "../shared/protocol";
 /* global acquireVsCodeApi */
-const vscode = acquireVsCodeApi<Partial<WaveState>>();
+const vscode = acquireVsCodeApi<Partial<WaveState> & { toolbarRows?: 1 | 2 }>();
 
 const DEFAULT_ROW_HEIGHT = 32;
 let colors: string[] = [],
@@ -89,7 +100,12 @@ let meta: Metadata,
   displayScale = null,
   displayFactor = 1;
 let generation = 0,
-  inflight: { request: number; start: number; end: number } | null = null,
+  inflight: {
+    request: number;
+    start: number;
+    end: number;
+    refill: boolean;
+  } | null = null,
   neededIds: string[] = [],
   prefetchIds: string[] = [],
   retainedIds = new Set<string>(),
@@ -97,12 +113,25 @@ let generation = 0,
   pan = null,
   searchRequest = 0,
   searchTimer;
+let prefetchTime = false;
+let panDirection = 0;
 const saved = vscode.getState() || {};
+let toolbarRows: 1 | 2 = saved.toolbarRows === 2 ? 2 : 1;
 let decoderInstances = validDecoderInstances(saved.decoderInstances)
   ? saved.decoderInstances
   : [];
 let decoderRequest = 0;
-let measurementRequest = 0;
+const measurements = measurementPanel(
+  () => ({ meta, start, end, cursorA, cursorB }),
+  (message) => vscode.postMessage(message),
+  action,
+  () => chosen,
+);
+const amplitude = amplitudeCursors(
+  () => chosen[active],
+  draw,
+  (message) => status(message, "warn"),
+);
 interface DecoderLane {
   lane: HTMLElement;
   items: HTMLElement;
@@ -141,16 +170,16 @@ function mountDecoder(id: string, name: string): DecoderLane {
   label.textContent = name;
   controls.append(label);
   for (const [title, action] of [
-    ["重载", () => scheduleDecoder(id)],
+    [localize("重载"), () => scheduleDecoder(id)],
     [
-      "取消",
+      localize("取消"),
       () => {
         cancelDecoder(id);
-        decoderLanes.get(id)!.status.textContent = "已取消";
+        decoderLanes.get(id)!.status.textContent = localize("已取消");
       },
     ],
     [
-      "生成虚拟信号",
+      localize("生成虚拟信号"),
       () => {
         const instance = decoderInstances.find(
           (item) => item.instanceId === id,
@@ -159,7 +188,7 @@ function mountDecoder(id: string, name: string): DecoderLane {
           vscode.postMessage({ type: "materializeDecoderSignal", instance });
       },
     ],
-    ["移除", () => detachDecoder(id)],
+    [localize("移除"), () => detachDecoder(id)],
   ] as const) {
     const button = document.createElement("button");
     button.textContent = title;
@@ -194,7 +223,7 @@ function scheduleDecoder(refresh?: string) {
     lane.key = key;
     const request = (lane.request = ++decoderRequest);
     lane.items.replaceChildren();
-    lane.status.textContent = "解码中…";
+    lane.status.textContent = localize("解码中…");
     lane.timer = setTimeout(
       () =>
         vscode.postMessage({
@@ -239,10 +268,10 @@ function showDecoderResult(
   lane.status.textContent =
     result.warnings[0] ??
     (result.truncated
-      ? "结果已截断"
+      ? localize("结果已截断")
       : result.transactions.length
         ? ""
-        : "窗口内无事务");
+        : localize("窗口内无事务"));
 }
 
 $("configureWaveDecoder").onclick = () =>
@@ -353,10 +382,21 @@ function publishProjectState(baseline = false) {
 let cursorValues = {},
   cursorFlight = null,
   cursorSequence = 0;
+let dockSelectionSignature = "";
 function persist() {
   publishRtlCursor();
+  const selection = {
+    active: chosen[active] ? key(chosen[active]) : undefined,
+    keys: [...selectedKeys],
+    scrollTop: $("tracks").scrollTop,
+  };
+  const signature = JSON.stringify(selection);
+  if (signature !== dockSelectionSignature) {
+    dockSelectionSignature = signature;
+    vscode.postMessage({ type: "dockSelection", ...selection });
+  }
   if (projectSignature !== undefined) {
-    if (!projectDirty) publishProjectState();
+    if (!projectDirty || document.body.dataset.dock) publishProjectState();
     else projectTimer ??= window.setTimeout(publishProjectState, 100);
   }
   clearTimeout(persistTimer);
@@ -378,6 +418,7 @@ function persist() {
           decoder: s.decoder,
           annotation: s.annotation,
           unit: s.unit,
+          analogScale: s.analogScale,
         })),
         start,
         end,
@@ -387,6 +428,7 @@ function persist() {
         markers,
         markersVisible,
         tooltipEnabled,
+        toolbarRows,
         showInlineTags: showInlineTags.checked,
         tagStyle: tagStyle(waveTagStyle.value),
         tagColors,
@@ -467,7 +509,13 @@ function formatSignal(raw, s) {
     (value.startsWith("-") ? value.slice(1) : value)
   );
 }
-function timeLabel(t) {
+function timeLabel(t, delta = false) {
+  const sweep = meta?.sweep;
+  if (meta?.axis === "sweep" && sweep) {
+    const value = (delta ? 0 : sweep.origin) + t * sweep.step;
+    const label = Number(value.toPrecision(10)).toString();
+    return sweep.unit ? label + " " + sweep.unit : label;
+  }
   const frequency =
     meta?.axis === "frequency" ? scaleHertz(meta.scale) : undefined;
   if (frequency) return frequencyLabel(t * frequency);
@@ -549,16 +597,16 @@ function expandBus(signals = selectedSignals()) {
       range &&
       Math.abs(Number(range[1]) - Number(range[2])) + 1 !== s.width
     ) {
-      status("暂不支持多维 packed Bus 位展开", "warn");
+      status(localize("暂不支持多维 packed Bus 位展开"), "warn");
       return;
     }
     if (s.width > MAX_SIGNALS) {
-      status("Bus 位数超过会话上限", "warn");
+      status(localize("Bus 位数超过会话上限"), "warn");
       return;
     }
     const bits = WaveSignal.bits(s).filter((bit) => !existing.has(key(bit)));
     if (bits.length > remaining) {
-      status("展开后超过会话信号上限，请减少所选 Bus", "warn");
+      status(localize("展开后超过会话信号上限，请减少所选 Bus"), "warn");
       return;
     }
     remaining -= bits.length;
@@ -643,7 +691,7 @@ function assignGroup(name, signals = selectedSignals()) {
 }
 function renameGroup(name, next) {
   if (!next || name === next) return;
-  if (groupOrder.includes(next)) throw Error("此分组名称已存在");
+  if (groupOrder.includes(next)) throw Error(localize("此分组名称已存在"));
   for (const s of chosen) if (s.group === name) s.group = next;
   groupOrder = groupOrder.map((g) => (g === name ? next : g));
   if (collapsedGroups.delete(name)) collapsedGroups.add(next);
@@ -697,6 +745,7 @@ function refreshNeeded() {
       .slice(first, last)
       .flatMap(({ index }) => (index === undefined ? [] : [chosen[index].id]));
   neededIds = [...new Set(idsInRange(a, b))];
+  prefetchTime = chosen.some((signal) => signal.id.startsWith("psfxl:"));
   const margin = Math.min(16, Math.ceil(viewportHeight / rowHeight / 2));
   retainedIds = new Set(neededIds);
   prefetchIds = [];
@@ -709,11 +758,14 @@ function refreshNeeded() {
     prefetchIds.push(id);
   }
   for (const id of Object.keys(data)) if (!retainedIds.has(id)) delete data[id];
+  for (const id of viewportOverviews.keys())
+    if (!retainedIds.has(id)) viewportOverviews.delete(id);
   for (const id of Object.keys(cursorValues))
     if (!retainedIds.has(id)) delete cursorValues[id];
   pump();
   pumpCursor();
   pumpUart();
+  pumpOverview();
 }
 const uartReads = new Map<
   string,
@@ -805,6 +857,10 @@ function coversTick(read: WaveRead | undefined, tick: number) {
 
 function needsData(id: string) {
   const read = data[id];
+  if (prefetchTime && read) {
+    if (read.start > start || read.end < end) return true;
+    return readEnd(read) < end && read.end - read.start > (end - start) * 4;
+  }
   return (
     !read ||
     read.start > start ||
@@ -813,9 +869,96 @@ function needsData(id: string) {
   );
 }
 
+type OverviewRequest = {
+  signal: string;
+  start: number;
+  end: number;
+  bins: number;
+};
+const overviews = new Map<string, OverviewBin[] | null>();
+const viewportOverviews = new Map<
+  string,
+  { range: OverviewRequest; bins: OverviewBin[] }[]
+>();
+let overviewFlight:
+  | { range: OverviewRequest; key: string; request: number }
+  | undefined;
+let overviewSequence = 0;
+function overviewKey(query: OverviewRequest) {
+  return JSON.stringify([query.signal, query.start, query.end, query.bins]);
+}
+function viewportOverview(
+  signal: string,
+  read = data[signal],
+): OverviewRequest {
+  // Match the summary created by the PSFXL reader for the padded query.
+  const bins = signal.startsWith("psfxl:") ? 3072 : 768;
+  if (prefetchTime && read && read.start <= start && read.end >= end)
+    return { signal, start: read.start, end: read.end, bins };
+  return { signal, start, end, bins };
+}
+function visibleOverview(id: string, read: WaveRead | undefined) {
+  if (read && read.start <= start && readEnd(read) >= end) return;
+  const current = overviews.get(overviewKey(viewportOverview(id, read)));
+  if (!prefetchTime) return current;
+  const candidates = viewportOverviews.get(id);
+  const cached =
+    candidates?.find(({ range }) => range.start <= start && range.end >= end) ??
+    candidates?.find(({ range }) => range.start < end && range.end > start);
+  const bins = id.startsWith("psfxl:")
+    ? (current ?? cached?.bins)
+    : (cached?.bins ?? current);
+  // Keep neighboring points for interpolation where the plot clips the line.
+  if (bins?.[0]?.[4]) return bins;
+  return bins?.filter(
+    ([first, last]) => Number(first) <= end && Number(last) >= start,
+  );
+}
+function scaleOverview(s: Signal): OverviewRequest | undefined {
+  const scale = s.analogScale;
+  if (scale?.mode === "window" && meta) {
+    const first = Math.max(Number(meta.start), scale.start);
+    const last = Math.min(Number(meta.end), scale.end);
+    if (first < last) return { signal: s.id, start: first, end: last, bins: 1 };
+  }
+  if (scale?.mode === "cursors" && cursorB !== null && cursorA !== cursorB)
+    return {
+      signal: s.id,
+      start: Math.min(cursorA, cursorB),
+      end: Math.max(cursorA, cursorB),
+      bins: 1,
+    };
+}
+function pumpOverview() {
+  if (!meta || overviewFlight || inflight || viewportReadTimer) return;
+  for (const row of displayRows.slice(firstRow, lastRow)) {
+    if (row.index === undefined) continue;
+    const signal = chosen[row.index];
+    const read = data[signal.id];
+    const queries = [
+      read && readEnd(read) < end && !needsData(signal.id)
+        ? viewportOverview(signal.id)
+        : undefined,
+      scaleOverview(signal),
+    ];
+    for (const query of queries) {
+      if (!query) continue;
+      const key = overviewKey(query);
+      if (overviews.has(key)) continue;
+      overviewFlight = { range: query, key, request: ++overviewSequence };
+      vscode.postMessage({
+        type: "overview",
+        request: overviewSequence,
+        ...query,
+      });
+      return;
+    }
+  }
+}
+
 // Values at A must remain correct when A lies outside the displayed time window.
 function pumpCursor() {
-  if (!meta || cursorFlight) return;
+  if (!meta || cursorFlight || viewportReadTimer) return;
   const required = neededIds.filter((id) => {
     return (
       cursorValues[id]?.time !== cursorA &&
@@ -872,7 +1015,7 @@ function activateSignalGroup(signal?: Signal) {
 }
 function moveGroup(name: string, target: string, after: boolean) {
   if (!groupOrder.includes(name) || !groupOrder.includes(target))
-    throw Error("分组不存在");
+    throw Error(localize("分组不存在"));
   if (name === target) return;
   const order = groupOrder.filter((group) => group !== name);
   order.splice(order.indexOf(target) + Number(after), 0, name);
@@ -897,7 +1040,7 @@ function setTooltip(enabled: boolean) {
 function add(signal) {
   if (chosen.some((s) => key(s) === key(signal))) return;
   if (chosen.length >= MAX_SIGNALS) {
-    status("已达到 100000 个已添加信号的会话上限", "warn");
+    status(localize("已达到 100000 个已添加信号的会话上限"), "warn");
     return;
   }
   if (!signal.group && activeGroup) signal.group = activeGroup;
@@ -912,22 +1055,37 @@ function request() {
   persist();
   render();
 }
+let viewportReadTimer = 0;
+function needsTimeRefill(id: string) {
+  if (!prefetchTime || !panDirection || needsData(id)) return false;
+  const read = data[id];
+  if (!read) return false;
+  const margin = (end - start) / 4;
+  return panDirection > 0
+    ? read.end < Number(meta.end) && read.end - end < margin
+    : read.start > Number(meta.start) && start - read.start < margin;
+}
 function pump() {
   if (!meta) return;
   const missing = neededIds.filter(needsData);
   if (!missing.length) settled();
-  if (inflight) return;
+  if (inflight || viewportReadTimer) return;
+  const refill = !missing.length ? neededIds.filter(needsTimeRefill) : [];
   const ids = missing.length
     ? missing.slice(0, 64)
-    : prefetchIds.filter(needsData).slice(0, 16);
+    : refill.length
+      ? refill.slice(0, 64)
+      : prefetchIds.filter(needsData).slice(0, 16);
   if (!ids.length) return;
-  // Preload neighboring ticks to cover small pans without a backend round trip.
-  // Retry with the exact viewport when a dense signal exhausts the event limit.
-  const padding = ids.some((id) => data[id]?.block.truncated)
-    ? 0
-    : Math.ceil((end - start) / 2);
+  // A mixed waveform can also reuse the overview of the padded range when
+  // the raw event budget is exhausted.
+  const padding =
+    !prefetchTime && ids.some((id) => data[id]?.block.truncated)
+      ? 0
+      : Math.ceil((end - start) / (prefetchTime ? 1 : 2));
   inflight = {
     request: ++generation,
+    refill: !!refill.length,
     start: Math.max(Number(meta.start), start - padding),
     end: Math.min(
       Math.max(Number(meta.start) + 1, Number(meta.end)),
@@ -936,7 +1094,11 @@ function pump() {
   };
   if (missing.length)
     status(
-      `正在读取可见信号… ${chosen.length} 个已添加 / ${neededIds.length} 个视口信号`,
+      localize(
+        "正在读取可见信号… {0} 个已添加 / {1} 个视口信号",
+        chosen.length,
+        neededIds.length,
+      ),
     );
   vscode.postMessage({
     type: "query",
@@ -947,12 +1109,31 @@ function pump() {
   });
 }
 function settled() {
-  const clipped = neededIds.some((id) => data[id] && readEnd(data[id]) < end);
+  const clipped = neededIds.filter((id) => data[id] && readEnd(data[id]) < end);
+  const summarized = clipped.filter(
+    (id) => visibleOverview(id, data[id])?.length,
+  );
+  const pending = clipped.some(
+    (id) => !overviews.has(overviewKey(viewportOverview(id))),
+  );
   status(
-    clipped
-      ? "可见信号事件超限，阴影区域尚未读取；请缩小时间窗口。"
-      : `${chosen.length} 个信号 · 视口 ${firstRow + 1}–${lastRow} · ${meta?.scale || ""}/tick`,
-    clipped ? "warn" : "",
+    pending
+      ? localize("正在生成可见时间窗的波形概览…")
+      : clipped.length > summarized.length
+        ? localize("部分信号的概览不可用，请缩小时间窗口。")
+        : summarized.length
+          ? localize(
+              "波形概览 · {0} 条信号 · 放大查看采样细节",
+              summarized.length,
+            )
+          : localize(
+              "{0} 个信号 · 视口 {1}–{2} · {3}/tick",
+              chosen.length,
+              firstRow + 1,
+              lastRow,
+              meta?.scale || "",
+            ),
+    !pending && clipped.length > summarized.length ? "warn" : "",
   );
   for (const p of dataWaiters.splice(0)) p.resolve();
 }
@@ -1083,7 +1264,7 @@ function renderCatalog() {
     button.style.paddingInlineStart = 8 + (entry?.depth || 0) * 16 + "px";
     if (entry) button.dataset.depth = String(entry.depth);
     if (!entry) {
-      button.textContent = "读取信号目录…";
+      button.textContent = localize("读取信号目录…");
       button.disabled = true;
     } else if (entry.kind === "scope") {
       button.className = "scope";
@@ -1128,8 +1309,12 @@ function renderCatalog() {
     treeViewport.append(button);
   }
   $("count").textContent = catalogFlat
-    ? `${total} 个匹配信号 · 按需分页`
-    : `层次预览 ${meta.signals.length} / ${meta.total ?? meta.signals.length} · 全部信号可滚动浏览`;
+    ? localize("{0} 个匹配信号 · 按需分页", total)
+    : localize(
+        "层次预览 {0} / {1} · 全部信号可滚动浏览",
+        meta.signals.length,
+        meta.total ?? meta.signals.length,
+      );
   if (
     catalogFlat &&
     (missing !== null || (total === 0 && catalog.pages.size === 0))
@@ -1165,8 +1350,22 @@ function setWindow(a: number, b: number, defer = false) {
     nextStart = Math.round(Math.max(low, Math.min(a, high - length))),
     nextEnd = Math.min(high, nextStart + Math.round(length));
   if (nextStart === start && nextEnd === end) return;
+  panDirection =
+    nextEnd - nextStart === end - start ? Math.sign(nextStart - start) : 0;
   start = nextStart;
   end = nextEnd;
+  clearTimeout(viewportReadTimer);
+  viewportReadTimer = 0;
+  if (
+    defer &&
+    prefetchTime &&
+    neededIds.some((id) => needsData(id) || needsTimeRefill(id))
+  ) {
+    viewportReadTimer = window.setTimeout(() => {
+      viewportReadTimer = 0;
+      scheduleViewport();
+    }, 85);
+  }
   persist();
   if (defer) scheduleViewport();
   else render();
@@ -1190,8 +1389,8 @@ timeUnitSelect.onchange = () => {
 };
 function updateTimeUnit() {
   if (!meta) return;
-  timeUnitSelect.disabled = meta.axis === "frequency";
-  nativeTimeUnit.textContent = "原始 (" + meta.scale + ")";
+  timeUnitSelect.disabled = meta.axis === "frequency" || meta.axis === "sweep";
+  nativeTimeUnit.textContent = localize("原始 (") + meta.scale + ")";
   if (timeUnitSelect.value === (displayScale || "")) return;
   customTimeUnit.remove();
   if (
@@ -1242,7 +1441,12 @@ function updateTimeScroll() {
   const percentage = (ratio * 100).toLocaleString("zh-CN", {
     maximumSignificantDigits: 3,
   });
-  const description = `${timeLabel(start)} → ${timeLabel(end)} · 全波形的 ${percentage}%`;
+  const description = localize(
+    "{0} → {1} · 全波形的 {2}%",
+    timeLabel(start),
+    timeLabel(end),
+    percentage,
+  );
   timeScroll.setAttribute("aria-valuetext", description);
   timeScroll.title = description;
 }
@@ -1304,7 +1508,10 @@ function updateValueSplit() {
   valueSplit.setAttribute("aria-valuemin", String(minimum));
   valueSplit.setAttribute("aria-valuemax", String(maximum));
   valueSplit.setAttribute("aria-valuenow", String(valueWidth));
-  valueSplit.setAttribute("aria-valuetext", "数值列 " + valueWidth + " 像素");
+  valueSplit.setAttribute(
+    "aria-valuetext",
+    localize("数值列 ") + valueWidth + localize(" 像素"),
+  );
 }
 function setValueFraction(fraction?: number) {
   valueFraction = normalizeValueFraction(fraction);
@@ -1419,7 +1626,7 @@ function render() {
         "aria-expanded",
         String(!collapsedGroups.has(item.group)),
       );
-      group.title = "拖动排序 · 点击折叠/展开 · 双击重命名";
+      group.title = localize("拖动排序 · 点击折叠/展开 · 双击重命名");
       group.draggable = true;
       const groupDragType = "application/x-wave-group";
       const dropAfter = (event: DragEvent) => {
@@ -1565,16 +1772,16 @@ function render() {
     if (decoded) value.title = decoded + " · " + rawValue;
     else if (s.decoder?.uart && showDecodedValues.checked) {
       if (uartBitTicks(s.decoder.uart, meta.scale) < 2)
-        value.title = "波形时间精度不足以按此波特率解码";
+        value.title = localize("波形时间精度不足以按此波特率解码");
       else if (uartReads.get(s.id)?.block.truncated)
-        value.title = "UART 解码所需的历史事件被截断";
+        value.title = localize("UART 解码所需的历史事件被截断");
     }
     const toggle = document.createElement("button");
     toggle.className = "busToggle";
     toggle.textContent =
       !s.real && s.width > 1 ? (expandedBuses.has(key(s)) ? "▾" : "▸") : "";
     toggle.disabled = !!s.real || s.width <= 1;
-    toggle.title = "展开/收回 Bus 位";
+    toggle.title = localize("展开/收回 Bus 位");
     toggle.onclick = (e) => {
       e.stopPropagation();
       if (expandedBuses.has(key(s))) collapseBus([s]);
@@ -1589,7 +1796,8 @@ function render() {
     annotation.className = "signalAnnotation";
     annotation.classList.toggle("hasAnnotation", !!s.annotation);
     annotation.textContent = "✎";
-    annotation.title = "编辑 " + WaveSignal.label(s) + " 的标签和注释";
+    annotation.title =
+      localize("编辑 ") + WaveSignal.label(s) + localize(" 的标签和注释");
     annotation.setAttribute("aria-label", annotation.title);
     annotation.onclick = (event) => {
       event.stopPropagation();
@@ -1638,10 +1846,12 @@ function render() {
   updateNameScroll(rows);
   updateTimeScroll();
   updateTimeUnit();
-  const cursorDetails = `A: ${timeLabel(cursorA)}${cursorB == null ? " · Shift+单击设置 B" : `   B: ${timeLabel(cursorB)}   Δ: ${timeLabel(Math.abs(cursorA - cursorB))}`}`;
+  const cursorDetails = `A: ${timeLabel(cursorA)}${cursorB == null ? localize(" · Shift+单击设置 B") : `   B: ${timeLabel(cursorB)}   Δ: ${timeLabel(Math.abs(cursorA - cursorB), true)}`}`;
   $("cursors").textContent =
-    (cursorB == null ? "" : `Δ: ${timeLabel(Math.abs(cursorA - cursorB))}`) +
-    (cursorA < start || cursorA > end ? " · A 在视窗外" : "");
+    (cursorB == null
+      ? ""
+      : `Δ: ${timeLabel(Math.abs(cursorA - cursorB), true)}`) +
+    (cursorA < start || cursorA > end ? localize(" · A 在视窗外") : "");
   $("cursors").classList.toggle("offscreen", cursorA < start || cursorA > end);
   $("cursors").title = cursorDetails;
   if (document.activeElement !== $("cursorAInput"))
@@ -1650,13 +1860,14 @@ function render() {
     $("cursorBInput").value =
       cursorB == null ? "" : String(cursorB / displayFactor);
   $("range").textContent =
-    meta?.axis === "frequency"
+    meta?.axis === "frequency" || meta?.axis === "sweep"
       ? timeLabel(start) + " → " + timeLabel(end)
       : `${start / displayFactor} → ${end / displayFactor} × ${displayScale || meta?.scale || "tick"}`;
   $("range").title = `${timeLabel(start)} → ${timeLabel(end)}`;
   draw();
   refreshNeeded();
   window.waveHover?.refresh();
+  measurements.refresh();
 }
 function draw() {
   const canvas = $("canvas"),
@@ -1693,7 +1904,7 @@ function draw() {
     ctx.lineTo(px, height);
     ctx.stroke();
     ctx.fillText(
-      meta?.axis === "frequency"
+      meta?.axis === "frequency" || meta?.axis === "sweep"
         ? timeLabel(t)
         : Number((t / displayFactor).toPrecision(6)).toString(),
       px + 4,
@@ -1712,6 +1923,10 @@ function draw() {
   ctx.rect(0, timelineHeight, width, Math.max(0, height - timelineHeight));
   ctx.clip();
   const top = $("tracks").scrollTop;
+  const amplitudeTarget = amplitude.target(chosen);
+  let amplitudeGeometry:
+    | { range: AnalogRange; top: number; bottom: number }
+    | undefined;
   for (let position = firstRow; position < lastRow; position++) {
     const item = displayRows[position];
     if (item.index === undefined) continue;
@@ -1730,26 +1945,84 @@ function draw() {
     const read = data[s.id];
     const traceStart = Math.max(start, read?.start ?? start);
     const traceEnd = Math.min(end, read ? readEnd(read) : start);
+    const bins = visibleOverview(s.id, read);
+    const hasOverview = !!bins?.length;
     if (s.real && read) {
       ctx.strokeStyle = s.highlight || colors[i % colors.length];
-      const range = drawAnalog(
-        ctx,
-        events,
-        traceStart,
-        traceEnd,
-        x,
-        high,
-        low,
-        s.definition?.op === "samples" && s.definition.linear,
-      );
+      const scale = s.analogScale;
+      const custom = scaleOverview(s);
+      const limits =
+        scale?.mode === "manual"
+          ? scale
+          : custom
+            ? overviewRange(overviews.get(overviewKey(custom)) ?? [])
+            : undefined;
+      const range = hasOverview
+        ? bins[0][4]
+          ? drawAnalogOverviewSamples(
+              ctx,
+              bins,
+              start,
+              end,
+              x,
+              high,
+              low,
+              limits,
+            )
+          : drawAnalogOverview(
+              ctx,
+              bins,
+              (tick) => x(Math.max(start, Math.min(end, tick))),
+              high,
+              low,
+              limits,
+            )
+        : drawAnalog(
+            ctx,
+            events,
+            traceStart,
+            traceEnd,
+            x,
+            high,
+            low,
+            s.id.startsWith("psfxl:") ||
+              (s.definition?.op === "samples" && s.definition.linear),
+            limits,
+          );
+      if (s === amplitudeTarget && low >= timelineHeight && high < height) {
+        const axis = range ?? limits;
+        if (axis) amplitudeGeometry = { range: axis, top: high, bottom: low };
+      }
       if (range) {
         ctx.fillStyle = theme.foreground;
-        ctx.fillText(Number(range.max.toPrecision(4)).toString(), 4, high);
-        if (range.min !== range.max)
-          ctx.fillText(Number(range.min.toPrecision(4)).toString(), 4, low);
+        const axisText = (value: number) =>
+          Number(value.toPrecision(6)).toString();
+        ctx.fillText(axisText(range.max), 4, high);
+        if (range.min !== range.max) ctx.fillText(axisText(range.min), 4, low);
       }
     }
-    if (!s.real) {
+    if (!s.real && hasOverview) {
+      ctx.strokeStyle = s.highlight || colors[i % colors.length];
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.beginPath();
+      for (const [first, last, min, max] of bins) {
+        const left = x(Math.max(start, Number(first))),
+          right = x(Math.min(end, Number(last)));
+        const stable = min === max;
+        if (!stable) {
+          ctx.globalAlpha = 0.35;
+          ctx.fillRect(left, high, Math.max(1, right - left), low - high);
+          ctx.globalAlpha = 1;
+        } else {
+          const value = WaveSignal.project(min, s);
+          const level = value === "1" ? high : value === "0" ? low : middle;
+          ctx.moveTo(left, level);
+          ctx.lineTo(right, level);
+        }
+      }
+      ctx.stroke();
+    }
+    if (!s.real && !hasOverview) {
       let index = Math.max(0, valueAt(events, traceStart)),
         lastPixel = -2;
       for (; index < events.length; index++) {
@@ -1843,7 +2116,12 @@ function draw() {
         }
       }
     }
-    if (read?.block.truncated && read.start <= start && readEnd(read) < end) {
+    if (
+      !hasOverview &&
+      read?.block.truncated &&
+      read.start <= start &&
+      readEnd(read) < end
+    ) {
       const last = readEnd(read);
       ctx.save();
       ctx.globalAlpha = 0.18;
@@ -1889,11 +2167,14 @@ function draw() {
       ctx.restore();
     }
   }
+  amplitude.update(amplitudeGeometry, timelineHeight);
   window.waveMarkers?.render();
   if (!chosen.length) {
     ctx.fillStyle = theme.foreground;
     ctx.fillText(
-      "双击左侧信号添加波形 · 在 RTL 中右键 Add Selected Signal to Wave",
+      localize(
+        "双击左侧信号添加波形 · 在 RTL 中右键 Add Selected Signal to Wave",
+      ),
       20,
       65,
     );
@@ -1916,7 +2197,7 @@ function postRtlTrace(
   followContinuations = false,
 ) {
   if (!signal || signal.definition)
-    return status("请选择一条 RTL 波形信号。", "warn");
+    return status(localize("请选择一条 RTL 波形信号。"), "warn");
   vscode.postMessage({
     type: "rtlTrace",
     signal:
@@ -1929,6 +2210,93 @@ function postRtlTrace(
   });
 }
 
+const scaleDialog = $("analogScaleDialog");
+const scaleMode = $("analogScaleMode");
+let scaleTarget: Signal | undefined;
+function updateScaleFields() {
+  const manual = $("analogScaleManual"),
+    window = $("analogScaleWindow");
+  manual.hidden = manual.disabled = scaleMode.value !== "manual";
+  window.hidden = window.disabled = scaleMode.value !== "window";
+  $("analogScaleError").textContent = "";
+}
+function editAnalogScale() {
+  const signal = chosen[active];
+  if (!signal?.real) return status(localize("请选择一条实数波形。"), "warn");
+  scaleTarget = signal;
+  const scale = signal.analogScale;
+  scaleMode.value = scale?.mode ?? "viewport";
+  $("analogScaleTitle").textContent = localize(
+    "模拟纵轴 · {0}",
+    WaveSignal.label(signal),
+  );
+  $("analogScaleMin").value = scale?.mode === "manual" ? String(scale.min) : "";
+  $("analogScaleMax").value = scale?.mode === "manual" ? String(scale.max) : "";
+  $("analogScaleTimeUnit").textContent = localize(
+    "时间窗（{0}）",
+    displayScale || meta?.scale || "tick",
+  );
+  $("analogScaleStart").value = String(
+    (scale?.mode === "window" ? scale.start : start) / displayFactor,
+  );
+  $("analogScaleEnd").value = String(
+    (scale?.mode === "window" ? scale.end : end) / displayFactor,
+  );
+  updateScaleFields();
+  scaleDialog.showModal();
+}
+scaleMode.onchange = updateScaleFields;
+$("analogScaleCancel").onclick = () => scaleDialog.close();
+$("analogScaleForm").onsubmit = (event) => {
+  event.preventDefault();
+  const signal = scaleTarget;
+  if (!signal || !chosen.includes(signal) || !meta) return scaleDialog.close();
+  const error = $("analogScaleError");
+  switch (scaleMode.value) {
+    case "manual": {
+      const min = $("analogScaleMin").valueAsNumber,
+        max = $("analogScaleMax").valueAsNumber;
+      if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) {
+        error.textContent = localize("请输入有限数值，且上限必须大于下限。");
+        return;
+      }
+      signal.analogScale = { mode: "manual", min, max };
+      break;
+    }
+    case "window": {
+      const first = Math.round(
+        $("analogScaleStart").valueAsNumber * displayFactor,
+      );
+      const last = Math.round(
+        $("analogScaleEnd").valueAsNumber * displayFactor,
+      );
+      if (
+        !Number.isSafeInteger(first) ||
+        !Number.isSafeInteger(last) ||
+        first >= last ||
+        first < Number(meta.start) ||
+        last > Number(meta.end)
+      ) {
+        error.textContent = localize("请选择波形范围内有效的起止时间。");
+        return;
+      }
+      signal.analogScale = { mode: "window", start: first, end: last };
+      break;
+    }
+    case "cursors":
+      if (cursorB === null || cursorA === cursorB) {
+        error.textContent = localize("请先设置两个不同位置的游标。");
+        return;
+      }
+      signal.analogScale = { mode: "cursors" };
+      break;
+    default:
+      delete signal.analogScale;
+  }
+  scaleDialog.close();
+  request();
+};
+
 function action(name) {
   if (
     [
@@ -1940,6 +2308,9 @@ function action(name) {
       "saveProject",
       "openProject",
       "exportClip",
+      "dockWave",
+      "showTclConsole",
+      "undockWave",
     ].includes(name)
   ) {
     vscode.postMessage({ type: name });
@@ -1985,7 +2356,7 @@ function action(name) {
       return;
     }
     if (!signal || signal.definition)
-      return status("请选择一条 RTL 波形信号。", "warn");
+      return status(localize("请选择一条 RTL 波形信号。"), "warn");
     const fullname = [
       signal.scope,
       WaveSignal.label({ ...signal, displayName: undefined }),
@@ -2002,40 +2373,22 @@ function action(name) {
         tick: String(cursorA),
       });
   } else if (name.startsWith("measure-")) {
-    const operation = name.slice("measure-".length);
+    const operation = name.slice("measure-".length) as Measurement;
     const signals = selectedSignals();
-    if (!signals.length) return status("请先选择要测量的信号。", "warn");
-    const hasRange = cursorB !== null && cursorA !== cursorB;
-    if (operation === "cursors" && !hasRange)
-      return status("请设置两个不同位置的 A/B 游标。", "warn");
-    const first = hasRange ? Math.min(cursorA, cursorB) : start;
-    const last = hasRange ? Math.max(cursorA, cursorB) : end;
-    const dialog = $("measurementDialog") as HTMLDialogElement;
+    if (!signals.length)
+      return status(localize("请先选择要测量的信号。"), "warn");
     const button = document.querySelector<HTMLButtonElement>(
       '#measurementMenu [data-action="' + name + '"]',
     );
-    $("measurementTitle").textContent = button?.textContent || "波形测量";
-    $("measurementRows").replaceChildren();
-    $("measurementStatus").textContent = "正在测量…";
-    if (!dialog.open) dialog.showModal();
-    vscode.postMessage({
-      type: "measureWave",
-      request: ++measurementRequest,
+    const message = measurements.add(
       operation,
-      signals: signals.map(({ id, name, scope, bitOffset, unit }) => ({
-        id,
-        name,
-        scope,
-        bitOffset,
-        unit,
-      })),
-      start: String(first),
-      end: String(last),
-      reverse: hasRange && cursorA > cursorB,
-    });
+      button?.textContent || localize("波形测量"),
+      signals,
+    );
+    if (message) status(message, "warn");
   } else if (name.startsWith("math-")) {
     const selected = selectedSignals();
-    if (!selected.length) return status("请先选中输入波形。", "warn");
+    if (!selected.length) return status(localize("请先选中输入波形。"), "warn");
     vscode.postMessage({
       type: "waveMath",
       operation: name.slice("math-".length),
@@ -2054,9 +2407,11 @@ function action(name) {
             ]
           : undefined,
     });
+  } else if (name === "analogScale") {
+    editAnalogScale();
   } else if (name === "analogThreshold" || name === "analogUnit") {
     const signal = chosen[active];
-    if (!signal?.real) return status("请选择一条实数波形。", "warn");
+    if (!signal?.real) return status(localize("请选择一条实数波形。"), "warn");
     vscode.postMessage({
       type: "analogOperation",
       id: signal.id,
@@ -2112,7 +2467,10 @@ function action(name) {
       render();
       return cursorA;
     } else {
-      status("当前已读取窗口内没有更多边沿；平移窗口或在截断时放大。", "warn");
+      status(
+        localize("当前已读取窗口内没有更多边沿；平移窗口或在截断时放大。"),
+        "warn",
+      );
       return null;
     }
   }
@@ -2248,7 +2606,7 @@ function renderKdb() {
       vscode.postMessage({ type: "kdbChildren", scope: item.fullname });
     kdbViewport.append(button);
   }
-  if (!kdbRows.length) kdbViewport.textContent = "当前实例没有子实例";
+  if (!kdbRows.length) kdbViewport.textContent = localize("当前实例没有子实例");
 }
 $("kdbTree").addEventListener(
   "scroll",
@@ -2331,8 +2689,12 @@ new ResizeObserver(() => renderCatalog()).observe($("tree"));
 window.addEventListener("message", async (e) => {
   const msg = e.data;
   if (msg.type === "metadata") {
+    overviews.clear();
+    viewportOverviews.clear();
+    overviewFlight = undefined;
     uartReads.clear();
     uartFlight = undefined;
+    measurements.invalidate();
     meta = msg;
     data = {};
     cursorValues = {};
@@ -2340,7 +2702,7 @@ window.addEventListener("message", async (e) => {
     cursorFlight = null;
     $("file").textContent = msg.title;
     $("backend").textContent =
-      `${msg.backendLabel || msg.backend} · Vide ${msg.vide || "未安装"}`;
+      `${msg.backendLabel || msg.backend} · Vide ${msg.vide || localize("未安装")}`;
     start = Number.isFinite(saved.start) ? saved.start : Number(msg.start);
     end = Number.isFinite(saved.end)
       ? saved.end
@@ -2362,12 +2724,21 @@ window.addEventListener("message", async (e) => {
     else publishProjectState(true);
     renderTree();
     request();
-  } else if (msg.type === "backendChanged") {
+  } else if (msg.type === "dockVisibility") {
+    document.body.classList.toggle("wave-docked", msg.docked);
+    (document.getElementById("dockedNotice") as HTMLElement).hidden =
+      !msg.docked;
+  } else if (msg.type === "backendChanged" || msg.type === "dockState") {
+    overviews.clear();
+    viewportOverviews.clear();
+    overviewFlight = undefined;
     uartReads.clear();
     uartFlight = undefined;
+    measurements.invalidate();
     meta = msg;
+    $("file").textContent = msg.title;
     $("backend").textContent =
-      `${msg.backendLabel || msg.backend} · Vide ${msg.vide || "未安装"}`;
+      `${msg.backendLabel || msg.backend} · Vide ${msg.vide || localize("未安装")}`;
     data = {};
     inflight = cursorFlight = null;
     cursorValues = {};
@@ -2376,7 +2747,20 @@ window.addEventListener("message", async (e) => {
     catalog.revision = ++searchRequest;
     catalog.total = catalog.query ? 0 : meta.total;
     renderTree();
-    await uiAction("restoreView", msg.view);
+    if (msg.type === "dockState") {
+      kdbScope = msg.scope || "";
+      $("kdbState").textContent = msg.kdb
+        ? localize("已接入 · {0}", msg.kdb)
+        : localize("未接入设计数据库");
+      window.waveWorkflow?.scope(kdbScope);
+    }
+    if (msg.view)
+      await uiAction(
+        "restoreView",
+        msg.type === "dockState"
+          ? { ...msg.view, projectBaseline: true, dockSelection: msg.selection }
+          : msg.view,
+      );
   } else if (msg.type === "ui") {
     try {
       const result = await uiAction(msg.action, msg.payload || {});
@@ -2390,24 +2774,8 @@ window.addEventListener("message", async (e) => {
       $("catalogPanel").open = false;
       document.body.dataset.sidebarLayout = "1";
     }
-  } else if (
-    msg.type === "waveMeasurement" &&
-    msg.request === measurementRequest
-  ) {
-    if (!($("measurementDialog") as HTMLDialogElement).open) return;
-    $("measurementStatus").textContent = msg.error || "";
-    $("measurementRows").replaceChildren(
-      ...(msg.rows || []).map(([label, value]) => {
-        const row = document.createElement("tr");
-        const name = document.createElement("th");
-        const result = document.createElement("td");
-        name.scope = "row";
-        name.textContent = label;
-        result.textContent = value;
-        row.append(name, result);
-        return row;
-      }),
-    );
+  } else if (msg.type === "waveMeasurement") {
+    measurements.receive(msg);
   } else if (msg.type === "analogUnit") {
     const signal = chosen.find(
       (signal) => signal.real && key(signal) === key(msg.signal),
@@ -2439,9 +2807,9 @@ window.addEventListener("message", async (e) => {
   } else if (msg.type === "commandLog") {
     appendLog(msg.text);
   } else if (msg.type === "kdbAttached") {
-    $("kdbState").textContent = `已接入 · ${msg.path}`;
+    $("kdbState").textContent = localize("已接入 · {0}", msg.path);
   } else if (msg.type === "kdbDetached") {
-    $("kdbState").textContent = "未接入设计数据库";
+    $("kdbState").textContent = localize("未接入设计数据库");
     kdbScope = "";
     kdbRows = [];
     renderKdb();
@@ -2449,7 +2817,7 @@ window.addEventListener("message", async (e) => {
     kdbScope = msg.scope;
     kdbRows = msg.children;
     $("kdbTree").scrollTop = 0;
-    $("kdbState").textContent = kdbScope || "顶层实例";
+    $("kdbState").textContent = kdbScope || localize("顶层实例");
     renderKdb();
   } else if (msg.type === "searchResult") {
     if (
@@ -2481,6 +2849,30 @@ window.addEventListener("message", async (e) => {
       projectSignature = signatureOf(msg.view);
       projectTimer ??= window.setTimeout(publishProjectState, 100);
     }
+  } else if (msg.type === "overview") {
+    if (!overviewFlight || msg.request !== overviewFlight.request) return;
+    overviews.set(overviewFlight.key, msg.error ? null : msg.result);
+    const { range } = overviewFlight;
+    if (
+      prefetchTime &&
+      range.bins > 1 &&
+      msg.result?.length &&
+      retainedIds.has(range.signal)
+    ) {
+      const recent = (viewportOverviews.get(range.signal) ?? []).filter(
+        (entry) =>
+          entry.range.start !== range.start || entry.range.end !== range.end,
+      );
+      viewportOverviews.set(range.signal, [
+        { range, bins: msg.result },
+        ...recent.slice(0, 2),
+      ]);
+    }
+    // Keep the current viewport and recent autoscale requests without
+    // retaining a separate overview for every pan through the file.
+    if (overviews.size > 160) overviews.delete(overviews.keys().next().value);
+    overviewFlight = undefined;
+    scheduleViewport();
   } else if (msg.type === "data") {
     if (uartFlight && msg.request === uartFlight.request) {
       const { id, through } = uartFlight;
@@ -2508,7 +2900,9 @@ window.addEventListener("message", async (e) => {
     const range = inflight;
     if (range.start <= end && range.end >= start) {
       for (const [id, block] of Object.entries(msg.result as QueryResult)) {
-        if (!retainedIds.has(id) || !needsData(id)) continue;
+        if (!retainedIds.has(id)) continue;
+        const refill = range.refill && range.start <= start && range.end >= end;
+        if (!refill && !needsData(id)) continue;
         data[id] = { start: range.start, end: range.end, block };
       }
     }
@@ -2581,9 +2975,11 @@ function snapshot(): WaveState & { chosen: Signal[] } {
 async function uiAction(name, p) {
   if (name === "snapshot") return snapshot();
   if (name === "decoderAttach") {
-    if (decoderInstances.length >= 4) throw Error("最多同时显示四条解码行。");
+    if (decoderInstances.length >= 4)
+      throw Error(localize("最多同时显示四条解码行。"));
     const instances = [...decoderInstances, p];
-    if (!validDecoderInstances(instances)) throw Error("无效的解码实例。");
+    if (!validDecoderInstances(instances))
+      throw Error(localize("无效的解码实例。"));
     decoderInstances = instances;
     scheduleDecoder(p.instanceId);
     publishProjectState();
@@ -2627,11 +3023,11 @@ async function uiAction(name, p) {
   if (name === "activeSignal") return chosen[active] || null;
   if (name === "setDecoder" || name === "annotateSignal") {
     const signal = chosen.find((s) => key(s) === key(p.signal));
-    if (!signal) throw Error("信号还未添加到当前波形");
+    if (!signal) throw Error(localize("信号还未添加到当前波形"));
     if (name === "setDecoder") {
       const profile = p.profile && validateProfile(p.profile);
       if (profile && (signal.real || !supportsProfile(profile, signal.width)))
-        throw Error("解码配置与信号位宽不符");
+        throw Error(localize("解码配置与信号位宽不符"));
       signal.decoder = profile;
     } else {
       signal.annotation = normalizeAnnotation(p.tags, p.note);
@@ -2686,9 +3082,16 @@ async function uiAction(name, p) {
     applyTrackLayout();
     active = 0;
     selectedKeys.clear();
+    if (p.dockSelection) {
+      active = Math.max(
+        0,
+        chosen.findIndex((signal) => key(signal) === p.dockSelection.active),
+      );
+      selectedKeys = new Set(p.dockSelection.keys);
+    }
     rebuildRows();
     setWindow(p.start, p.end);
-    $("tracks").scrollTop = p.scrollTop || 0;
+    $("tracks").scrollTop = p.dockSelection?.scrollTop ?? p.scrollTop ?? 0;
     render();
     if (p.projectBaseline) publishProjectState(true);
     return 1;
@@ -2698,7 +3101,7 @@ async function uiAction(name, p) {
     const existing = new Set(chosen.map(key)),
       fresh = p.signals.filter((s) => !existing.has(key(s)));
     if (chosen.length + fresh.length > MAX_SIGNALS)
-      throw Error("批量添加超过 100000 个信号的会话上限");
+      throw Error(localize("批量添加超过 100000 个信号的会话上限"));
     const added = fresh.length;
     await uiAction("addSignals", { signals: p.signals });
     if (added) ensureActive();
@@ -2727,7 +3130,7 @@ async function uiAction(name, p) {
       }
     }
     if (next.length > MAX_SIGNALS)
-      throw new Error("已达到 100000 个已添加信号的会话上限");
+      throw new Error(localize("已达到 100000 个已添加信号的会话上限"));
     chosen = next;
     if (lastAdded || p.clear) {
       active = Math.max(0, chosen.length - 1);
@@ -2790,22 +3193,24 @@ async function uiAction(name, p) {
         collapsed: [...collapsedGroups],
       };
     if (p.operation === "target" || p.operation === "create") {
-      if (p.operation === "create" && !p.group) throw Error("分组名称为空");
+      if (p.operation === "create" && !p.group)
+        throw Error(localize("分组名称为空"));
       if (p.operation === "create" && !groupOrder.includes(p.group))
         groupOrder.push(p.group);
-      if (p.group && !groupOrder.includes(p.group)) throw Error("分组不存在");
+      if (p.group && !groupOrder.includes(p.group))
+        throw Error(localize("分组不存在"));
       activeGroup = p.group;
       request();
     } else {
       if (p.operation !== "assign" && !groupOrder.includes(p.group))
-        throw Error("分组不存在");
+        throw Error(localize("分组不存在"));
       if (p.operation === "assign") {
         if (
           p.signals.some(
             (signal) => !chosen.some((row) => key(row) === key(signal)),
           )
         )
-          throw Error("信号尚未添加到波形");
+          throw Error(localize("信号尚未添加到波形"));
         assignGroup(p.group, p.signals);
       } else if (p.operation === "move") moveGroup(p.group, p.target, p.after);
       else if (p.operation === "rename") renameGroup(p.group, p.target);
@@ -2814,7 +3219,7 @@ async function uiAction(name, p) {
         if (p.operation === "collapse") collapsedGroups.add(p.group);
         else collapsedGroups.delete(p.group);
         request();
-      } else throw Error("未知分组操作");
+      } else throw Error(localize("未知分组操作"));
     }
     return 1;
   }
@@ -2847,18 +3252,20 @@ async function uiAction(name, p) {
       p.time < Number(meta.start) ||
       p.time > Number(meta.end)
     )
-      throw Error("标记时间超出波形范围");
+      throw Error(localize("标记时间超出波形范围"));
     const name = String(p.name || "B").trim();
-    if (!name || name.length > 120) throw Error("标记名称应为 1–120 个字符");
+    if (!name || name.length > 120)
+      throw Error(localize("标记名称应为 1–120 个字符"));
     let item = markers.find((m) => m.name === (p.oldName || name));
     if (
       p.oldName &&
       p.oldName !== name &&
       markers.some((m) => m !== item && m.name === name)
     )
-      throw Error("标记名称已存在");
+      throw Error(localize("标记名称已存在"));
     if (!item) {
-      if (markers.length >= 2000) throw Error("最多支持 2000 个时间标记");
+      if (markers.length >= 2000)
+        throw Error(localize("最多支持 2000 个时间标记"));
       item = { name, time: p.time };
       markers.push(item);
     }
@@ -3009,21 +3416,37 @@ vscode.postMessage({ type: "ready" });
     }
   });
   window.addEventListener("resize", closeMenus);
-  $("compactToolbar").addEventListener("scroll", closeMenus, { passive: true });
+  const toolbar = $("compactToolbar");
+  const toggleToolbarRows = $("toggleToolbarRows");
+  const renderToolbarRows = () => {
+    toolbar.dataset.rows = String(toolbarRows);
+    toggleToolbarRows.setAttribute("aria-pressed", String(toolbarRows === 2));
+  };
+  renderToolbarRows();
+  toggleToolbarRows.onclick = () => {
+    closeMenus();
+    toolbarRows = toolbarRows === 1 ? 2 : 1;
+    renderToolbarRows();
+    persist();
+  };
+  toolbar.addEventListener("scroll", closeMenus, {
+    capture: true,
+    passive: true,
+  });
   const pane = $("scopeSignals"),
     space = document.createElement("div"),
     viewport = document.createElement("div"),
     bar = document.createElement("div");
   bar.className = "scopeActions";
   const addButton = document.createElement("button");
-  addButton.textContent = "添加选中 → 波形";
+  addButton.textContent = localize("添加选中 → 波形");
   const sourceButton = document.createElement("button");
-  sourceButton.textContent = "打开声明";
+  sourceButton.textContent = localize("打开声明");
   const driversButton = document.createElement("button");
-  driversButton.textContent = "追踪驱动";
+  driversButton.textContent = localize("追踪驱动");
   driversButton.disabled = true;
   const loadsButton = document.createElement("button");
-  loadsButton.textContent = "追踪负载";
+  loadsButton.textContent = localize("追踪负载");
   loadsButton.disabled = true;
   bar.append(addButton, sourceButton, driversButton, loadsButton);
   pane.before(bar);
@@ -3067,7 +3490,7 @@ vscode.postMessage({ type: "ready" });
       b.style.top = i * 24 - top + "px";
       b.className =
         "scopeSignal" + (s && selection.has(key(s)) ? " selected" : "");
-      b.textContent = s ? `${s.name} · ${s.width} bit` : "读取信号…";
+      b.textContent = s ? `${s.name} · ${s.width} bit` : localize("读取信号…");
       b.disabled = !s || !s.supported;
       if (!s) {
         missing ??= page;
@@ -3105,8 +3528,8 @@ vscode.postMessage({ type: "ready" });
     if (missing !== null) pageRequest(missing);
     if (!total && !flight)
       viewport.textContent = scope
-        ? "此实例没有已 dump 的直属信号"
-        : "选择实例查看直属信号";
+        ? localize("此实例没有已 dump 的直属信号")
+        : localize("选择实例查看直属信号");
   }
   function selectScope(value) {
     if (scope === value && pages.size) return;
@@ -3167,37 +3590,37 @@ vscode.postMessage({ type: "ready" });
   function showMenu(x, y) {
     menu.replaceChildren();
     for (const [label, run] of [
-      ["在 A 处添加时间标记…", () => editMarker()],
-      ["管理时间标记…", () => manageMarkers()],
-      ["拼接 / 逻辑虚拟信号…", () => editVirtual()],
+      [localize("在 A 处添加时间标记…"), () => editMarker()],
+      [localize("管理时间标记…"), () => manageMarkers()],
+      [localize("拼接 / 逻辑虚拟信号…"), () => editVirtual()],
       [
-        "查找信号 Ctrl+F",
+        localize("查找信号 Ctrl+F"),
         () => {
           $("findSignal").focus();
         },
       ],
-      ["显示过滤 Ctrl+Shift+F", () => toggleFilter()],
-      ["拆分为独立位", () => splitBus()],
-      ["同源位还原总线", () => restoreSourceBus()],
-      ["展开 Bus 位", () => expandBus()],
-      ["收回 Bus 位", () => collapseBus()],
+      [localize("显示过滤 Ctrl+Shift+F"), () => toggleFilter()],
+      [localize("拆分为独立位"), () => splitBus()],
+      [localize("同源位还原总线"), () => restoreSourceBus()],
+      [localize("展开 Bus 位"), () => expandBus()],
+      [localize("收回 Bus 位"), () => collapseBus()],
       [
-        "设置 A 游标",
+        localize("设置 A 游标"),
         () => {
           $("cursorAInput").focus();
         },
       ],
       [
-        "定位到 A 游标",
+        localize("定位到 A 游标"),
         () => {
           const half = (end - start) / 2;
           setWindow(cursorA - half, cursorA + half);
         },
       ],
-      ["上一边沿", () => action("prev")],
-      ["下一边沿", () => action("next")],
+      [localize("上一边沿"), () => action("prev")],
+      [localize("下一边沿"), () => action("next")],
       [
-        "折叠到所属组",
+        localize("折叠到所属组"),
         () => {
           const s = chosen[active];
           if (s?.parentBus) collapseBus([s]);
@@ -3207,40 +3630,43 @@ vscode.postMessage({ type: "ready" });
           }
         },
       ],
-      ["重命名显示名称", () => editAlias()],
-      ["选择解码配置…", () => action("selectDecoder")],
-      ["标签和注释…", () => editAnnotation()],
-      ["上移", () => move(-1)],
-      ["下移", () => move(1)],
-      ["复制完整路径", () => copyPaths()],
-      ["复制信号 Ctrl+C", () => copySignals()],
+      [localize("重命名显示名称"), () => editAlias()],
+      ...(chosen[active]?.real
+        ? [[localize("设置模拟纵轴…"), () => editAnalogScale()] as const]
+        : []),
+      [localize("选择解码配置…"), () => action("selectDecoder")],
+      [localize("标签和注释…"), () => editAnnotation()],
+      [localize("上移"), () => move(-1)],
+      [localize("下移"), () => move(1)],
+      [localize("复制完整路径"), () => copyPaths()],
+      [localize("复制信号 Ctrl+C"), () => copySignals()],
       [
-        "剪切信号 Ctrl+X",
+        localize("剪切信号 Ctrl+X"),
         () => {
           copySignals();
           action("remove");
         },
       ],
-      ["粘贴信号 Ctrl+V", () => pasteSignals()],
-      ["高亮颜色…", () => highlight()],
+      [localize("粘贴信号 Ctrl+V"), () => pasteSignals()],
+      [localize("高亮颜色…"), () => highlight()],
       [
-        "取消高亮",
+        localize("取消高亮"),
         () => {
           for (const s of selectedSignals()) delete s.highlight;
           requestRows();
         },
       ],
-      ["Verilog 数值表示", () => notation("verilog")],
-      ["普通数值表示", () => notation("plain")],
+      [localize("Verilog 数值表示"), () => notation("verilog")],
+      [localize("普通数值表示"), () => notation("plain")],
       [
-        "信号事件报告…",
+        localize("信号事件报告…"),
         () => eventReport().catch((e) => status(e.message, "error")),
       ],
-      ["添加到分组…", () => editGroup()],
-      ["删除所选信号", () => action("remove")],
-      ["信号声明", () => source()],
-      ["实例位置", () => source("instance")],
-      ["模块定义", () => source("definition")],
+      [localize("添加到分组…"), () => editGroup()],
+      [localize("删除所选信号"), () => action("remove")],
+      [localize("信号声明"), () => source()],
+      [localize("实例位置"), () => source("instance")],
+      [localize("模块定义"), () => source("definition")],
       ...[
         ["Hex", "hex"],
         ["Binary", "bin"],
@@ -3252,14 +3678,14 @@ vscode.postMessage({ type: "ready" });
           [label, () => uiAction("radix", { radix })] as const,
       ),
       [
-        "展开全部分组",
+        localize("展开全部分组"),
         () => {
           collapsedGroups.clear();
           requestRows();
         },
       ],
       [
-        "折叠全部分组",
+        localize("折叠全部分组"),
         () => {
           for (const name of groupOrder) collapsedGroups.add(name);
           requestRows();
@@ -3289,7 +3715,7 @@ vscode.postMessage({ type: "ready" });
       for (const name of ["", ...groupOrder]) {
         const o = document.createElement("option");
         o.value = name;
-        o.textContent = name || "未分组";
+        o.textContent = name || localize("未分组");
         select.append(o);
       }
     }
@@ -3344,9 +3770,9 @@ vscode.postMessage({ type: "ready" });
     showMenu(x, y);
     menu.replaceChildren();
     for (const [label, run] of [
-      ["重命名分组", () => editGroup(name)],
-      ["选中信号移入此组", () => assignGroup(name)],
-      ["移除分组（保留信号）", () => removeGroup(name)],
+      [localize("重命名分组"), () => editGroup(name)],
+      [localize("选中信号移入此组"), () => assignGroup(name)],
+      [localize("移除分组（保留信号）"), () => removeGroup(name)],
     ] as const) {
       const button = document.createElement("button");
       button.textContent = label;
@@ -3373,7 +3799,7 @@ vscode.postMessage({ type: "ready" });
       bitOffset: Number.isInteger(s.bitOffset) ? s.bitOffset : null,
     }));
     if (!virtualInputs.length) {
-      status("先选择输入信号", "warn");
+      status(localize("先选择输入信号"), "warn");
       return;
     }
     openEditor($("virtualForm"));
@@ -3430,11 +3856,11 @@ vscode.postMessage({ type: "ready" });
         rawTime = Number(text) * displayFactor,
         time = Math.round(rawTime);
       if (!Number.isFinite(rawTime) || Math.abs(rawTime - time) > 1e-5)
-        throw Error("时间无法精确表示为波形 tick");
+        throw Error(localize("时间无法精确表示为波形 tick"));
       if (!text || !name || name === "A" || name === "B")
-        throw Error("请输入有效时间，名称请避开游标 A/B");
+        throw Error(localize("请输入有效时间，名称请避开游标 A/B"));
       if (!editedMarker && markers.some((m) => m.name === name))
-        throw Error("标记名称已存在，请编辑现有标记或换一个名称");
+        throw Error(localize("标记名称已存在，请编辑现有标记或换一个名称"));
       await uiAction("marker", {
         time,
         name,
@@ -3465,7 +3891,7 @@ vscode.postMessage({ type: "ready" });
           ? sorted.find((m) => m.time > cursorA)
           : sorted.findLast((m) => m.time < cursorA);
     if (item) goMarker(item);
-    else status("这个方向没有更多时间标记", "warn");
+    else status(localize("这个方向没有更多时间标记"), "warn");
   }
   $("previousMarker").onclick = () => stepMarker(-1);
   $("nextMarker").onclick = () => stepMarker(1);
@@ -3497,9 +3923,9 @@ vscode.postMessage({ type: "ready" });
       time.textContent = timeLabel(m.time);
       row.append(name, time);
       for (const [label, run] of [
-        ["跳转", () => goMarker(m)],
-        ["编辑", () => editMarker(m)],
-        ["删除", () => uiAction("deleteMarker", { name: m.name })],
+        [localize("跳转"), () => goMarker(m)],
+        [localize("编辑"), () => editMarker(m)],
+        [localize("删除"), () => uiAction("deleteMarker", { name: m.name })],
       ] as const) {
         const button = document.createElement("button");
         button.textContent = label;
@@ -3509,7 +3935,7 @@ vscode.postMessage({ type: "ready" });
       list.append(row);
     }
     if (!list.childNodes.length)
-      list.textContent = "尚无命名时间标记。在 A 处按 M 添加。";
+      list.textContent = localize("尚无命名时间标记。在 A 处按 M 添加。");
   }
   $("manageMarkers").onclick = manageMarkers;
   $("closeMarkerManager").onclick = () => {
@@ -3565,7 +3991,7 @@ vscode.postMessage({ type: "ready" });
       button.title =
         group.items.map((m) => m.name + " · " + timeLabel(m.time)).join("\n") +
         "\n点击跳转 · 双击编辑 · 拖动调整时间";
-      button.setAttribute("aria-label", "时间标记 " + m.name);
+      button.setAttribute("aria-label", localize("时间标记 ") + m.name);
       button.style.left = Math.min(left, Math.max(0, width - 16)) + "px";
       button.style.maxWidth = Math.max(16, Math.min(200, available)) + "px";
       button.style.color = m.color || colors[0];
@@ -3661,7 +4087,7 @@ vscode.postMessage({ type: "ready" });
         return;
       }
     }
-    status("没有匹配的已添加信号", "warn");
+    status(localize("没有匹配的已添加信号"), "warn");
   }
   function toggleFilter() {
     $("filterSignals").hidden = !$("filterSignals").hidden;
@@ -3703,7 +4129,11 @@ vscode.postMessage({ type: "ready" });
   let decoderSaveRequest = 0;
   let pendingDecoderSave = 0;
   const ruleFields = ["mask", "value", "label"] as const;
-  const ruleLabels = { mask: "掩码", value: "匹配值", label: "显示文本" };
+  const ruleLabels = {
+    mask: localize("掩码"),
+    value: localize("匹配值"),
+    label: localize("显示文本"),
+  };
   const decodeMenu = $("decoderMenu");
   function renderDecoderGroups(reset = false) {
     const signal = chosen[active];
@@ -3712,8 +4142,8 @@ vscode.postMessage({ type: "ready" });
       group.profiles.some((profile) => profile.id === activeId),
     );
     $("decoderSelection").textContent = signal
-      ? `${WaveSignal.label(signal)} · ${activeId && !listed ? "✓ " : ""}${signal.decoder?.label || "原始值"}`
-      : "先选中波形信号";
+      ? `${WaveSignal.label(signal)} · ${activeId && !listed ? "✓ " : ""}${signal.decoder?.label || localize("原始值")}`
+      : localize("先选中波形信号");
     $("editSignalDecoder").disabled = !signal;
     $("clearSignalDecoder").disabled = !signal?.decoder;
     const list = $("decoderGroups");
@@ -3738,7 +4168,9 @@ vscode.postMessage({ type: "ready" });
       summary.textContent = (current ? "✓ " : "") + group.label;
       const origin = document.createElement("small");
       origin.textContent =
-        (group.builtin ? "内置" : "工作区") + " · " + group.filename;
+        (group.builtin ? localize("内置") : localize("工作区")) +
+        " · " +
+        group.filename;
       summary.append(origin);
       file.append(summary);
       for (const profile of group.profiles) {
@@ -3760,7 +4192,9 @@ vscode.postMessage({ type: "ready" });
         caption.textContent = profile.label;
         label.append(choice, caption);
         const edit = document.createElement("button");
-        edit.textContent = group.builtin ? "编辑副本…" : "编辑…";
+        edit.textContent = group.builtin
+          ? localize("编辑副本…")
+          : localize("编辑…");
         edit.setAttribute("aria-label", edit.textContent + " " + profile.label);
         edit.disabled = !compatible || !decoderCatalog.workspaceAvailable;
         edit.onclick = () => openDecoderEditor(signal, { group, profile });
@@ -3821,10 +4255,10 @@ vscode.postMessage({ type: "ready" });
     branches.className = "ruleBranches";
     const summary = document.createElement("summary");
     summary.textContent = rule.branches?.length
-      ? `条件分支 (${rule.branches.length})`
-      : "条件分支";
+      ? localize("条件分支 ({0})", rule.branches.length)
+      : localize("条件分支");
     const branchEditor = document.createElement("textarea");
-    branchEditor.setAttribute("aria-label", "条件分支 JSON");
+    branchEditor.setAttribute("aria-label", localize("条件分支 JSON"));
     branchEditor.rows = 5;
     branchEditor.spellcheck = false;
     branchEditor.placeholder =
@@ -3838,20 +4272,20 @@ vscode.postMessage({ type: "ready" });
     const up = document.createElement("button");
     up.type = "button";
     up.textContent = "↑";
-    up.setAttribute("aria-label", "上移规则");
+    up.setAttribute("aria-label", localize("上移规则"));
     up.onclick = () => {
       const previous = row.previousElementSibling;
       if (previous) rows.insertBefore(row, previous);
     };
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.textContent = "删除";
+    remove.textContent = localize("删除");
     remove.onclick = () => row.remove();
     controls.append(up, remove);
   }
   function addDefaultDecoderRule() {
     if ($("decoderRules").rows.length >= 256) {
-      $("decoderError").textContent = "最多可添加 256 条解码规则";
+      $("decoderError").textContent = localize("最多可添加 256 条解码规则");
       return;
     }
     const width = $("decoderUart").hidden
@@ -3870,16 +4304,19 @@ vscode.postMessage({ type: "ready" });
       !profile?.uart &&
       (decoderTarget.width < 2 || decoderTarget.width > 256)
     ) {
-      status("自定义规则适用于 2–256 位信号", "warn");
+      status(localize("自定义规则适用于 2–256 位信号"), "warn");
       return;
     }
-    $("decoderSignal").textContent =
-      `${WaveSignal.label(decoderTarget)} · ${decoderTarget.width} 位`;
+    $("decoderSignal").textContent = localize(
+      "{0} · {1} 位",
+      WaveSignal.label(decoderTarget),
+      decoderTarget.width,
+    );
     $("decoderLabel").value = edit?.group.builtin
-      ? (profile.label + " 副本").slice(0, 120)
+      ? (profile.label + localize(" 副本")).slice(0, 120)
       : profile?.rules || profile?.uart || edit
         ? profile.label
-        : "自定义解码";
+        : localize("自定义解码");
     $("decoderEngine").hidden = !edit?.profile.builtin;
     $("decoderUart").hidden = $("decoderUart").disabled = !profile?.uart;
     if (profile?.uart) {
@@ -3892,9 +4329,9 @@ vscode.postMessage({ type: "ready" });
     }
     $("applyDecoderRule").textContent = edit
       ? edit.group.builtin
-        ? "保存副本并应用"
-        : "保存并应用"
-      : "应用到信号";
+        ? localize("保存副本并应用")
+        : localize("保存并应用")
+      : localize("应用到信号");
     $("decoderError").textContent = "";
     $("decoderRules").replaceChildren();
     if (profile?.rules) profile.rules.forEach(appendDecoderRule);
@@ -3926,7 +4363,9 @@ vscode.postMessage({ type: "ready" });
             ...(branches ? { branches: JSON.parse(branches) } : {}),
           };
         } catch {
-          throw Error(`第 ${index + 1} 条规则的条件分支不是有效 JSON`);
+          throw Error(
+            localize("第 {0} 条规则的条件分支不是有效 JSON", index + 1),
+          );
         }
       });
       const uart: UartOptions | undefined = $("decoderUart").hidden
@@ -4053,7 +4492,7 @@ vscode.postMessage({ type: "ready" });
     copied = chosen
       .filter((s) => selected.has(key(s)) || selected.has(s.parentBus))
       .map((s) => ({ ...s }));
-    status("已复制 " + copied.length + " 个信号");
+    status(localize("已复制 ") + copied.length + localize(" 个信号"));
   }
   function pasteSignals() {
     uiAction("addSignals", {
@@ -4068,7 +4507,7 @@ vscode.postMessage({ type: "ready" });
     const input = document.createElement("input");
     input.type = "color";
     input.value = chosen[active]?.highlight || "#4ec9b0";
-    input.setAttribute("aria-label", "高亮颜色");
+    input.setAttribute("aria-label", localize("高亮颜色"));
     menu.replaceChildren(input);
     menu.hidden = false;
     input.oninput = () => {
@@ -4124,8 +4563,13 @@ vscode.postMessage({ type: "ready" });
     $("eventReport").hidden = false;
     $("eventReport").open = true;
     $("reportSummary").textContent =
-      `${a} → ${b} · ${selected.length} 个信号 · ${count} 条状态记录（含窗口起点值）` +
-      (truncated ? " · 结果截断，请缩小窗口/选择范围" : "");
+      localize(
+        "{0} → {1} · {2} 个信号 · {3} 条状态记录（含窗口起点值）",
+        a,
+        b,
+        selected.length,
+        count,
+      ) + (truncated ? localize(" · 结果截断，请缩小窗口/选择范围") : "");
     $("reportBody").textContent = rows.join("\n");
   }
   const reports = new Map();
@@ -4135,7 +4579,7 @@ vscode.postMessage({ type: "ready" });
       const request = "report:" + ++reportSequence;
       const timer = window.setTimeout(() => {
         reports.delete(request);
-        reject(Error("事件报告读取超时"));
+        reject(Error(localize("事件报告读取超时")));
       }, 120000);
       reports.set(request, { resolve, reject, timer });
       vscode.postMessage({
@@ -4423,11 +4867,18 @@ vscode.postMessage({ type: "ready" });
     full.className = "hoverPath";
     full.textContent = path;
     const time = document.createElement("div");
+    const axisName =
+      meta?.axis === "frequency"
+        ? localize("频率")
+        : meta?.axis === "sweep"
+          ? meta.sweep?.name || localize("扫描")
+          : localize("时间");
     time.textContent =
-      (meta?.axis === "frequency" ? "频率：" : "时间：") +
+      axisName +
+      " " +
       timeLabel(hit.time) +
       " · ΔA " +
-      timeLabel(hit.time - cursorA);
+      timeLabel(hit.time - cursorA, true);
     tooltip.append(title, full, time);
     if (signal.annotation) {
       const annotation = document.createElement("div");
@@ -4447,11 +4898,11 @@ vscode.postMessage({ type: "ready" });
       tooltip.append(note);
     } else if (!result) {
       const loading = document.createElement("div");
-      loading.textContent = "读取此时刻的值…";
+      loading.textContent = localize("读取此时刻的值…");
       tooltip.append(loading);
     } else if (raw == null) {
       const empty = document.createElement("div");
-      empty.textContent = "此时刻没有已记录的值";
+      empty.textContent = localize("此时刻没有已记录的值");
       tooltip.append(empty);
     } else {
       const decoded =
@@ -4460,8 +4911,8 @@ vscode.postMessage({ type: "ready" });
           signal.decoder &&
           decodeWord(signal.decoder, projected, signal.width));
       for (const [name, value] of [
-        ...(decoded ? [["解码", decoded]] : []),
-        ["值", formatSignal(raw, signal)],
+        ...(decoded ? [[localize("解码"), decoded]] : []),
+        [localize("值"), formatSignal(raw, signal)],
         ["Hex", format(projected, signal.width, "hex")],
         ["Binary", format(projected, signal.width, "bin")],
         [
@@ -4479,7 +4930,7 @@ vscode.postMessage({ type: "ready" });
         key.className = "hoverKey";
         text.textContent =
           value.length > 1024
-            ? value.slice(0, 1024) + "…（值过长，已截断显示）"
+            ? value.slice(0, 1024) + localize("…（值过长，已截断显示）")
             : value;
         row.append(key, text);
         tooltip.append(row);
@@ -4488,7 +4939,11 @@ vscode.postMessage({ type: "ready" });
     if (data[signal.id]?.block.truncated && readEnd(data[signal.id]) < end) {
       const warning = document.createElement("div");
       warning.className = "hoverWarning";
-      warning.textContent = "图形数据已截断；超出已读范围时单独查询悬停值。";
+      warning.textContent = overviews.get(
+        overviewKey(viewportOverview(signal.id)),
+      )?.length
+        ? localize("当前显示波形概览，悬停值按原始采样查询。")
+        : localize("当前视图仅读取了部分原始事件，悬停值会单独查询。");
       tooltip.append(warning);
     }
     tooltip.hidden = false;
@@ -4570,7 +5025,7 @@ vscode.postMessage({ type: "ready" });
       hoverFlight = null;
       const block = Object.values(m.result as QueryResult)[0],
         value = block?.truncated
-          ? { error: "该时刻事件被截断，无法确认精确值" }
+          ? { error: localize("该时刻事件被截断，无法确认精确值") }
           : { raw: block?.events.at(-1)?.[1] };
       hoverCache.set(flight.key, value);
       while (hoverCache.size > 128)
