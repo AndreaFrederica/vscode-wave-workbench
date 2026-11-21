@@ -161,3 +161,70 @@ test("integral retains slope changes and native reads interpolate between stored
   assert.equal(measured.find(([name]) => name.endsWith("均值"))[1], "1.5e-8");
   assert.equal(measured.find(([name]) => name.endsWith("RMS"))[1], "1.7320508e-8");
 });
+
+test("scope measurements use duration weights and interpolate real threshold crossings", { skip: !existsSync(binary) }, async (t) => {
+  const dir = await workdir(t);
+  const file = path.join(dir, "measure.vcd");
+  await writeFile(file, [
+    "$timescale 1ns $end", "$scope module tb $end",
+    "$var real 64 ! signal $end", '$var wire 1 " clock $end',
+    "$upscope $end", "$enddefinitions $end",
+    "#0", "r-2 !", '0"', "#3", '1"', "#4", "r2 !", "#7", '0"',
+    "#8", "r-2 !", "#11", '1"', "#12", "r2 !", "#15", '0"', "#16", "r-2 !",
+  ].join("\n") + "\n");
+  const backend = new Backend(binary, { args: ["--independent"], useVerdiLibraries: false });
+  t.after(() => backend.dispose());
+  const meta = await backend.request("open", { path: file });
+  const { measureWave } = require("../dist/wave-measurements");
+  const measure = async (operation, operands) =>
+    new Map(await measureWave(backend, meta, operation, operands, "0", "16"));
+  const signal = meta.signals.find(({ name }) => name === "signal");
+  const clock = meta.signals.find(({ name }) => name === "clock");
+  const analog = await measure("analog", [signal]);
+  assert.equal(analog.get("signal · 标准差"), "2");
+  assert.equal(analog.get("signal · 中位数"), "-2");
+  assert.equal(analog.get("signal · DC 正面积"), "1.6e-8 单位·s");
+  assert.equal(analog.get("signal · AC 绝对面积"), "3.2e-8 单位·s");
+  assert.equal(analog.get("signal · 首周期均值"), "0");
+  const timing = await measure("pulse", [signal]);
+  assert.deepEqual(await measure("timing", [signal]), timing);
+  assert.equal(timing.get("平均周期"), "8 ns");
+  assert.equal(timing.get("平均高脉宽"), "4 ns");
+  assert.equal(timing.get("高电平占空比"), "50 %");
+  assert.equal(timing.get("上升沿"), "2");
+  const edges = await measure("edges", [signal]);
+  assert.equal(edges.get("上升时间"), "3.2 ns · 2 次");
+  const delay = await measure("delay", [signal, clock]);
+  assert.equal(delay.get("相位（目标滞后为正）"), "45 °");
+  assert.equal(delay.get("最小建立时间 · 上升沿"), "1 ns");
+  assert.equal(delay.get("最小保持时间 · 上升沿"), "3 ns");
+});
+
+test("dense real measurements read past the backend event limit", { skip: !existsSync(binary) }, async (t) => {
+  const dir = await workdir(t);
+  const file = path.join(dir, "dense-real.vcd");
+  const end = 100_104;
+  const events = [];
+  for (let tick = 0; tick <= end; tick++)
+    events.push("#" + tick, "r" + (tick % 2 ? -2 : 2) + " !");
+  await writeFile(file, [
+    "$timescale 1ns $end", "$scope module tb $end", "$var real 64 ! v $end",
+    "$upscope $end", "$enddefinitions $end", ...events,
+  ].join("\n") + "\n");
+  const backend = new Backend(binary, { args: ["--independent"], useVerdiLibraries: false });
+  t.after(() => backend.dispose());
+  const meta = await backend.request("open", { path: file });
+  const [signal] = meta.signals;
+  const { measureWave } = require("../dist/wave-measurements");
+  const run = async (operation) =>
+    new Map(await measureWave(backend, meta, operation, [signal], "0", String(end)));
+  assert.equal((await run("cursors")).get("v"), "A 2 · B 2");
+  const timing = await run("pulse");
+  assert.equal(timing.get("上升沿"), String(end / 2));
+  assert.equal(timing.get("下降沿"), String(end / 2));
+  assert.equal(timing.get("平均周期"), "2 ns");
+  assert.equal(timing.get("高电平占空比"), "50 %");
+  const amplitude = await run("analog");
+  assert.equal(amplitude.get("v · 有效覆盖"), end + " / " + end + " tick");
+  assert.equal(amplitude.get("v · DC 绝对面积"), "0.000200208 单位·s");
+});

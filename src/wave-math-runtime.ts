@@ -4,7 +4,7 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { Backend } from "./backend";
-import type { Metadata, Signal } from "./shared/protocol";
+import type { Block, Metadata, Signal } from "./shared/protocol";
 import { project } from "./shared/signals";
 import { measureAnalog, thresholdSamples } from "./shared/analog";
 import { scaleSeconds } from "./shared/time";
@@ -80,6 +80,7 @@ export async function readMathInputs(
   signals: Signal[],
   start: bigint,
   end: bigint,
+  { complete = false } = {},
 ): Promise<WaveOperatorRequest> {
   const seed = start > BigInt(meta.start) ? start - 1n : start;
   const limit = Math.min(
@@ -102,6 +103,37 @@ export async function readMathInputs(
     limit,
   });
 
+  if (complete) {
+    for (const id of Object.keys(blocks)) {
+      const events = blocks[id].events;
+      let block: Block = blocks[id];
+      while (block.truncated) {
+        const anchor = events.at(-1)?.[0];
+        if (anchor === undefined || BigInt(anchor) >= end)
+          throw Error("无法继续读取测量区间内的采样。");
+        // Reopen at the last actual sample to avoid a synthesized seed at a page seam.
+        const next = (
+          await backend.request("query", {
+            signals: [id],
+            start: anchor,
+            end: String(end),
+            limit,
+          })
+        )[id];
+        const after = BigInt(anchor);
+        const first = next?.events.findIndex(([tick]) => BigInt(tick) > after);
+        if (!next || (next.truncated && first === -1))
+          throw Error("无法继续读取测量区间内的采样。");
+        if (first !== undefined && first !== -1) {
+          for (let index = first; index < next.events.length; index++)
+            events.push(next.events[index]);
+        }
+        block = next;
+      }
+      blocks[id].truncated = false;
+    }
+  }
+
   return {
     apiVersion: 1,
     start: String(start),
@@ -110,8 +142,8 @@ export async function readMathInputs(
     options: {},
     inputs: signals.map((signal) => {
       const block = blocks[signal.id];
-      if (!block || block.truncated)
-        throw Error("输入事件过多，请缩小 A/B 区间。");
+      if (!block) throw Error("无法读取所选信号。");
+      if (block.truncated) throw Error("输入事件过多，请缩小 A/B 区间。");
       if (signal.real)
         return { kind: "real", unit: signal.unit, events: block.events };
       const events: [string, string][] = block.events.map(([tick, raw]) => {
