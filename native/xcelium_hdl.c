@@ -53,7 +53,7 @@ static void entry(FILE *file, vpiHandle object, vpiHandle parent, int is_scope) 
 
 static void scope(FILE *file, vpiHandle current, vpiHandle parent) {
     entry(file, current, parent, 1);
-    const int relations[] = { vpiNet, vpiReg, vpiVariables, vpiParameter, vpiPort };
+    const int relations[] = { vpiNet, vpiReg, vpiVariables, vpiParameter };
     for (size_t i = 0; i < sizeof relations / sizeof *relations; ++i) {
         vpiHandle list = vpi_iterate(relations[i], current);
         vpiHandle object;

@@ -4,6 +4,7 @@ native/**
 !native/verilator_execution.cc
 !native/verilator_execution.h
 !native/vpi_execution.c
+!native/vcs_pli_execution.h
 !native/xcelium_hdl.c
 test/**
 .vscode/**
