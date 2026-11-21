@@ -419,7 +419,7 @@
         },
         {
           "command": "waveWorkbench.selectBackend",
-          "when": "activeCustomEditorId == waveWorkbench.viewer && resourceExtname == .fsdb",
+          "when": "activeCustomEditorId == waveWorkbench.viewer && (resourceExtname =~ /^(\\.fsdb|\\.shm|\\.dsn|\\.trn|\\.psfxl|\\.tran)$/i || resourceFilename =~ /\\.tran\\.dat$/i)",
           "group": "navigation@4"
         },
         {
@@ -626,6 +626,18 @@
             "Read FSDB and KDB with Verdi Reader and NPI."
           ],
           "description": "Backend for FSDB waveforms and their paired KDB databases."
+        },
+        "waveWorkbench.shmBackend": {
+          "type": "string",
+          "scope": "resource",
+          "default": "auto",
+          "enum": ["auto", "independent", "cadence"],
+          "enumDescriptions": [
+            "Prefer direct Rust reads. Try Cadence when the SHM or PSFXL waveform cannot be opened.",
+            "Read SHM and PSFXL directly using Rust.",
+            "Use the installed Cadence waveform tools on Linux x64."
+          ],
+          "description": "Backend for SHM databases and PSFXL transient waveforms."
         },
         "waveWorkbench.verdiHome": {
           "type": "string",

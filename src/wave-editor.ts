@@ -10,7 +10,7 @@ import {
   type WaveDocumentActions,
 } from "./wave-documents";
 import type { WaveState } from "./shared/protocol";
-import { backendPlan, type FsdbBackend } from "./backend-selection";
+import { backendPlan, type WaveBackend } from "./backend-selection";
 import { mapPrefix } from "./kdb";
 import { configureWaveEditorBackend } from "./wave-editor-backend";
 import { createWaveEditorSurfaces } from "./wave-editor-surfaces";
@@ -140,7 +140,7 @@ function createWaveEditor(
       document.uri,
     );
     const log = (message: string) => output.append(message);
-    const choosePlan = (choice?: FsdbBackend) =>
+    const choosePlan = (choice?: WaveBackend) =>
       backendPlan(
         context,
         vscode.workspace.getConfiguration("waveWorkbench", document.uri),
@@ -327,6 +327,9 @@ function createWaveEditor(
           await executeTcl(viewer, msg.script);
         } else if (msg.type === "openWaveform") {
           await openWaveform(undefined, { picker: true });
+        } else if (msg.type === "selectBackend") {
+          setCurrent(viewer);
+          await vscode.commands.executeCommand("waveWorkbench.selectBackend");
         } else if (msg.type === "openRecent") {
           await openRecent();
         } else if (msg.type === "saveProject") {

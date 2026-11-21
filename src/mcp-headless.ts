@@ -2,7 +2,15 @@
 
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
-import { backendPlan, isWaveform, type FsdbBackend } from "./backend-selection";
+import {
+  backendFallback,
+  backendPlan,
+  backendSetting,
+  isFsdb,
+  isShm,
+  isWaveform,
+  type WaveBackend,
+} from "./backend-selection";
 import { Backend } from "./backend";
 import { renderHeadlessClip } from "./headless-clip-image";
 import { serveMcpStdio, socketDirectory } from "./mcp-stdio";
@@ -61,7 +69,7 @@ interface OpenWaveform {
   state: HeadlessWaveView;
   project?: Awaited<ReturnType<typeof readWaveProject>>;
   projectPath?: string;
-  requestedBackend?: FsdbBackend;
+  requestedBackend?: WaveBackend;
 }
 
 async function main(workspace: string) {
@@ -232,7 +240,9 @@ async function main(workspace: string) {
         path.dirname(path.dirname(source)),
       ]);
     } else {
-      const preference = session.requestedBackend ?? "auto";
+      const preference = isFsdb(filename)
+        ? (session.requestedBackend ?? "auto")
+        : "independent";
       const plan = backendPlan(
         extension,
         config,
@@ -277,13 +287,14 @@ async function main(workspace: string) {
   async function open(
     filename: string,
     signal: AbortSignal,
-    preference = config.get<FsdbBackend>("fsdbBackend") ?? "auto",
+    preference?: WaveBackend,
   ) {
     const projectPath = /\.waveproj$/i.test(filename) ? filename : undefined;
     const project = /\.waveproj$/i.test(filename)
       ? await readWaveProject(filename)
       : undefined;
     filename = project?.waveform ?? filename;
+    preference ??= config.get<WaveBackend>(backendSetting(filename)) ?? "auto";
     if (
       !isWaveform(filename) ||
       !(/\.shm$/i.test(filename)
@@ -310,7 +321,10 @@ async function main(workspace: string) {
       signal.addEventListener("abort", abort, { once: true });
       try {
         signal.throwIfAborted();
-        const meta = await backend.request("open", { path: filename });
+        const meta = await backend.request("open", {
+          path: filename,
+          cadenceShm: launch.cadenceShm || undefined,
+        });
         if (
           !Number.isSafeInteger(Number(meta.start)) ||
           !Number.isSafeInteger(Number(meta.end))
@@ -331,17 +345,26 @@ async function main(workspace: string) {
       meta = await load(plan);
     } catch (error) {
       signal.throwIfAborted();
-      if (plan.kind !== "verdi" || preference !== "auto") throw error;
-      meta = await load(
-        backendPlan(extension, config, filename, log, "independent"),
-      );
+      const fallback = backendFallback(filename, plan.kind, preference);
+      if (!fallback) throw error;
+      try {
+        meta = await load(
+          backendPlan(extension, config, filename, log, fallback),
+        );
+      } catch (fallbackError) {
+        throw Error(`${error}\n${fallbackError}`);
+      }
     }
     const dispose = () => backend.dispose();
     signal.addEventListener("abort", dispose, { once: true });
     try {
       signal.throwIfAborted();
-      const projectView =
-        project && (await restoreView(backend, project.view, meta));
+      const projectView = project
+        ? await restoreView(backend, project.view, meta, isShm(filename))
+        : (previous &&
+            isShm(filename) &&
+            (await restoreView(backend, previous.projectView, meta, true))) ||
+          undefined;
       signal.throwIfAborted();
       const state = new HeadlessWaveView(
         backend,
@@ -505,7 +528,7 @@ async function main(workspace: string) {
       const session = await open(
         path.resolve(workspace, String(args.path)),
         signal,
-        args.backend as FsdbBackend | undefined,
+        args.backend as WaveBackend | undefined,
       );
       selected = session.filename;
       const { start, end, scale, total, backend } = session.meta;

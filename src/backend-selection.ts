@@ -7,6 +7,8 @@ import { Backend } from "./backend";
 import { KdbSession } from "./kdb";
 
 export type FsdbBackend = "auto" | "independent" | "verdi";
+export type ShmBackend = "auto" | "independent" | "cadence";
+export type WaveBackend = FsdbBackend | ShmBackend;
 
 export const backendChoices = [
   {
@@ -26,7 +28,34 @@ export const backendChoices = [
   },
 ] as const;
 
+export const shmBackendChoices = [
+  {
+    value: "auto",
+    label: "自动",
+    description: "优先用 Rust 读取，打开失败时尝试 Cadence",
+  },
+  {
+    value: "independent",
+    label: "独立后端",
+    description: "使用 Rust 直接读取 SHM 和 PSFXL",
+  },
+  {
+    value: "cadence",
+    label: "Cadence 后端",
+    description: "使用本机 Xcelium / Cadence 读取工具",
+  },
+] as const;
+
 export const isFsdb = (filename: string) => /\.fsdb$/i.test(filename);
+export function isShm(filename: string) {
+  return (
+    /\.(?:shm|dsn|trn|psfxl|tran\.dat)$/i.test(filename) ||
+    (/\.tran$/i.test(filename) &&
+      [".psfxl", ".dat"].some((extension) => existsSync(filename + extension)))
+  );
+}
+export const backendSetting = (filename = "") =>
+  isShm(filename) ? "shmBackend" : "fsdbBackend";
 export const isWaveform = (filename: string) =>
   /\.(?:fsdb|fst|vcd|wdb|wlf|shm|raw|psfascii|tran|tran\.dat|psfxl|psfbin|psf|ac|dc|noise|info|pz|xf|stb|sparam|sp|sweep)$/i.test(
     filename,
@@ -37,8 +66,12 @@ export function backendPlan(
   cfg: Pick<vscode.WorkspaceConfiguration, "get">,
   filename: string,
   log: (text: string) => void,
-  choice = cfg.get<FsdbBackend>("fsdbBackend") ?? "auto",
+  choice: WaveBackend = cfg.get<WaveBackend>(backendSetting(filename)) ??
+    "auto",
 ) {
+  const shm = isShm(filename);
+  if ((choice === "cadence" && !shm) || (choice === "verdi" && shm))
+    throw Error("This backend does not support the selected waveform format.");
   const defaultBinary = context.asAbsolutePath(
     `bin/wave-backend${process.platform === "win32" ? ".exe" : ""}`,
   );
@@ -79,8 +112,7 @@ export function backendPlan(
     const xcelium = cfg.get<string>("xceliumHome");
     const vivado = cfg.get<string>("vivadoHome") || env.XILINX_VIVADO;
     const converter = cfg.get<string>("wlf2vcdPath");
-    if (xcelium && /^(shm|dsn|trn)$/.test(proprietary))
-      independentEnv.XCELIUM_HOME = xcelium;
+    if (xcelium && shm) independentEnv.XCELIUM_HOME = xcelium;
     if (proprietary === "wdb" && vivado) {
       independentEnv.XILINX_VIVADO = vivado;
       independentEnv.RDI_DATADIR = join(vivado, "data");
@@ -93,13 +125,23 @@ export function backendPlan(
     }
     if (converter && proprietary === "wlf")
       independentEnv.WAVE_WORKBENCH_WLF2VCD = converter;
+    const cadence = shm && choice === "cadence";
     return {
-      kind: "analog" as const,
+      kind: cadence
+        ? ("cadence" as const)
+        : shm
+          ? ("independent" as const)
+          : ("analog" as const),
       kdbKind: "independent" as const,
-      label: (/^(dsn|trn)$/.test(proprietary)
-        ? "shm"
-        : proprietary
-      ).toUpperCase(),
+      cadenceShm: cadence,
+      label: cadence
+        ? "Cadence 后端"
+        : shm
+          ? "独立后端"
+          : (/^(dsn|trn)$/.test(proprietary)
+              ? "shm"
+              : proprietary
+            ).toUpperCase(),
       createWave: () => new Backend(independentBinary, independentOptions),
       createKdb: createIndependentKdb,
     };
@@ -138,4 +180,21 @@ export function backendPlan(
           return new KdbSession(binary || defaultBinary, home, log);
         },
   };
+}
+
+export function backendFallback(
+  filename: string,
+  kind: ReturnType<typeof backendPlan>["kind"],
+  choice: WaveBackend,
+) {
+  if (choice !== "auto") return undefined;
+  if (kind === "verdi") return "independent";
+  if (
+    kind === "independent" &&
+    isShm(filename) &&
+    process.platform === "linux" &&
+    process.arch === "x64"
+  )
+    return "cadence";
+  return undefined;
 }

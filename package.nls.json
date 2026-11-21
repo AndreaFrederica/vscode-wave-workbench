@@ -21,7 +21,7 @@
   "command.saveProject": "Wave Workbench: Save Waveform Project…",
   "command.openProject": "Wave Workbench: Open Waveform Project…",
   "command.exportClip": "Wave Workbench: Clip / Export Waveform…",
-  "command.selectBackend": "Wave Workbench: Select FSDB Backend…",
+  "command.selectBackend": "Wave Workbench: Select Waveform Backend…",
   "container.waveWorkbenchWavePanel": "Waveforms",
   "container.waveWorkbenchTracePanel": "Trace Results",
   "container.waveWorkbenchLive": "Live Waveforms",

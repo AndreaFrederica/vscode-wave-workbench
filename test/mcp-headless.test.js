@@ -646,6 +646,37 @@ function callTraceMcp(workspace, calls) {
   return values;
 }
 
+const shmFixture = process.env.WAVE_TEST_SHM_FIXTURES;
+test("SHM and PSFXL backend switching preserves channels and time windows", {
+  skip: !shmFixture || process.platform !== "linux" || process.arch !== "x64",
+}, () => {
+  const workspace = path.resolve(shmFixture);
+  for (const [relative, names, start, end] of [
+    ["mixed/waves.shm/waves.dsn", ["mixed_tb.tick", "mixed_tb.filtered"], "20", "5000"],
+    ["digital/waves.shm/waves.dsn", ["diff_tb.tick", "diff_tb.real_value"], "5", "50"],
+    ["analog/raw/tran1.tran.tran.dat", ["step", "filtered"], "0", "100000"],
+  ]) {
+    const waveform = path.join(workspace, relative);
+    const open = backend => ["wave_open", { path: waveform, backend }];
+    const view = (action, args = {}) => ["wave_view", { waveform, action, ...args }];
+    const [, , , cadence, cadenceView, independent, independentView] = callTraceMcp(workspace, [
+      open("independent"),
+      view("add", { signals: names }),
+      view("window", { start, end }),
+      open("cadence"),
+      view("snapshot"),
+      open("independent"),
+      view("snapshot"),
+    ]);
+    assert.equal(cadence.backend, "shm-lib");
+    assert.equal(independent.backend, "rust-independent-shm");
+    for (const snapshot of [cadenceView, independentView]) {
+      assert.deepEqual([snapshot.start, snapshot.end], [Number(start), Number(end)]);
+      assert.deepEqual(snapshot.chosen.map(({ scope, name }) => scope ? scope + "." + name : name), names);
+    }
+  }
+});
+
 test("standalone MCP opens, clips and exports without a VS Code connection", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wave-headless-test-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

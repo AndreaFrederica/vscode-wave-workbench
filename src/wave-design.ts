@@ -10,7 +10,7 @@ import * as path from "node:path";
 import {
   isFsdb,
   type backendPlan,
-  type FsdbBackend,
+  type WaveBackend,
 } from "./backend-selection";
 import {
   findVerilatorTree,
@@ -45,8 +45,8 @@ export function configureWaveDesign(
   }: {
     context: vscode.ExtensionContext;
     cfg: vscode.WorkspaceConfiguration;
-    choosePlan(choice: FsdbBackend): WaveBackendPlan;
-    getBackendSelection(): { plan: WaveBackendPlan; preference: FsdbBackend };
+    choosePlan(choice: WaveBackend): WaveBackendPlan;
+    getBackendSelection(): { plan: WaveBackendPlan; preference: WaveBackend };
     log(message: string): void;
     trackTask: TrackTask;
     refreshSidebar(): void;
@@ -109,17 +109,20 @@ export function configureWaveDesign(
   async function openKdb(
     database: string,
     selected: ReturnType<typeof backendPlan>,
-    choice: FsdbBackend,
+    choice: WaveBackend,
+    backend = viewer.backend,
+    meta = viewer.meta,
   ) {
     const mappings = cfg.get<Record<string, string>>("sourcePathMappings");
     if (
       database === document.uri.fsPath &&
       (/\.wdb$/i.test(database) ||
-        viewer.meta?.backend === "rust-independent-shm")
+        meta?.backend === "rust-independent-shm" ||
+        meta?.backend === "shm-lib")
     )
       return VendorHdlDesign.open(
         database,
-        await viewer.backend.request("hdlLocations", {}),
+        await backend.request("hdlLocations", {}),
         mappings,
       );
     if (/\.hdl\.json$/i.test(database))
@@ -138,7 +141,7 @@ export function configureWaveDesign(
       ].filter(Boolean);
       return VerilatorDesign.open(
         database,
-        viewer.meta?.signals || [],
+        meta?.signals || [],
         sourceDirectories,
       );
     }
@@ -172,7 +175,10 @@ export function configureWaveDesign(
         const choices = ["Verilator elaboration JSON", "KDB"];
         const recordedShm = "读取 SHM 的设计层级";
         if (shm) choices.unshift(xceliumIndex, "SHM HDL 索引文件");
-        if (viewer.meta?.backend === "rust-independent-shm" && shm)
+        if (
+          ["rust-independent-shm", "shm-lib"].includes(viewer.meta?.backend) &&
+          shm
+        )
           choices.unshift(recordedShm);
         if (/\.wdb$/i.test(document.uri.fsPath)) choices.unshift(recordedWdb);
         const kind = isFsdb(document.uri.fsPath)
@@ -294,7 +300,7 @@ export function configureWaveDesign(
     const ownDesign =
       /\.wdb$/i.test(document.uri.fsPath) ||
       (sourceIndex &&
-        viewer.meta?.backend === "rust-independent-shm" &&
+        ["rust-independent-shm", "shm-lib"].includes(viewer.meta?.backend) &&
         /\.(shm|trn|dsn)$/i.test(document.uri.fsPath))
         ? document.uri.fsPath
         : sourceIndex && fs.existsSync(sourceIndex)

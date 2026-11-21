@@ -10,7 +10,7 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
 
-import { isWaveform, type FsdbBackend } from "./backend-selection";
+import { isWaveform, type WaveBackend } from "./backend-selection";
 import { loadDecoderProfiles } from "./decoder-config";
 import { type DecoderInstance } from "./decoder-runtime/types";
 import { serveWaveMcp } from "./mcp";
@@ -214,7 +214,7 @@ export function registerWaveForegroundTools(
               if (!viewer?.meta)
                 throw Error(viewer?.openError ?? "Unable to open waveform");
               if (args.backend !== undefined)
-                await viewer.switchBackend(args.backend as FsdbBackend);
+                await viewer.switchBackend(args.backend as WaveBackend);
               const { start, end, scale, total, backend } = viewer.meta;
               return {
                 waveform: viewer.uri.fsPath,

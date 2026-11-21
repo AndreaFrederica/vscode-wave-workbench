@@ -337,7 +337,7 @@ export interface BackendProtocol {
     args: { state: import("../decoder-runtime/types").Json };
     result: null;
   };
-  open: { args: { path: string }; result: Metadata };
+  open: { args: { path: string; cadenceShm?: boolean }; result: Metadata };
   hdlLocations: { args: Record<string, never>; result: HdlLocation[] };
   query: {
     args: {

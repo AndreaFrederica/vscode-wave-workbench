@@ -7,7 +7,7 @@ use wavebench_reader::vcd::{Events, Signal};
 use crate::shm_psfxl::ShmPsfxl;
 
 pub struct VendorWave {
-    wave: RefCell<Waveform>,
+    wave: Option<RefCell<Waveform>>,
     ids: HashMap<String, ondas::Signal>,
     analog: Option<ShmPsfxl>,
     pub signals: Vec<Signal>,
@@ -79,6 +79,7 @@ impl VendorWave {
         let analog = if backend == "shm-lib" {
             match ShmPsfxl::open(
                 source,
+                None,
                 span.first().ticks()..=span.last().ticks(),
                 (scale.factor(), unit),
                 units_per_second / f64::from(scale.factor()),
@@ -97,11 +98,50 @@ impl VendorWave {
             start: span.first().ticks(),
             end: span.last().ticks(),
             scale: format!("{}{unit}", scale.factor()),
-            wave: RefCell::new(wave),
+            wave: Some(RefCell::new(wave)),
             ids,
             analog,
             signals,
             backend,
+        })
+    }
+
+    pub fn open_psfxl(path: &str) -> Result<Self, String> {
+        let file = Path::new(path);
+        let folder = file
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        // Use the independent catalogue for transient bounds and units. Cadence
+        // reads and returns the samples from the selected partition.
+        let catalogue = wavebench_reader::independent::shm::Shm::open(file)?;
+        let mut signals = Vec::new();
+        let analog = ShmPsfxl::open(
+            folder,
+            Some(file),
+            catalogue.start..=catalogue.end,
+            (1, "fs"),
+            1e15,
+            &mut signals,
+        )?
+        .ok_or("Cadence requires the PSFXL companion files and logFile")?;
+        let units: HashMap<_, _> = catalogue
+            .signals
+            .into_iter()
+            .map(|signal| (signal.id, signal.unit))
+            .collect();
+        for signal in &mut signals {
+            signal.unit = units.get(&signal.id).cloned().flatten();
+        }
+        Ok(Self {
+            start: catalogue.start,
+            end: catalogue.end,
+            scale: catalogue.scale,
+            wave: None,
+            ids: HashMap::new(),
+            analog: Some(analog),
+            signals,
+            backend: "shm-lib",
         })
     }
 
@@ -111,8 +151,10 @@ impl VendorWave {
                 serde_json::json!({ "file": position.file.to_string_lossy(), "line": position.line })
             })
         }
-        let locations = self
-            .wave
+        let Some(wave) = self.wave.as_ref() else {
+            return Ok(serde_json::json!([]));
+        };
+        let locations = wave
             .borrow()
             .hdl_locations()
             .map_err(|error| error.to_string())?;
@@ -154,6 +196,8 @@ impl VendorWave {
         let mut truncated = false;
         let _ = self
             .wave
+            .as_ref()
+            .ok_or("No digital SHM partition")?
             .borrow_mut()
             .scan(
                 &[*signal],

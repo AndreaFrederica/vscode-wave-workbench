@@ -6,7 +6,13 @@
 import type * as vscode from "vscode";
 import * as path from "node:path";
 import type { Backend } from "./backend";
-import type { backendPlan, FsdbBackend } from "./backend-selection";
+import {
+  backendFallback,
+  backendSetting,
+  isShm,
+  type backendPlan,
+  type WaveBackend,
+} from "./backend-selection";
 import type { DesignSession } from "./kdb";
 import type { Metadata, WaveState } from "./shared/protocol";
 import { restoreView } from "./view-state";
@@ -34,7 +40,7 @@ interface BackendActions {
 export function configureWaveEditorBackend(
   vscode: typeof import("vscode"),
   viewer: Viewer,
-  choosePlan: (choice?: FsdbBackend) => WaveBackendPlan,
+  choosePlan: (choice?: WaveBackend) => WaveBackendPlan,
   initialPlan: WaveBackendPlan,
   actions: BackendActions,
 ) {
@@ -51,7 +57,8 @@ export function configureWaveEditorBackend(
   } = actions;
   const { document } = viewer;
   let plan = initialPlan;
-  let preference = cfg.get<FsdbBackend>("fsdbBackend") ?? "auto";
+  const filename = document.uri.fsPath;
+  let preference = cfg.get<WaveBackend>(backendSetting(filename)) ?? "auto";
   let initialOpen: ReturnType<typeof readWithFallback> | undefined;
 
   const { openKdb, restoreInitialDesign } = configureWaveDesign(
@@ -69,8 +76,11 @@ export function configureWaveEditorBackend(
       projectChanges,
     },
   );
-  const readMetadata = async (backend: Backend) => {
-    const meta = await backend.request("open", { path: document.uri.fsPath });
+  const readMetadata = async (backend: Backend, launch: WaveBackendPlan) => {
+    const meta = await backend.request("open", {
+      path: filename,
+      cadenceShm: launch.cadenceShm || undefined,
+    });
     for (const warning of meta.warnings ?? []) log(warning + "\n");
     if (BigInt(meta.end) > BigInt(Number.MAX_SAFE_INTEGER))
       throw Error(
@@ -87,32 +97,39 @@ export function configureWaveEditorBackend(
   const readWithFallback = async (
     preferred: ReturnType<typeof choosePlan>,
     backend: Backend,
-    choice: FsdbBackend,
+    choice: WaveBackend,
   ) => {
     try {
-      return { plan: preferred, backend, meta: await readMetadata(backend) };
-    } catch (verdiError) {
-      if (choice !== "auto" || preferred.kind !== "verdi" || viewer.disposed)
-        throw verdiError;
-      log(`Verdi open failed; trying WaveBench Reader: ${verdiError}\n`);
+      return {
+        plan: preferred,
+        backend,
+        meta: await readMetadata(backend, preferred),
+      };
+    } catch (error) {
+      const fallbackChoice = backendFallback(filename, preferred.kind, choice);
+      if (!fallbackChoice || viewer.disposed) throw error;
+      const fallback = choosePlan(fallbackChoice);
+      log(`${preferred.label} · ${error}\n`);
       backend.dispose();
-      const fallback = choosePlan("independent");
       const reader = fallback.createWave();
       try {
         return {
           plan: fallback,
           backend: reader,
-          meta: await readMetadata(reader),
+          meta: await readMetadata(reader, fallback),
         };
       } catch (readerError) {
         reader.dispose();
-        throw Error(`Verdi: ${verdiError}\nWaveBench Reader: ${readerError}`);
+        throw Error(
+          `${preferred.label}: ${error}\n${fallback.label}: ${readerError}`,
+        );
       }
     }
   };
   const metadataMessage = (meta: Metadata) => ({
     ...meta,
     backendLabel: plan.label,
+    canSelectBackend: ["cadence", "verdi", "independent"].includes(plan.kind),
     title: path.basename(document.uri.fsPath),
     vide:
       vscode.extensions.getExtension("pascal-lab.vide-code-extension")
@@ -172,8 +189,9 @@ export function configureWaveEditorBackend(
       const previousMeta = viewer.meta;
       if (
         previousMeta &&
-        (meta.start !== previousMeta.start ||
-          meta.end !== previousMeta.end ||
+        ((!isShm(filename) &&
+          (meta.start !== previousMeta.start ||
+            meta.end !== previousMeta.end)) ||
           meta.scale !== previousMeta.scale)
       )
         throw Error("两个后端返回的时间范围或单位不同，请重新打开波形");
@@ -182,8 +200,14 @@ export function configureWaveEditorBackend(
         string,
         Awaited<ReturnType<DesignSession["children"]>>
       >();
-      if (attached) {
-        candidateKdb = await openKdb(attached.path, next, choice);
+      if (attached && !(isShm(filename) && attached.path === filename)) {
+        candidateKdb = await openKdb(
+          attached.path,
+          next,
+          choice,
+          candidate,
+          meta,
+        );
         const scopes = new Set(["", ...viewer.treeExpanded]);
         for (const scope of scopes) {
           roots.set(
@@ -197,7 +221,7 @@ export function configureWaveEditorBackend(
         : undefined;
       const documentView = document.view;
       const restored = view
-        ? await restoreView(candidate, view, meta)
+        ? await restoreView(candidate, view, meta, isShm(filename))
         : undefined;
       if (
         viewer.disposed ||

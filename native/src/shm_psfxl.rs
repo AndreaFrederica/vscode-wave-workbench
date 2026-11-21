@@ -50,7 +50,7 @@ fn io_error(error: std::io::Error) -> String {
 // SimVision opens PSFXL through the SHM result directory and its logFile.
 // Exposing only the analog components lets it enumerate the analog catalogue
 // and keeps an analog net with a digital namesake bound to the PSFXL data.
-fn stage(source: &Path, directory: &Path) -> Result<bool, String> {
+fn stage(source: &Path, directory: &Path, selected: Option<&Path>) -> Result<bool, String> {
     let log = source.join("logFile");
     if !log.is_file() {
         return Ok(false);
@@ -58,7 +58,18 @@ fn stage(source: &Path, directory: &Path) -> Result<bool, String> {
     let mut components = Vec::new();
     for entry in fs::read_dir(source).map_err(io_error)? {
         let path = entry.map_err(io_error)?.path();
-        if path.extension().is_some_and(|ext| ext == "psfxl") {
+        let kind = path.extension().and_then(|ext| ext.to_str());
+        let raw = kind == Some("dat")
+            && path
+                .with_extension("")
+                .extension()
+                .is_some_and(|ext| ext == "tran");
+        if (kind == Some("psfxl") || raw)
+            && selected.is_none_or(|file| {
+                file.file_name() == path.file_name()
+                    || file.file_name() == path.with_extension("").file_name()
+            })
+        {
             let data = path.with_extension("");
             let signature = path.with_extension("sig");
             if data.is_file() && signature.is_file() {
@@ -75,7 +86,10 @@ fn stage(source: &Path, directory: &Path) -> Result<bool, String> {
             .file_name()
             .ok_or("Invalid PSFXL component name")?;
         let target = directory.join(name);
-        if component.extension().is_some_and(|ext| ext == "psfxl") {
+        if component
+            .extension()
+            .is_some_and(|ext| ext == "psfxl" || ext == "dat")
+        {
             symlink(&component, target).map_err(io_error)?;
         } else {
             fs::copy(&component, target).map_err(io_error)?;
@@ -156,6 +170,7 @@ fn srr_catalog(directory: &Path) -> Option<(String, Vec<String>)> {
 impl ShmPsfxl {
     pub fn open(
         source: &Path,
+        selected: Option<&Path>,
         span: std::ops::RangeInclusive<u64>,
         tick_unit: (u32, &'static str),
         ticks_per_second: f64,
@@ -168,6 +183,7 @@ impl ShmPsfxl {
         if !stage(
             &source.canonicalize().map_err(io_error)?,
             &directory.path().join("analog.shm"),
+            selected,
         )? {
             return Ok(None);
         }
@@ -382,7 +398,11 @@ impl ShmPsfxl {
         };
         if budget < 16
             || self.srr_failed.borrow().contains(id)
-            || self.oversized_srr.borrow().get(id).is_some_and(|&size| size > budget)
+            || self
+                .oversized_srr
+                .borrow()
+                .get(id)
+                .is_some_and(|&size| size > budget)
         {
             return Ok(false);
         }
@@ -444,7 +464,10 @@ impl ShmPsfxl {
             cache.collector(id, start, end)
         };
         self.scan_source(id, name, start, end, |tick, value| {
-            if collector.as_mut().is_some_and(|buffer| !buffer.push(tick, value)) {
+            if collector
+                .as_mut()
+                .is_some_and(|buffer| !buffer.push(tick, value))
+            {
                 collector = None;
             }
             visit(tick, value);

@@ -209,7 +209,7 @@ impl Database {
             Self::Fsdb(v) => &v.signals,
         }
     }
-    fn open(path: &str, independent: bool) -> Result<Self, String> {
+    fn open(path: &str, independent: bool, cadence_shm: bool) -> Result<Self, String> {
         let kind = std::path::Path::new(path).extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase();
         if kind == "wlf" {
             let converter = std::env::var_os("WAVE_WORKBENCH_WLF2VCD")
@@ -233,6 +233,20 @@ impl Database {
         let is_psfxl_stub = kind == "tran" && [".psfxl", ".dat"].iter()
             .any(|extension| std::path::Path::new(&format!("{path}{extension}")).is_file());
         let raw_psfxl = kind == "dat" && path.to_ascii_lowercase().ends_with(".tran.dat");
+        if cadence_shm {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            {
+                if matches!(kind.as_str(), "shm" | "dsn" | "trn") {
+                    return vendor_wave::VendorWave::open(path, &kind).map(Self::Vendor);
+                }
+                if kind == "psfxl" || is_psfxl_stub || raw_psfxl {
+                    return vendor_wave::VendorWave::open_psfxl(path).map(Self::Vendor);
+                }
+                return Err("Cadence waveform backend requires SHM or a PSFXL transient".into());
+            }
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+            return Err("The Cadence SHM backend requires Linux x64".into());
+        }
         if matches!(kind.as_str(), "shm" | "dsn" | "trn" | "psfxl") || is_psfxl_stub || raw_psfxl {
             let result = wavebench_reader::independent::shm::Shm::open(path);
             match result {
@@ -823,6 +837,8 @@ struct Request {
     id: Value,
     method: String,
     path: Option<String>,
+    #[serde(rename = "cadenceShm")]
+    cadence_shm: Option<bool>,
     signals: Option<Vec<String>>,
     start: Option<String>,
     end: Option<String>,
@@ -892,7 +908,11 @@ fn run(
         #[cfg(fsdb)]
         "kdbPortLinks" => native_kdb.ports(&r.query.ok_or("Missing module instance")?),
         "open" => {
-            let new = Database::open(&r.path.ok_or("Missing path")?, independent)?;
+            let new = Database::open(
+                &r.path.ok_or("Missing path")?,
+                independent,
+                r.cadence_shm.unwrap_or(false),
+            )?;
             let result = new.meta();
             let budget = db
                 .as_ref()
@@ -989,14 +1009,21 @@ fn run(
                         .or_else(|| {
                             // Legacy PSFXL projects stored a catalogue ordinal.
                             // Resolve against the saved path after catalogue changes.
-                            if !d.id.starts_with("psfxl:") && !matches!(store.database, Database::Shm(_)) {
+                            let shm_catalog = match &store.database {
+                                Database::Shm(_) => true,
+                                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                                Database::Vendor(wave) => wave.backend == "shm-lib",
+                                _ => false,
+                            };
+                            if !d.id.starts_with("psfxl:") && !shm_catalog {
                                 return None;
                             }
                             let scope = d.scope.as_ref()?;
                             let name = d.name.as_ref()?;
                             store.database.signals().iter().find(|signal| {
                                 signal.id.starts_with("psfxl:") == d.id.starts_with("psfxl:")
-                                    && &signal.scope == scope
+                                    && (&signal.scope == scope
+                                        || (d.id.starts_with("psfxl:") && signal.id == d.id))
                                     && &signal.name == name
                                     && r.query.as_ref().is_none_or(|query| {
                                         format!("{scope}.{name}") == *query

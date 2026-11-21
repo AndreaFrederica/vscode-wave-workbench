@@ -21,7 +21,7 @@
   "command.saveProject": "Wave Workbench: 保存波形工程…",
   "command.openProject": "Wave Workbench: 打开波形工程…",
   "command.exportClip": "Wave Workbench: 截取 / 导出波形…",
-  "command.selectBackend": "Wave Workbench: 选择 FSDB 后端…",
+  "command.selectBackend": "Wave Workbench: 选择波形后端…",
   "container.waveWorkbenchWavePanel": "波形",
   "container.waveWorkbenchTracePanel": "Trace 结果",
   "container.waveWorkbenchLive": "实时波形",

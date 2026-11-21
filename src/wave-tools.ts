@@ -704,7 +704,7 @@ export const toolDefinitions = [
     "Open an FSDB, FST or VCD file or restore a .waveproj project in Wave Workbench.",
     {
       path: { type: "string" },
-      backend: { type: "string", enum: ["auto", "independent", "verdi"] },
+      backend: { type: "string", enum: ["auto", "independent", "verdi", "cadence"] },
     },
     ["path"],
   ),

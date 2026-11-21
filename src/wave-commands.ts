@@ -6,7 +6,14 @@
 import { localize } from "./shared/localization";
 import type * as vscode from "vscode";
 
-import { backendChoices, isFsdb, type FsdbBackend } from "./backend-selection";
+import {
+  backendChoices,
+  backendSetting,
+  isFsdb,
+  isShm,
+  shmBackendChoices,
+  type WaveBackend,
+} from "./backend-selection";
 import { quote } from "./commands";
 
 import type { GetViewer, ReportError } from "./wave-extension-types";
@@ -91,25 +98,35 @@ export function registerWaveCommands(
         "waveWorkbench",
         viewer?.uri,
       );
-      const preference = cfg.get<FsdbBackend>("fsdbBackend", "auto");
+      const filename = viewer?.uri.fsPath ?? "";
+      const shm = isShm(filename);
+      const setting = backendSetting(filename);
+      const choices = shm ? shmBackendChoices : backendChoices;
+      const preference = cfg.get<WaveBackend>(setting, "auto");
       const selection = await vscode.window.showQuickPick(
-        backendChoices.map((choice) => ({
+        choices.map((choice) => ({
           ...choice,
+          label: localize(choice.label),
+          description: localize(choice.description),
           picked: choice.value === preference,
           detail:
             viewer?.backendKind === choice.value
               ? localize("当前波形正在使用")
               : undefined,
         })),
-        { title: localize("选择 FSDB / KDB 后端") },
+        {
+          title: localize(
+            shm ? "选择 SHM / PSFXL 后端" : "选择 FSDB / KDB 后端",
+          ),
+        },
       );
       if (!selection) return;
       const label =
-        viewer && isFsdb(viewer.uri.fsPath)
+        viewer && (shm || isFsdb(filename))
           ? await viewer.switchBackend(selection.value)
           : selection.label;
       await cfg.update(
-        "fsdbBackend",
+        setting,
         selection.value,
         vscode.workspace.workspaceFolders?.length
           ? vscode.ConfigurationTarget.Workspace
