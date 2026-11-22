@@ -5,6 +5,7 @@ import type { DecoderScheduler } from "./decoder-runtime/scheduler";
 import type { DecoderInstance } from "./decoder-runtime/types";
 import type { decoderRegistry } from "./decoder-runtime/registry";
 import type { Metadata } from "./shared/protocol";
+import { validateProfile } from "./shared/decoders";
 import { findSignal } from "./signal-lookup";
 
 export async function decodeWaveWindow(
@@ -15,9 +16,28 @@ export async function decodeWaveWindow(
   start: string,
   end: string,
   signal?: AbortSignal,
+  filter?: string,
 ) {
   const { definitions } = registry;
-  const definition = definitions.get(instance.decoderId);
+  let definition = definitions.get(instance.decoderId);
+  const rule = instance.signalRule;
+  if (rule) {
+    const profile = validateProfile(rule.profile);
+    if (instance.engine !== "builtin" || instance.decoderId !== profile.id)
+      throw Error("Invalid signal decoder");
+    definition = {
+      profile,
+      hash: JSON.stringify(profile),
+      manifest: {
+        apiVersion: 1,
+        version: "1",
+        engine: "builtin",
+        id: profile.id,
+        name: profile.label,
+        inputs: [{ id: "data", width: profile.width }],
+      },
+    };
+  }
   if (!definition)
     throw Error("Decoder not found or disabled: " + instance.decoderId);
   if (
@@ -41,7 +61,21 @@ export async function decodeWaveWindow(
       if (name === undefined && required === false) return null;
       if (typeof name !== "string" || !name || name.length > 1024)
         throw Error("Bind decoder input " + id);
-      const bound = await findSignal(backend, name);
+      let bound = await findSignal(backend, name);
+      if (rule?.bitOffset !== undefined) {
+        if (
+          !Number.isSafeInteger(rule.bitOffset) ||
+          rule.bitOffset < 0 ||
+          rule.bitOffset >= bound.width
+        )
+          throw Error("Invalid decoder bit offset");
+        bound = {
+          ...bound,
+          bitOffset: rule.bitOffset,
+          sourceWidth: bound.width,
+          width: 1,
+        };
+      }
       if (!!bound.real !== !!real)
         throw Error("Incompatible signal type for decoder input " + id);
       if (
@@ -60,6 +94,7 @@ export async function decodeWaveWindow(
     definition,
     bindings,
     options: instance.options,
+    filter,
     start,
     end,
     signal,

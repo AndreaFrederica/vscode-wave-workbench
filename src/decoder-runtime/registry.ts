@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
+import { axiManifest, coralBridgeManifest } from "./axi4";
+import { uhManifest } from "./tluh";
+import { tlulManifest } from "./tlul";
 import { createHash } from "node:crypto";
 import {
   mkdir,
@@ -122,6 +125,13 @@ export async function decoderRegistry(
       hash: JSON.stringify(profile),
     });
   }
+  for (const manifest of [
+    tlulManifest,
+    uhManifest,
+    axiManifest,
+    coralBridgeManifest,
+  ])
+    definitions.set(manifest.id, { manifest, hash: JSON.stringify(manifest) });
   if (!workspace) return { definitions, warnings };
   const root = await realpath(workspace);
   for (const engine of ["lua", "javascript"] as const) {

@@ -11,7 +11,16 @@
 <details class="toolMenu" id="fileMenu"><summary>文件</summary><div class="menuPanel"><span id="file">正在读取波形…</span><small id="backend"></small><button data-action="openWaveform">打开波形…</button><button data-action="openRecent">最近打开…</button><button data-action="selectBackend">选择波形后端…</button><button data-action="openProject">打开波形工程…</button><button data-action="saveProject">保存波形工程…</button><button data-action="exportClip">截取 / 导出波形…</button><button data-action="runScript">运行 Tcl 脚本…</button><button data-action="showTclConsole">打开 Tcl 控制台</button></div></details>
 <button data-action="dockWave" class="dock-action">移到底部</button><button data-action="undockWave" class="undock-action">移回编辑器</button>
 <button data-action="fit" title="全局缩放 F" aria-label="全局缩放">全局</button><button data-action="in" title="放大 +" aria-label="放大">＋</button><button data-action="out" title="缩小 -" aria-label="缩小">−</button><button data-action="left" title="向左平移" aria-label="向左平移">←</button><button data-action="right" title="向右平移" aria-label="向右平移">→</button><button data-action="prev" title="上一边沿 [" aria-label="上一边沿">Ⅰ‹</button><button data-action="next" title="下一边沿 ]" aria-label="下一边沿">›Ⅰ</button><i></i>
-<details class="toolMenu" id="displayMenu"><summary>显示</summary><div class="menuPanel"><label for="waveRowHeight">波形行高</label><input id="waveRowHeight" type="range" step="1" value="32">
+<details class="toolMenu" id="displayMenu"><summary>视图</summary><div class="menuPanel">    <div id="protocolPaneChoices" hidden>
+      <label><span>协议浏览器</span><select id="showProtocolExplorer"><option value="expanded">展开</option><option value="collapsed">折叠</option><option value="hidden">隐藏</option></select></label>
+      <label><span>事务详情</span><select id="showProtocolInspector"><option value="expanded">展开</option><option value="collapsed">折叠</option><option value="hidden">隐藏</option></select></label>
+      <label><input type="checkbox" id="showProtocolTracks"> 事务轨道</label>
+      <label><input type="checkbox" id="allTracksTop"> 全部轨道置顶</label>
+      <label>协议树位置 <select id="protocolDock"><option value="left">左侧</option><option value="right">右侧</option><option value="bottom">底部</option></select></label>
+      <label><input type="checkbox" id="separateTrees"> 各接口独立滚动</label>
+    </div>
+<label for="waveRowHeight">波形行高</label><input id="waveRowHeight" type="range" step="1" value="32">
+<label for="signalHeight">当前信号行高（px）</label><input type="number" id="signalHeight" min="24" max="320" placeholder="跟随全局">
 <label for="busLabelMode">总线格数值</label>
 <select id="busLabelMode">
   <option value="auto">自动缩写</option>
@@ -20,7 +29,7 @@
 <label><input id="showInlineTags" type="checkbox"> 在信号名旁显示标签</label>
 <label for="waveTagStyle">标签样式</label><select id="waveTagStyle"><option value="pill">彩色胶囊</option><option value="dot">彩色圆点</option><option value="text">彩色文字</option></select>
 <label><input id="showDecodedValues" type="checkbox" checked> 显示解码值</label>
-</div></details><details class="toolMenu" id="groupMenu"><summary>分组</summary><div class="menuPanel" id="groupTools"><button id="newGroup">＋ 新建分组</button><label>目标组 <select id="groupTarget" aria-label="目标分组"><option value="">未分组</option></select></label><button id="assignGroup">选中移入</button><button id="renameGroup">重命名分组</button><button id="ungroupSignals">移出分组</button><button id="expandGroups">展开全部</button><button id="collapseGroups">折叠全部</button></div></details>
+</div></details><details class="toolMenu" id="groupMenu"><summary>分组</summary><div class="menuPanel" id="groupTools"><button id="newGroup">＋ 新建分组</button><label>目标组 <select id="groupTarget" aria-label="目标分组"><option value="">未分组</option></select></label><button id="assignGroup">选中移入</button><button id="newSubgroup">新建子组</button><button id="renameGroup">重命名分组</button><button id="ungroupSignals">移出分组</button><button id="expandGroups">展开全部</button><button id="collapseGroups">折叠全部</button></div></details>
 <details class="toolMenu" id="decoderMenu">
   <summary>解码</summary>
   <div class="menuPanel">
@@ -96,7 +105,11 @@
 </div>
 <button id="toggleToolbarRows" type="button" aria-pressed="false" aria-label="双行工具栏" title="切换单行或双行工具栏"><span>双行</span></button>
 </nav>
-<main><aside><details id="catalogPanel" open><summary class="section">波形目录</summary><input id="search" placeholder="搜索层次或信号…" aria-label="Search signals"><div id="catalogModes"><button id="catalogPreview">层次预览</button><button id="catalogAll">全部信号</button></div><div id="tree"></div><div id="count"></div></details><div class="section" id="scopeTitle">Signals · 选择实例查看信号</div><div id="scopeSignals"></div><details id="legacyKdb" open><summary class="section">Elaborated Design</summary><div id="kdbState">未接入设计数据库</div><div id="kdbTools"><button id="kdbUp">↑ 上一级</button><button id="kdbDefinition">模块定义 ↗</button></div><div id="kdbTree"></div></details></aside>
+<main>
+<nav id="protocolExplorer" aria-label="协议浏览器" hidden>
+<header><button class="protocolDisclosure" id="foldProtocolExplorer" type="button" aria-expanded="true" aria-controls="protocolInterfaces"><span aria-hidden="true">▾</span><strong>协议浏览器</strong></button><button id="protocolCatalog" type="button" aria-pressed="false">波形目录</button><button id="closeProtocolExplorer" aria-label="隐藏协议浏览器" title="隐藏协议浏览器">×</button></header>
+<div id="protocolInterfaces"></div>
+</nav><aside><details id="catalogPanel" open><summary class="section">波形目录</summary><input id="search" placeholder="搜索层次或信号…" aria-label="Search signals"><div id="catalogModes"><button id="catalogPreview">层次预览</button><button id="catalogAll">全部信号</button></div><div id="tree"></div><div id="count"></div></details><div class="section" id="scopeTitle">Signals · 选择实例查看信号</div><div id="scopeSignals"></div><details id="legacyKdb" open><summary class="section">Elaborated Design</summary><div id="kdbState">未接入设计数据库</div><div id="kdbTools"><button id="kdbUp">↑ 上一级</button><button id="kdbDefinition">模块定义 ↗</button></div><div id="kdbTree"></div></details></aside>
 <section id="viewer">
 <div id="readout">
   <div id="cursorToolbar" role="toolbar" aria-label="游标">
@@ -147,6 +160,10 @@
   </div>
   <div id="measurementCards"></div>
 </section>
+</section>
+<section id="protocolInspector" aria-label="事务详情" hidden>
+<header><button class="protocolDisclosure" id="foldProtocolInspector" type="button" aria-expanded="true" aria-controls="protocolDetails"><span aria-hidden="true">▾</span><strong>事务详情</strong></button><span id="protocolDetailInterface"></span><button id="closeProtocolInspector" aria-label="隐藏事务详情" title="隐藏事务详情">×</button></header>
+<div id="protocolDetails" class="transactionDetails"></div>
 </section></main>
 <details id="console"><summary>nWave Tcl Console</summary><pre id="commandLog" role="log"></pre><form id="commandForm"><textarea id="commandInput" rows="2" aria-label="nWave Tcl command" placeholder="wvZoomAll; wvSetCursor 20 · waveHelp 查看命令"></textarea><button type="submit">执行 Ctrl+Enter</button></form></details>
 <details id="eventReport" hidden><summary>信号事件报告 · 当前时间窗口</summary><div id="reportSummary"></div><button id="closeReport">关闭报告</button><pre id="reportBody"></pre></details><footer id="status" role="status">FSDB 原生读取 · Rust + Verdi Reader SDK</footer>

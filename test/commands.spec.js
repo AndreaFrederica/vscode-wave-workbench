@@ -16,7 +16,16 @@ async function setup(page,filename,kdbPath,decoderConfig,options={}){
   if(kdbPath){viewer.kdb=new KdbSession(path.resolve(__dirname,'../bin/wave-backend'),process.env.VERDI_HOME);await viewer.kdb.open(kdbPath);}
   const engine=new WaveCommands({getViewer:()=>viewer,open:async file=>{if(path.resolve(file)!==filename)throw Error('Unexpected test open');},scope:async name=>{await send({type:'kdbHierarchy',scope:name,children:await viewer.kdb.children(name)});}});
   const runner=new TclRunner((name,args,dir)=>{viewer.scriptDirectory=dir;return engine.execute(name,args);},{log:text=>logs.push(text)});
+  const decoderEditor = options.transactionService && require('../dist/wave-editor-decoders').createWaveEditorDecoders({}, viewer, {
+    decodeWindow: async (viewer, instance, start, end, signal) => {
+      const {decoderRegistry} = require('../dist/decoder-runtime/registry');
+      const {DecoderScheduler} = require('../dist/decoder-runtime/scheduler');
+      return require('../dist/wave-decoder-service').decodeWaveWindow(viewer, new DecoderScheduler(''), await decoderRegistry([]), instance, start, end, signal);
+    },
+  });
   await page.exposeFunction('bridge',async m=>{
+    if (decoderEditor && ['queryWaveDecoder','cancelWaveDecoder','revealTlulHandshake'].includes(m.type))
+      return decoderEditor.receive({postMessage:send},m);
     if(m.type==='waveMath')mathRequests.push(m);
     if(m.type==='showTclConsole')consoleRequests.push(m);
     if(['rtlTrace','rtlSchematic','rtlModuleSchematic','rtlTraceSchematic'].includes(m.type))rtlRequests.push(m);
@@ -808,7 +817,10 @@ test('decoder and annotation bindings survive a waveform project round trip', as
     await env.run('wvSelectSignal /top/valid');
     const edit = row.getByRole('button', {name:'编辑 instr[31:0] 的标签和注释'});
     const otherEdit = page.locator('.row').nth(1).getByRole('button', {name:'编辑 valid 的标签和注释'});
-    expect((await edit.boundingBox()).x).toEqual((await otherEdit.boundingBox()).x);
+    await expect.poll(async () => {
+      const [first, second] = await Promise.all([edit.boundingBox(), otherEdit.boundingBox()]);
+      return first !== null && second !== null && first.x === second.x;
+    }).toBe(true);
     await edit.click();
     await expect(page.locator('#annotationSignal')).toHaveText('instr[31:0]');
     await page.getByLabel('标签（逗号分隔）').fill('CV32, ID, CV32');
@@ -1082,6 +1094,17 @@ test('transaction rows accept only the current request and keep bindings across 
     await expect(row(1).locator('.decoderTransaction')).toHaveText('JS transaction');
     await row(0).locator('.decoderTransaction').click();
     await expect(page.locator('#cursorAInput')).toHaveValue('12');
+    const inspector = page.locator('#protocolDetails');
+    await expect(inspector).toContainText('Lua transaction');
+    await row(1).locator('.decoderTransaction').click();
+    await expect(inspector).toContainText('JS transaction');
+    await expect(page.locator('#protocolDetailInterface')).toHaveText('second');
+    await expect(row(0).locator('.decoderTransaction.selected')).toHaveCount(0);
+    const firstInterface = page.locator('#protocolInterfaces > details').first();
+    await firstInterface.locator(':scope > summary').click();
+    await firstInterface.getByRole('listbox').selectOption('0');
+    await expect(inspector).toContainText('Lua transaction');
+    await row(0).getByRole('button', {name:'接口操作'}).click();
     await row(0).getByRole('button', {name: '取消', exact: true}).click();
     await send(a.request, 'first', 'late result');
     await expect(row(0).locator('.decoderTrackStatus')).toHaveText('已取消');
@@ -1094,34 +1117,43 @@ test('transaction rows accept only the current request and keep bindings across 
     await expect.poll(() => env.decoderRequests.length).toBe(4);
     expect(env.decoderRequests[2].start).toBe(a.start);
     expect(env.decoderRequests[2].end).toBe(a.end);
+    for (const query of env.decoderRequests.slice(2))
+      await send(query.request, query.instance.instanceId, query.instance.instanceId);
     await env.run('wvZoom 10 20');
-    await expect.poll(() => env.decoderRequests.at(-1).start).toBe('10');
-    expect(env.decoderRequests.at(-1).end).toBe('20');
+    expect(await env.viewer.ui('snapshot')).toMatchObject({start: 10, end: 20});
+    await expect(row(1).locator('.decoderTransaction')).toHaveText('second');
+    // Allow a debounced query to reach the host if the cache missed.
+    await page.waitForTimeout(100);
+    expect(env.decoderRequests).toHaveLength(4);
 
     const report = process.env.WAVE_DECODER_UI_REPORT;
     if (report) {
-      const query = env.decoderRequests.at(-1);
-      const results = await page.evaluate(({request, instance}) => {
-        const lane = [...document.querySelectorAll('#decoderTracks .decoderTrack')].at(-1);
-        return [32, 512, 2048].map(count => {
-          const decoded = {transactions: Array.from({length: count}, (_, index) => ({
-            start: '12', end: '13', label: String(index),
-          })), warnings: [], truncated: false};
-          const runs = [];
-          for (let index = 0; index < 16; ++index) {
+      const results = [];
+      for (const count of [32, 512, 2048]) {
+        const runs = [];
+        for (let index = 0; index < 16; ++index) {
+          const previous = env.decoderRequests.length;
+          await env.viewer.ui('decoderReload', {instanceId: 'second'});
+          await expect.poll(() => env.decoderRequests.length).toBe(previous + 1);
+          const request = env.decoderRequests.at(-1).request;
+          const elapsed = await page.evaluate(({request, count}) => {
+            const lane = [...document.querySelectorAll('#decoderTracks .decoderTrack')].at(-1);
+            const decoded = {transactions: Array.from({length: count}, (_, index) => ({
+              start: '12', end: '13', label: String(index),
+            })), warnings: [], truncated: false};
             const started = performance.now();
             window.dispatchEvent(new MessageEvent('message', {data: {
-              type: 'waveDecoderResult', request, instanceId: instance.instanceId, decoded,
+              type: 'waveDecoderResult', request, instanceId: 'second', decoded,
             }}));
-            // Reading the final row forces layout after replacing the rendered transaction nodes.
             lane.querySelector('.decoderTransaction:last-child').getBoundingClientRect();
-            if (index) runs.push(performance.now() - started);
-          }
-          runs.sort((a, b) => a - b);
-          const at = q => runs[Math.ceil(q * runs.length) - 1];
-          return {count, p50: at(0.5), p95: at(0.95), p99: at(0.99)};
-        });
-      }, query);
+            return performance.now() - started;
+          }, {request, count});
+          if (index) runs.push(elapsed);
+        }
+        runs.sort((a, b) => a - b);
+        const at = q => runs[Math.ceil(q * runs.length) - 1];
+        results.push({count, p50: at(0.5), p95: at(0.95), p99: at(0.99)});
+      }
       fs.writeFileSync(report, JSON.stringify({chromium: page.context().browser().version(), repeats: 15, results}, null, 2) + '\n');
     }
   } finally {
@@ -1707,4 +1739,46 @@ test('expanded trace draws module boundaries around nodes and connects their pin
   await mode.selectOption('signals');
   await expect(page.locator('.trace-frame')).toHaveCount(0);
   await expect(page.locator('.node')).toHaveCount(4);
+});
+
+test('TL-UL inspector filters real handshakes, pins fields and restores the project', async ({page}) => {
+  const filename = process.env.WAVE_TLUL_VCD;
+  test.skip(!filename, 'Set WAVE_TLUL_VCD to the RV32A atomic adapter VCD');
+  const env = await setup(page, filename, undefined, undefined, {independent:true, transactionService:true});
+  const scope = 'rv32a_atomic_adapter_tb.';
+  const instance = {instanceId:'memory', decoderId:'opentitan.tlul', engine:'builtin',
+    bindings:{clk:scope+'clk',rst_n:scope+'rst_n',h2d:scope+'memory_h2d',d2h:scope+'memory_d2h'}};
+  try {
+    await env.viewer.ui('decoderAttach',instance);
+    const lane = page.locator('.decoderTrack');
+    await expect(lane.locator('.decoderTransaction')).toHaveCount(976);
+    await lane.getByRole('button',{name:'接口操作'}).click();
+    await lane.getByRole('button',{name:'事务列表'}).click();
+    const search = page.locator('#protocolExplorer').getByRole('searchbox');
+    await search.fill('d_error=1');
+    await expect(lane.locator('.decoderTransaction')).toHaveCount(8);
+    await search.fill('PutPartialData');
+    const tx = lane.locator('.decoderTransaction');
+    await expect(tx).toHaveCount(1);
+    await page.locator('#protocolInterfaces .transactionBrowser select').selectOption({index:0});
+    await page.locator('#protocolDetails').getByRole('checkbox',{name:'address',exact:true}).check();
+    await page.locator('#protocolDetails').getByRole('checkbox',{name:'mask',exact:true}).check();
+    await expect(tx).toContainText('address=0x104 · mask=0x2');
+    await page.locator('#protocolDetails .protocolHandshakes > summary').click();
+    await expect(lane.locator('.protocolPoint')).toContainText(['UL A · PutPartialData', 'UL D · AccessAck']);
+    await lane.locator('.protocolPoint').filter({hasText:'UL D'}).click();
+    await expect.poll(async () => (await env.viewer.ui('snapshot')).chosen.map(s=>s.displayName)).toContain('d_valid');
+    expect((await env.viewer.ui('snapshot')).cursorA).toBe(955000);
+    await env.run('wvZoom 920000 960000');
+    await expect(page.locator('#protocolDetails').getByRole('checkbox',{name:'mask',exact:true})).toBeChecked();
+    const snapshot = await env.viewer.ui('snapshot');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(),'tlul-project-'));
+    try {
+      const project = path.join(tmp,'memory.waveproj');
+      const {saveWaveProject,readWaveProject} = require('../dist/project');
+      await saveWaveProject(project,filename,snapshot);
+      await env.viewer.ui('restoreView',(await readWaveProject(project)).view);
+      await expect(lane.locator('.decoderTransaction')).toHaveText('PutPartialData · address=0x104 · mask=0x2');
+    } finally { fs.rmSync(tmp,{recursive:true,force:true}); }
+  } finally { env.dispose(); }
 });

@@ -3,7 +3,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-import type { Signal } from "./protocol";
+import { WAVE_ROW_HEIGHT, type Signal } from "./protocol";
 import {
   normalizeAnnotation,
   supportsProfile,
@@ -70,6 +70,12 @@ function restore(s: Partial<Signal>, canonical: Signal): Signal {
     throw Error("解码配置与信号位宽不符");
   return {
     ...canonical,
+    rowHeight:
+      Number.isInteger(s.rowHeight) &&
+      s.rowHeight! >= WAVE_ROW_HEIGHT.min &&
+      s.rowHeight! <= WAVE_ROW_HEIGHT.max
+        ? s.rowHeight
+        : undefined,
     analogScale: canonical.real ? analogScale(s.analogScale) : undefined,
     unit:
       canonical.real && typeof s.unit === "string"

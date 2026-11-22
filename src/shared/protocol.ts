@@ -33,6 +33,7 @@ export interface Signal {
   name: string;
   width: number;
   supported: boolean;
+  rowHeight?: number;
   real?: boolean;
   unit?: string;
   analogScale?: AnalogScale;
@@ -280,6 +281,17 @@ export interface WaveState {
   radix: Radix;
   displayScale: string | null;
   displayFactor: number;
+  groupParents?: [string, string][];
+  protocolLayout?: {
+    explorer: boolean;
+    inspector: boolean;
+    explorerCollapsed?: boolean;
+    inspectorCollapsed?: boolean;
+    tracks: boolean;
+    dock?: "left" | "right" | "bottom";
+    separate?: boolean;
+    allTop?: boolean;
+  };
   groupOrder: string[];
   activeGroup: string;
   collapsedGroups: string[];

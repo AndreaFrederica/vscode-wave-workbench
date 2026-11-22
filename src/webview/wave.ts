@@ -3,8 +3,11 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import { isAxiDecoder } from "../shared/axi-decoder";
 import { localize } from "../shared/localization";
 import { getElement as $ } from "./dom";
+import { protocolWorkspace, type ProtocolLayout } from "./protocol-workspace";
+import { transactionView } from "./transaction-view";
 import { renderClipImage } from "./clip-image";
 import { measurementPanel } from "./measurements";
 import { amplitudeCursors } from "./amplitude-cursors";
@@ -61,7 +64,9 @@ import {
   type OverviewBin,
 } from "../shared/protocol";
 /* global acquireVsCodeApi */
-const vscode = acquireVsCodeApi<Partial<WaveState> & { toolbarRows?: 1 | 2 }>();
+const vscode = acquireVsCodeApi<
+  Partial<WaveState> & { toolbarRows?: 1 | 2; protocolLayout?: ProtocolLayout }
+>();
 
 const DEFAULT_ROW_HEIGHT = 32;
 let colors: string[] = [],
@@ -133,13 +138,26 @@ const amplitude = amplitudeCursors(
   (message) => status(message, "warn"),
 );
 interface DecoderLane {
+  filter?: string;
+  cached?: {
+    config: string;
+    first: bigint;
+    last: bigint;
+    result: DecodeResult;
+  };
+  pending?: { config: string; first: bigint; last: bigint; exact: boolean };
   lane: HTMLElement;
   items: HTMLElement;
   status: HTMLElement;
+  view: ReturnType<typeof transactionView>;
   key?: string;
   request?: number;
   timer?: ReturnType<typeof setTimeout>;
 }
+const protocols = protocolWorkspace(saved.protocolLayout, () => {
+  if (meta) request();
+});
+let protocolReveal = 0;
 const decoderLanes = new Map<string, DecoderLane>();
 
 function cancelDecoder(id: string) {
@@ -147,29 +165,80 @@ function cancelDecoder(id: string) {
   if (!lane) return;
   clearTimeout(lane.timer);
   lane.request = undefined;
+  lane.pending = undefined;
   vscode.postMessage({ type: "cancelWaveDecoder", instanceId: id });
 }
 
-function detachDecoder(id: string) {
+function removeDecoderLane(id: string) {
   cancelDecoder(id);
+  decoderLanes.get(id)?.view.dispose();
   decoderLanes.get(id)?.lane.remove();
   decoderLanes.delete(id);
+}
+function detachDecoder(id: string) {
+  const rule = decoderInstances.find((i) => i.instanceId === id)?.signalRule;
+  if (rule) {
+    const s = chosen.find((s) => anchorSignal(s) === rule.signal);
+    if (s) delete s.decoder;
+  }
+  removeDecoderLane(id);
   decoderInstances = decoderInstances.filter(
     (instance) => instance.instanceId !== id,
   );
+  request();
   publishProjectState();
 }
 
-function mountDecoder(id: string, name: string): DecoderLane {
+function mountDecoder(instance: DecoderInstance): DecoderLane {
+  const id = instance.instanceId!;
   const lane = document.createElement("div");
   lane.className = "decoderTrack";
   const controls = document.createElement("div");
   controls.className = "decoderTrackControls";
   const label = document.createElement("strong");
   label.className = "decoderTrackName";
-  label.textContent = name;
-  controls.append(label);
+  label.textContent = instance.decoderId;
+  const collapse = document.createElement("button");
+  collapse.className = "protocolFold";
+  collapse.setAttribute("aria-expanded", "true");
+  collapse.title = localize("折叠事务轨道");
+  collapse.setAttribute("aria-label", collapse.title);
+  collapse.textContent = "▾";
+  collapse.onclick = () => {
+    const folded = lane.classList.toggle("folded");
+    collapse.textContent = folded ? "▸" : "▾";
+    collapse.setAttribute("aria-expanded", String(!folded));
+    collapse.title = localize(folded ? "展开事务轨道" : "折叠事务轨道");
+    collapse.setAttribute("aria-label", collapse.title);
+    request();
+  };
+  const more = document.createElement("button"),
+    menu = document.createElement("div");
+  more.textContent = "⋯";
+  more.title = localize("接口操作");
+  more.setAttribute("aria-label", more.title);
+  more.setAttribute("aria-expanded", "false");
+  menu.popover = "auto";
+  menu.className = "protocolActions";
+  menu.id = "actions-" + id;
+  more.popoverTargetElement = menu;
+  menu.addEventListener("beforetoggle", (event: ToggleEvent) => {
+    if (event.newState === "open") {
+      const rect = more.getBoundingClientRect();
+      menu.style.left =
+        Math.max(4, Math.min(rect.left, window.innerWidth - 175)) + "px";
+      menu.style.top =
+        Math.max(4, Math.min(rect.bottom + 2, window.innerHeight - 185)) + "px";
+    }
+    more.setAttribute("aria-expanded", String(event.newState === "open"));
+  });
+  label.textContent = instance.signalRule
+    ? instance.signalRule.profile.label + " · " + instance.bindings.data
+    : instance.decoderId + " · " + id;
+  label.title = label.textContent;
+  controls.append(collapse, label, more, menu);
   for (const [title, action] of [
+    [localize("事务列表"), () => view.toggle()],
     [localize("重载"), () => scheduleDecoder(id)],
     [
       localize("取消"),
@@ -192,9 +261,109 @@ function mountDecoder(id: string, name: string): DecoderLane {
   ] as const) {
     const button = document.createElement("button");
     button.textContent = title;
-    button.onclick = action;
-    controls.append(button);
+    if (
+      title === localize("生成虚拟信号") &&
+      (isAxiDecoder(instance.decoderId) ||
+        ["opentitan.tlul", "opentitan.tluh"].includes(instance.decoderId))
+    )
+      continue;
+    button.onclick = () => {
+      menu.hidePopover();
+      action();
+    };
+    menu.append(button);
   }
+  function layoutSelect(
+    title: string,
+    options: [string, string][] | (() => [string, string][]),
+    change: (value: string) => void,
+    current: () => string,
+  ) {
+    const label = document.createElement("label"),
+      select = document.createElement("select");
+    label.textContent = title;
+    select.setAttribute("aria-label", title);
+    menu.addEventListener("beforetoggle", (event: ToggleEvent) => {
+      if (event.newState !== "open") return;
+      select.replaceChildren();
+      for (const [value, name] of typeof options === "function"
+        ? options()
+        : options)
+        select.add(new Option(name, value));
+      select.value = current();
+    });
+    select.onchange = () => {
+      change(select.value);
+      menu.hidePopover();
+      request();
+    };
+    label.append(select);
+    menu.append(label);
+  }
+  layoutSelect(
+    localize("轨道位置"),
+    () => [
+      ["top", localize("顶部")],
+      ...groupOrder.map(
+        (g) =>
+          [JSON.stringify(["group", g]), localize("组") + " · " + g] as [
+            string,
+            string,
+          ],
+      ),
+      ...chosen.map(
+        (s) =>
+          [
+            JSON.stringify(["signal", anchorSignal(s)]),
+            s.scope + "." + WaveSignal.label(s),
+          ] as [string, string],
+      ),
+    ],
+    (value) => {
+      if (value === "top") delete instance.anchor;
+      else {
+        const [kind, target] = JSON.parse(value);
+        instance.anchor = { kind, target };
+      }
+    },
+    () =>
+      instance.anchor
+        ? JSON.stringify([instance.anchor.kind, instance.anchor.target])
+        : "top",
+  );
+  layoutSelect(
+    localize("协议树位置"),
+    [
+      ["default", localize("跟随布局")],
+      ["left", localize("左侧")],
+      ["right", localize("右侧")],
+      ["bottom", localize("底部")],
+    ],
+    (value) => {
+      if (value === "default") delete instance.treeDock;
+      else instance.treeDock = value as DecoderInstance["treeDock"];
+      protocols.arrange();
+    },
+    () => instance.treeDock ?? "default",
+  );
+  const heightLabel = document.createElement("label"),
+    heightInput = document.createElement("input");
+  heightLabel.textContent = localize("解码行高（px）");
+  heightInput.type = "number";
+  heightInput.min = "24";
+  heightInput.max = "320";
+  heightInput.placeholder = "26";
+  heightInput.value = instance.rowHeight?.toString() ?? "";
+  heightInput.onchange = () => {
+    if (heightInput.value && !heightInput.validity.valid) return;
+    instance.rowHeight = heightInput.value
+      ? normalizeRowHeight(heightInput.valueAsNumber)
+      : undefined;
+    view.viewport();
+    request();
+  };
+  heightLabel.append(heightInput);
+  menu.append(heightLabel);
   const plot = document.createElement("div");
   plot.className = "decoderTrackPlot";
   const items = document.createElement("div");
@@ -205,73 +374,179 @@ function mountDecoder(id: string, name: string): DecoderLane {
   plot.append(items, status);
   lane.append(controls, plot);
   $("decoderTracks").append(lane);
-  const mounted = { lane, items, status };
+  const view = transactionView(
+    protocols,
+    items,
+    status,
+    instance,
+    () => [start, end],
+    (tick) => timeLabel(Number(tick)),
+    (tick, channel) => {
+      if (!Number.isSafeInteger(tick)) return;
+      cursorA = tick;
+      const reveal = ++protocolReveal;
+      if (tick < start || tick > end) {
+        const half = (end - start) / 2;
+        setWindow(tick - half, tick + half);
+      }
+      if (channel && instance.decoderId === "opentitan.tlul")
+        vscode.postMessage({
+          type: "revealTlulHandshake",
+          instance,
+          channel,
+          reveal,
+        });
+      if (channel && isAxiDecoder(instance.decoderId))
+        vscode.postMessage({
+          type: "revealAxiHandshake",
+          instance,
+          channel,
+          reveal,
+        });
+      if (
+        !(
+          isAxiDecoder(instance.decoderId) ||
+          instance.decoderId === "opentitan.tlul"
+        )
+      ) {
+        if (instance.signalRule) {
+          const signal = chosen.find(
+            (s) => anchorSignal(s) === instance.signalRule.signal,
+          );
+          if (signal)
+            void uiAction("selectSignals", { signals: [signal], reveal: true });
+        } else
+          vscode.postMessage({
+            type: "revealDecoderInputs",
+            instance,
+            reveal,
+            channel,
+          });
+      }
+      request();
+    },
+    (a, b) => setWindow(a, b),
+    persist,
+    (filter) => {
+      const lane = decoderLanes.get(id);
+      if (lane) {
+        lane.filter = filter;
+        scheduleDecoder(id);
+      }
+    },
+  );
+  const mounted = { lane, items, status, view };
   decoderLanes.set(id, mounted);
   return mounted;
 }
 
+function sliceDecoderWindow(
+  result: DecodeResult,
+  first: bigint,
+  last: bigint,
+): DecodeResult {
+  return {
+    ...result,
+    transactions: result.transactions.filter(
+      (tx) => BigInt(tx.start) < last && BigInt(tx.end) > first,
+    ),
+  };
+}
+function queueDecoder(
+  lane: DecoderLane,
+  instance: DecoderInstance,
+  config: string,
+  first: bigint,
+  last: bigint,
+  exact: boolean,
+) {
+  const request = (lane.request = ++decoderRequest);
+  lane.pending = { config, first, last, exact };
+  lane.status.textContent = localize("解码中…");
+  lane.timer = setTimeout(
+    () =>
+      vscode.postMessage({
+        type: "queryWaveDecoder",
+        filter: lane.filter,
+        instance,
+        request,
+        start: String(first),
+        end: String(last),
+      }),
+    exact ? 0 : 45,
+  );
+}
 function scheduleDecoder(refresh?: string) {
   if (!meta || !Number.isSafeInteger(start) || !Number.isSafeInteger(end))
     return;
   const last = end === Number(meta.end) ? BigInt(end) + 1n : BigInt(end);
+  let pinnedLayoutChanged = false;
   for (const instance of decoderInstances) {
     const id = instance.instanceId!;
-    const lane = decoderLanes.get(id) ?? mountDecoder(id, instance.decoderId);
-    const key = JSON.stringify([instance, start, String(last)]);
-    if (lane.key === key && refresh !== id) continue;
-    cancelDecoder(id);
+    const lane = decoderLanes.get(id) ?? mountDecoder(instance);
+    const config = JSON.stringify([
+      instance.decoderId,
+      instance.signalRule,
+      instance.engine,
+      instance.bindings,
+      instance.options,
+      lane.filter,
+    ]);
+    const first = BigInt(start);
+    const key = JSON.stringify([
+      config,
+      start,
+      end,
+      displayFactor,
+      displayScale,
+    ]);
+    const reload = refresh === id;
+    if (lane.key === key && !reload) continue;
     lane.key = key;
-    const request = (lane.request = ++decoderRequest);
-    lane.items.replaceChildren();
-    lane.status.textContent = localize("解码中…");
-    lane.timer = setTimeout(
-      () =>
-        vscode.postMessage({
-          type: "queryWaveDecoder",
-          instance,
-          request,
-          start: String(start),
-          end: String(last),
-        }),
-      180,
+    if (reload) {
+      lane.cached = undefined;
+      cancelDecoder(id);
+    }
+    const pinned = instance.anchor && !protocols.layout.allTop;
+    const previousHeight = lane.items.style.height;
+    const cache = lane.cached;
+    if (
+      cache?.config === config &&
+      cache.first <= first &&
+      cache.last >= last &&
+      (!cache.result.truncated ||
+        (cache.first === first && cache.last === last))
+    ) {
+      if (lane.pending) cancelDecoder(id);
+      lane.view.update(sliceDecoderWindow(cache.result, first, last));
+      if (pinned && previousHeight !== lane.items.style.height)
+        pinnedLayoutChanged = true;
+      continue;
+    }
+    lane.view.viewport();
+    if (pinned && previousHeight !== lane.items.style.height)
+      pinnedLayoutChanged = true;
+    if (
+      lane.pending?.config === config &&
+      lane.pending.first <= first &&
+      lane.pending.last >= last
+    )
+      continue;
+    cancelDecoder(id);
+    // Bring in a half-screen on either side in the same ordered decoder run.
+    const margin = (last - first) / 2n,
+      low = BigInt(meta.start),
+      high = BigInt(meta.end) + 1n;
+    queueDecoder(
+      lane,
+      instance,
+      config,
+      first - margin < low ? low : first - margin,
+      last + margin > high ? high : last + margin,
+      false,
     );
   }
-}
-
-function showDecoderResult(
-  lane: { items: HTMLElement; status: HTMLElement },
-  result: DecodeResult,
-) {
-  lane.items.replaceChildren();
-  for (const item of result.transactions) {
-    const first = Math.max(start, Number(item.start));
-    const last = Math.min(end, Number(item.end));
-    if (first >= last) continue;
-    const button = document.createElement("button");
-    button.className = "decoderTransaction " + (item.severity ?? "");
-    button.textContent = item.label;
-    button.title = [
-      item.start + " → " + item.end,
-      item.label,
-      ...Object.entries(item.fields ?? {}).map(
-        ([name, value]) => name + " = " + JSON.stringify(value),
-      ),
-    ].join("\n");
-    button.style.left = ((first - start) / (end - start)) * 100 + "%";
-    button.style.width = ((last - first) / (end - start)) * 100 + "%";
-    button.onclick = () => {
-      cursorA = first;
-      request();
-    };
-    lane.items.append(button);
-  }
-  lane.status.textContent =
-    result.warnings[0] ??
-    (result.truncated
-      ? localize("结果已截断")
-      : result.transactions.length
-        ? ""
-        : localize("窗口内无事务"));
+  if (pinnedLayoutChanged) rebuildRows();
 }
 
 $("configureWaveDecoder").onclick = () =>
@@ -281,8 +556,15 @@ $("manageWaveDecoders").onclick = () =>
 const key = WaveSignal.key;
 let selectedKeys = new Set<string>(),
   selectionAnchor = 0,
-  displayRows: { index?: number; group?: string; count?: number }[] = [],
+  displayRows: {
+    index?: number;
+    group?: string;
+    count?: number;
+    depth?: number;
+    decoder?: string;
+  }[] = [],
   collapsedGroups = new Set(saved.collapsedGroups || []);
+let groupParents = new Map<string, string>(saved.groupParents ?? []);
 let groupOrder = [...new Set(saved.groupOrder || [])],
   activeGroup = saved.activeGroup || "";
 let signalFilter = saved.signalFilter || "";
@@ -403,6 +685,7 @@ function persist() {
   persistTimer = window.setTimeout(
     () =>
       vscode.setState({
+        decoderInstances,
         chosen: chosen.map((s) => ({
           id: s.id,
           scope: s.scope,
@@ -418,6 +701,7 @@ function persist() {
           decoder: s.decoder,
           annotation: s.annotation,
           unit: s.unit,
+          rowHeight: s.rowHeight,
           analogScale: s.analogScale,
         })),
         start,
@@ -429,6 +713,7 @@ function persist() {
         markersVisible,
         tooltipEnabled,
         toolbarRows,
+        protocolLayout: protocols.layout,
         showInlineTags: showInlineTags.checked,
         tagStyle: tagStyle(waveTagStyle.value),
         tagColors,
@@ -441,6 +726,7 @@ function persist() {
         displayFactor,
         collapsedGroups: [...collapsedGroups],
         groupOrder,
+        groupParents: [...groupParents],
         activeGroup,
         signalFilter,
         virtualDefinitions,
@@ -527,6 +813,114 @@ let firstRow = 0,
   lastRow = 0,
   viewportHeight = 1,
   frame = 0;
+// Signal identity survives backend ID changes when a saved project is reopened.
+function anchorSignal(signal: Signal) {
+  return JSON.stringify([signal.scope, signal.name, signal.bitOffset ?? null]);
+}
+function syncSignalRules() {
+  const rules = new Map(
+    decoderInstances
+      .filter((i) => i.signalRule)
+      .map((i) => [i.signalRule!.signal, i]),
+  );
+  for (const signal of chosen) {
+    if (!signal.decoder) continue;
+    const target = anchorSignal(signal),
+      profile = signal.decoder;
+    let instance = rules.get(target);
+    if (!instance) {
+      instance = {
+        instanceId: Array.from(
+          crypto.getRandomValues(new Uint8Array(16)),
+          (byte) => byte.toString(16).padStart(2, "0"),
+        ).join(""),
+        decoderId: profile.id,
+        engine: "builtin",
+        bindings: {
+          data: signal.id.startsWith("@virtual:")
+            ? signal.id
+            : signal.scope + "." + signal.name,
+        },
+        signalRule: { signal: target, profile, bitOffset: signal.bitOffset },
+        anchor: { kind: "signal", target },
+      };
+      decoderInstances.push(instance);
+    } else {
+      rules.delete(target);
+      instance.signalRule.profile = profile;
+      instance.decoderId = profile.id;
+    }
+  }
+  for (const instance of rules.values())
+    removeDecoderLane(instance.instanceId!);
+  if (rules.size)
+    decoderInstances = decoderInstances.filter(
+      (i) => !i.signalRule || !rules.has(i.signalRule.signal),
+    );
+}
+const pinnedPositions = new Map<string, number>();
+function insertPinnedRows() {
+  pinnedPositions.clear();
+  if (protocols.layout.allTop || !protocols.layout.tracks) return;
+  const pins = new Map<string, DecoderInstance[]>();
+  for (const instance of decoderInstances)
+    if (instance.anchor) {
+      const anchor = instance.anchor.kind + ":" + instance.anchor.target;
+      if (!pins.has(anchor)) pins.set(anchor, []);
+      pins.get(anchor)!.push(instance);
+    }
+  if (!pins.size) return;
+  const source = displayRows;
+  displayRows = [];
+  for (const row of source) {
+    displayRows.push(row);
+    const target =
+      row.index !== undefined
+        ? "signal:" + anchorSignal(chosen[row.index])
+        : "group:" + row.group;
+    if (row.group && collapsedGroups.has(row.group)) continue;
+    for (const instance of pins.get(target) ?? []) {
+      const id = instance.instanceId!,
+        lane = decoderLanes.get(id);
+      const height =
+        lane && !lane.lane.classList.contains("folded")
+          ? parseFloat(lane.items.style.height) || 26
+          : 26;
+      pinnedPositions.set(id, displayRows.length);
+      for (let i = 0; i < Math.max(1, Math.ceil((height + 6) / rowHeight)); i++)
+        displayRows.push({ decoder: id });
+    }
+  }
+}
+function placeDecoderLanes() {
+  for (const instance of decoderInstances) {
+    const id = instance.instanceId!,
+      entry = decoderLanes.get(id);
+    if (!entry) continue;
+    const pinned = !!instance.anchor && !protocols.layout.allTop;
+    const parent = pinned ? $("trackContent") : $("decoderTracks");
+    if (entry.lane.parentElement !== parent) parent.append(entry.lane);
+    entry.lane.classList.toggle("pinnedProtocol", pinned);
+    const position = pinnedPositions.get(id);
+    entry.lane.hidden =
+      !protocols.layout.tracks || (pinned && position === undefined);
+    entry.lane.style.top =
+      pinned && position !== undefined
+        ? timelineHeight + rowOffsets[position] + "px"
+        : "";
+  }
+}
+let rowOffsets: number[] = [0];
+function rowAtPixel(pixel: number) {
+  let low = 0,
+    high = displayRows.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (rowOffsets[mid + 1] <= pixel) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+}
 function rebuildRows() {
   displayRows = [];
   const groups = new Map(groupOrder.map((name) => [name, []])),
@@ -576,13 +970,40 @@ function rebuildRows() {
     }
     return rows;
   }
-  for (const [group, indices] of groups) {
-    const rows = flatten(indices);
-    if (signalFilter && !rows.length) continue;
-    displayRows.push({ group, count: indices.length });
-    if (!collapsedGroups.has(group)) displayRows.push(...rows);
+  const visited = new Set<string>(),
+    descendants = new Map<string, string[]>();
+  for (const group of groups.keys()) {
+    const parent = groupParents.get(group);
+    if (parent && groups.has(parent)) {
+      if (!descendants.has(parent)) descendants.set(parent, []);
+      descendants.get(parent)!.push(group);
+    }
   }
+  function appendGroup(group: string, depth: number, hidden: boolean) {
+    if (visited.has(group)) return;
+    visited.add(group);
+    const indices = groups.get(group),
+      rows = flatten(indices),
+      kids = descendants.get(group) ?? [];
+    if (!hidden && (!signalFilter || rows.length || kids.length)) {
+      displayRows.push({ group, depth, count: indices.length });
+      if (!collapsedGroups.has(group)) displayRows.push(...rows);
+    }
+    for (const child of kids)
+      appendGroup(child, depth + 1, hidden || collapsedGroups.has(group));
+  }
+  for (const group of groups.keys())
+    if (!groups.has(groupParents.get(group))) appendGroup(group, 0, false);
+  for (const group of groups.keys())
+    if (!visited.has(group)) appendGroup(group, 0, false);
   displayRows.push(...flatten(loose));
+  syncSignalRules();
+  insertPinnedRows();
+  rowOffsets = [0];
+  for (const row of displayRows)
+    rowOffsets.push(
+      rowOffsets.at(-1)! + (chosen[row.index]?.rowHeight ?? rowHeight),
+    );
   window.waveWorkflow?.groupsChanged();
 }
 function expandBus(signals = selectedSignals()) {
@@ -695,6 +1116,15 @@ function renameGroup(name, next) {
   for (const s of chosen) if (s.group === name) s.group = next;
   groupOrder = groupOrder.map((g) => (g === name ? next : g));
   if (collapsedGroups.delete(name)) collapsedGroups.add(next);
+  if (groupParents.has(name)) {
+    groupParents.set(next, groupParents.get(name)!);
+    groupParents.delete(name);
+  }
+  for (const [g, parent] of groupParents)
+    if (parent === name) groupParents.set(g, next);
+  for (const instance of decoderInstances)
+    if (instance.anchor?.kind === "group" && instance.anchor.target === name)
+      instance.anchor.target = next;
   activeGroup = next;
   request();
 }
@@ -729,11 +1159,8 @@ function visibleRange() {
   const height = Math.max(1, $("tracks").clientHeight - timelineHeight),
     top = $("tracks").scrollTop;
   return [
-    Math.max(0, Math.floor(top / rowHeight) - OVERSCAN),
-    Math.min(
-      displayRows.length,
-      Math.ceil((top + height) / rowHeight) + OVERSCAN,
-    ),
+    Math.max(0, rowAtPixel(top) - OVERSCAN),
+    Math.min(displayRows.length, rowAtPixel(top + height) + 1 + OVERSCAN),
   ];
 }
 function refreshNeeded() {
@@ -1011,7 +1438,11 @@ function cursorValue(signal: Signal) {
 function activateSignalGroup(signal?: Signal) {
   if (!signal) return;
   activeGroup = signal.group || "";
-  if (activeGroup) collapsedGroups.delete(activeGroup);
+  const seen = new Set<string>();
+  for (let g = activeGroup; g && !seen.has(g); g = groupParents.get(g)) {
+    seen.add(g);
+    collapsedGroups.delete(g);
+  }
 }
 function moveGroup(name: string, target: string, after: boolean) {
   if (!groupOrder.includes(name) || !groupOrder.includes(target))
@@ -1026,6 +1457,16 @@ function moveGroup(name: string, target: string, after: boolean) {
 function removeGroup(name: string) {
   for (const signal of chosen)
     if (signal.group === name) signal.group = undefined;
+  const parent = groupParents.get(name);
+  groupParents.delete(name);
+  for (const [child, p] of groupParents)
+    if (p === name) {
+      if (parent) groupParents.set(child, parent);
+      else groupParents.delete(child);
+    }
+  for (const instance of decoderInstances)
+    if (instance.anchor?.kind === "group" && instance.anchor.target === name)
+      delete instance.anchor;
   groupOrder = groupOrder.filter((group) => group !== name);
   collapsedGroups.delete(name);
   if (activeGroup === name) activeGroup = "";
@@ -1150,8 +1591,8 @@ function ensureActive() {
   rebuildRows();
   const position = displayRows.findIndex((r) => r.index === active),
     tracks = $("tracks"),
-    top = Math.max(0, position) * rowHeight,
-    bottom = top + rowHeight;
+    top = rowOffsets[Math.max(0, position)],
+    bottom = rowOffsets[Math.max(0, position) + 1] ?? top;
   // Update the scroll range before jumping into a newly expanded group.
   if (bottom + timelineHeight > tracks.scrollHeight) render();
   if (top < tracks.scrollTop) tracks.scrollTop = top;
@@ -1590,27 +2031,34 @@ function updateNameScroll(rows: HTMLElement) {
   applyNameScroll();
 }
 function render() {
+  updateHeightInput();
   scheduleDecoder();
   timelineHeight =
     markersVisible && markers.some((m) => m.name !== "B")
       ? 56
       : DEFAULT_ROW_HEIGHT;
+  placeDecoderLanes();
   $("names").querySelector<HTMLElement>(".ruler").style.height =
     timelineHeight + "px";
   $("zoomBox")?.style.setProperty("top", timelineHeight + "px");
   viewportHeight = Math.max(1, $("tracks").clientHeight);
   $("trackContent").style.height =
-    Math.max(viewportHeight, rowHeight * displayRows.length + timelineHeight) +
-    "px";
+    Math.max(viewportHeight, rowOffsets.at(-1)! + timelineHeight) + "px";
   $("plot").style.height = viewportHeight + "px";
   $("tracks").dataset.total = String(chosen.length);
   updateValueSplit();
   [firstRow, lastRow] = visibleRange();
   const rows = $("rows");
-  rows.style.top = timelineHeight + firstRow * rowHeight + "px";
+  rows.style.top = timelineHeight + rowOffsets[firstRow] + "px";
   rows.replaceChildren();
   for (let position = firstRow; position < lastRow; position++) {
     const item = displayRows[position];
+    if (item.decoder) {
+      const spacer = document.createElement("div");
+      spacer.style.height = rowHeight + "px";
+      rows.append(spacer);
+      continue;
+    }
     if (item.index === undefined) {
       const group = document.createElement("button");
       group.className =
@@ -1621,6 +2069,7 @@ function render() {
         " (" +
         item.count +
         ")";
+      group.style.paddingInlineStart = 8 + (item.depth ?? 0) * 14 + "px";
       group.dataset.group = item.group;
       group.setAttribute(
         "aria-expanded",
@@ -1722,6 +2171,32 @@ function render() {
         ? " active"
         : "");
     row.draggable = true;
+    if (s.rowHeight) row.style.height = s.rowHeight + "px";
+    const grip = document.createElement("span");
+    grip.className = "signalHeightGrip";
+    grip.title = localize("拖动调整此轨道高度");
+    grip.onpointerdown = (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const origin = e.clientY,
+        initial = s.rowHeight ?? rowHeight;
+      const host = $("tracks");
+      host.setPointerCapture(e.pointerId);
+      function move(event: PointerEvent) {
+        if (event.pointerId !== e.pointerId) return;
+        s.rowHeight = normalizeRowHeight(initial + event.clientY - origin);
+        request();
+      }
+      function release(event: PointerEvent) {
+        if (event.pointerId !== e.pointerId) return;
+        host.removeEventListener("pointermove", move);
+        host.removeEventListener("lostpointercapture", release);
+      }
+      host.addEventListener("pointermove", move);
+      host.addEventListener("lostpointercapture", release);
+    };
+    row.append(grip);
     row.dataset.index = String(i);
     row.title = `${s.scope}.${s.name}`;
     const grab = document.createElement("span");
@@ -1912,12 +2387,6 @@ function draw() {
     );
   }
   ctx.save();
-  const verticalScale = rowHeight / DEFAULT_ROW_HEIGHT;
-  const waveHalfHeight = 9 * verticalScale;
-  const valueFontSize = Math.round(
-    Math.max(9, Math.min(18, 11 * verticalScale)),
-  );
-  ctx.font = valueFontSize + "px monospace";
   ctx.textBaseline = "middle";
   ctx.beginPath();
   ctx.rect(0, timelineHeight, width, Math.max(0, height - timelineHeight));
@@ -1932,7 +2401,14 @@ function draw() {
     if (item.index === undefined) continue;
     const i = item.index,
       s = chosen[i];
-    const y = timelineHeight + rowHeight * position - top,
+    const rowHeight = rowOffsets[position + 1] - rowOffsets[position];
+    const verticalScale = rowHeight / DEFAULT_ROW_HEIGHT;
+    const waveHalfHeight = 9 * verticalScale;
+    const valueFontSize = Math.round(
+      Math.max(9, Math.min(18, 11 * verticalScale)),
+    );
+    ctx.font = valueFontSize + "px monospace";
+    const y = timelineHeight + rowOffsets[position] - top,
       middle = y + rowHeight / 2,
       high = middle - waveHalfHeight,
       low = middle + waveHalfHeight,
@@ -2639,16 +3115,37 @@ $("tracks").addEventListener(
 new ResizeObserver(scheduleViewport).observe($("tracks"));
 function setRowHeight(height: number) {
   const tracks = $("tracks");
-  const topRow = tracks.scrollTop / rowHeight;
+  const topRow = rowAtPixel(tracks.scrollTop);
+  const fraction =
+    (tracks.scrollTop - rowOffsets[topRow]) /
+    (rowOffsets[topRow + 1] - rowOffsets[topRow] || 1);
   rowHeight = normalizeRowHeight(height);
   clearWaveHover?.();
   applyTrackLayout();
   if (meta) {
+    rebuildRows();
     render();
-    tracks.scrollTop = topRow * rowHeight;
+    tracks.scrollTop =
+      (rowOffsets[topRow] ?? 0) +
+      fraction * (rowOffsets[topRow + 1] - rowOffsets[topRow] || 0);
   }
   persist();
 }
+const singleHeight = $("signalHeight") as HTMLInputElement;
+function updateHeightInput() {
+  const signal = chosen[active];
+  singleHeight.disabled = !signal;
+  if (document.activeElement !== singleHeight)
+    singleHeight.value = signal?.rowHeight?.toString() ?? "";
+}
+singleHeight.onchange = () => {
+  const signal = chosen[active];
+  if (!signal || !singleHeight.validity.valid) return;
+  signal.rowHeight = singleHeight.value
+    ? normalizeRowHeight(singleHeight.valueAsNumber)
+    : undefined;
+  request();
+};
 rowHeightSlider.oninput = () => setRowHeight(rowHeightSlider.valueAsNumber);
 function setBusLabelMode(value: unknown) {
   busLabelMode = value === "full" ? "full" : "auto";
@@ -2792,7 +3289,13 @@ window.addEventListener("message", async (e) => {
     virtualDefinitions = msg.definitions;
     add(msg.signal);
   } else if (msg.type === "sidebarAdd") {
+    if (msg.reveal !== undefined && msg.reveal !== protocolReveal) return;
     await uiAction("addSignals", { signals: msg.signals });
+    if (msg.focusSignals?.length && msg.reveal === protocolReveal)
+      await uiAction("selectSignals", {
+        signals: msg.focusSignals,
+        reveal: true,
+      });
     if (msg.editAnnotation && msg.signals.length) {
       await uiAction("selectSignals", {
         signals: msg.signals.slice(0, 1),
@@ -2803,8 +3306,30 @@ window.addEventListener("message", async (e) => {
   } else if (msg.type === "waveDecoderResult") {
     const lane = decoderLanes.get(msg.instanceId);
     if (lane && msg.request === lane.request) {
-      if (msg.error) lane.status.textContent = msg.error;
-      else showDecoderResult(lane, msg.decoded);
+      const pending = lane.pending;
+      if (!pending) return;
+      lane.pending = undefined;
+      const first = BigInt(start),
+        last = BigInt(end) + (end === Number(meta.end) ? 1n : 0n);
+      if (
+        (msg.error || msg.decoded.truncated) &&
+        !pending.exact &&
+        (pending.first !== first || pending.last !== last)
+      ) {
+        const instance = decoderInstances.find(
+          (i) => i.instanceId === msg.instanceId,
+        );
+        if (instance)
+          queueDecoder(lane, instance, pending.config, first, last, true);
+      } else if (msg.error) lane.status.textContent = msg.error;
+      else {
+        lane.cached = { ...pending, result: msg.decoded };
+        lane.view.update(sliceDecoderWindow(msg.decoded, first, last));
+        if (decoderInstances.some((i) => i.anchor)) {
+          rebuildRows();
+          render();
+        }
+      }
     }
   } else if (msg.type === "scopeSelected") {
     window.waveWorkflow?.scope(msg.scope);
@@ -2951,6 +3476,8 @@ function snapshot(): WaveState & { chosen: Signal[] } {
     signalFilter,
     expandedBuses: [...expandedBuses],
     groupOrder,
+    groupParents: [...groupParents],
+    protocolLayout: { ...protocols.layout },
     collapsedGroups: [...collapsedGroups],
     activeGroup,
     chosen,
@@ -2979,8 +3506,6 @@ function snapshot(): WaveState & { chosen: Signal[] } {
 async function uiAction(name, p) {
   if (name === "snapshot") return snapshot();
   if (name === "decoderAttach") {
-    if (decoderInstances.length >= 4)
-      throw Error(localize("最多同时显示四条解码行。"));
     const instances = [...decoderInstances, p];
     if (!validDecoderInstances(instances))
       throw Error(localize("无效的解码实例。"));
@@ -3053,6 +3578,7 @@ async function uiAction(name, p) {
     if (p.projectBaseline) projectSignature = undefined;
     for (const [id, lane] of decoderLanes) {
       cancelDecoder(id);
+      lane.view.dispose();
       lane.lane.remove();
     }
     decoderLanes.clear();
@@ -3067,6 +3593,8 @@ async function uiAction(name, p) {
     cursorFlight = null;
     expandedBuses = new Set(p.expandedBuses || []);
     groupOrder = p.groupOrder || [];
+    groupParents = new Map(p.groupParents ?? []);
+    protocols.restore(p.protocolLayout);
     collapsedGroups = new Set(p.collapsedGroups || []);
     activeGroup = p.activeGroup || "";
     signalFilter = p.signalFilter || "";
@@ -3114,6 +3642,7 @@ async function uiAction(name, p) {
   if (name === "addSignals") {
     if (p.clear) {
       expandedBuses.clear();
+      groupParents.clear();
       groupOrder = [];
       activeGroup = "";
       collapsedGroups.clear();
@@ -3146,6 +3675,7 @@ async function uiAction(name, p) {
   }
   if (name === "clear") {
     expandedBuses.clear();
+    groupParents.clear();
     groupOrder = [];
     activeGroup = "";
     collapsedGroups.clear();
@@ -3710,6 +4240,7 @@ vscode.postMessage({ type: "ready" });
     menu.style.top =
       Math.max(0, Math.min(y, window.innerHeight - menu.offsetHeight)) + "px";
   }
+  let subgroupParent = "";
   let renaming = null;
   function groupsChanged() {
     const select = $("groupTarget");
@@ -3724,9 +4255,11 @@ vscode.postMessage({ type: "ready" });
       }
     }
     select.value = activeGroup;
+    ($("newSubgroup") as HTMLButtonElement).disabled = !activeGroup;
     $("renameGroup").disabled = !activeGroup;
   }
   function editGroup(name = null) {
+    subgroupParent = "";
     renaming = name;
     openEditor($("groupForm"));
     let n = 1;
@@ -3735,6 +4268,12 @@ vscode.postMessage({ type: "ready" });
     $("groupName").focus();
     $("groupName").select();
   }
+  $("newSubgroup").onclick = () => {
+    if (activeGroup) {
+      editGroup();
+      subgroupParent = activeGroup;
+    }
+  };
   $("newGroup").onclick = () => editGroup();
   $("renameGroup").onclick = () => {
     if (activeGroup) editGroup(activeGroup);
@@ -3748,7 +4287,15 @@ vscode.postMessage({ type: "ready" });
     if (!name) return;
     try {
       if (renaming) renameGroup(renaming, name);
-      else assignGroup(name);
+      else if (subgroupParent) {
+        if (groupOrder.includes(name))
+          throw Error(localize("此分组名称已存在"));
+        groupOrder.push(name);
+        groupParents.set(name, subgroupParent);
+        collapsedGroups.delete(subgroupParent);
+        activeGroup = name;
+        request();
+      } else assignGroup(name);
       closeEditor();
     } catch (err) {
       $("status").textContent = err.message;
@@ -4817,9 +5364,7 @@ vscode.postMessage({ type: "ready" });
     const rect = canvas.getBoundingClientRect(),
       y = e.clientY - rect.top;
     if (y < timelineHeight || y >= canvas.clientHeight) return null;
-    const position = Math.floor(
-        (y - timelineHeight + $("tracks").scrollTop) / rowHeight,
-      ),
+    const position = rowAtPixel(y - timelineHeight + $("tracks").scrollTop),
       item = displayRows[position];
     if (item?.index === undefined) return null;
     const signal = chosen[item.index];
@@ -4836,7 +5381,7 @@ vscode.postMessage({ type: "ready" });
       x: e.clientX,
       y: e.clientY,
       plotX: e.clientX - rect.left,
-      rowY: timelineHeight + position * rowHeight - $("tracks").scrollTop,
+      rowY: timelineHeight + rowOffsets[position] - $("tracks").scrollTop,
       window: start + ":" + end,
     };
   }
@@ -4966,7 +5511,10 @@ vscode.postMessage({ type: "ready" });
     hoverLine.style.top = timelineHeight + "px";
     hoverBand.hidden = false;
     const bandTop = Math.max(timelineHeight, hit.rowY);
-    const bandBottom = Math.min(canvas.clientHeight, hit.rowY + rowHeight);
+    const bandBottom = Math.min(
+      canvas.clientHeight,
+      hit.rowY + (hit.signal.rowHeight ?? rowHeight),
+    );
     hoverBand.style.top = bandTop + "px";
     hoverBand.style.height = bandBottom - bandTop + "px";
   }

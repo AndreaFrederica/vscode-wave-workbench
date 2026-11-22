@@ -3,6 +3,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+import { isAxiDecoder } from "./shared/axi-decoder";
 import type { Viewer } from "./viewer";
 import type { Signal } from "./shared/protocol";
 import type * as vscode from "vscode";
@@ -91,6 +92,7 @@ export function createWaveDecoders(
     start: string,
     end: string,
     signal?: AbortSignal,
+    filter?: string,
   ) {
     await viewer.ready;
     const { backend, meta } = viewer;
@@ -102,10 +104,112 @@ export function createWaveDecoders(
       start,
       end,
       signal,
+      filter,
     );
     if (viewer.disposed || viewer.backend !== backend || viewer.meta !== meta)
       throw Error("The waveform changed during decoder replay.");
     return decoded;
+  }
+  async function bindAxi(
+    viewer: Viewer,
+    manifest: DecoderDefinition["manifest"],
+    selected?: Signal,
+  ) {
+    const scope = await vscode.window.showInputBox({
+      prompt: "AXI4 接口所在层次",
+      value: selected?.scope ?? viewer.selectedScope ?? "",
+    });
+    if (scope === undefined) return;
+    const canonical = (name: string) =>
+      name
+        .replace(/\s*\[[^\]]+\]$/, "")
+        .replace(/_/g, "")
+        .toLowerCase();
+    const candidates: Signal[] = [];
+    let offset = 0;
+    while (true) {
+      const page = await viewer.backend.request("scopeSignals", {
+        query: scope,
+        offset,
+        limit: 512,
+      });
+      candidates.push(
+        ...page.signals.filter((s) => s.scope === scope && !s.real),
+      );
+      offset += page.signals.length;
+      if (!page.signals.length || offset >= page.total) break;
+    }
+    const prefixes = new Set(
+      candidates
+        .map((s) => canonical(s.name))
+        .filter((n) => /awvalidi?$/.test(n))
+        .map((n) => n.replace(/awvalidi?$/, "")),
+    );
+    const prefix =
+      prefixes.size === 1
+        ? [...prefixes][0]
+        : await vscode.window.showInputBox({
+            prompt: "AXI4 信号前缀（例如 m_axi_，无前缀可留空）",
+            value: "",
+          });
+    if (prefix === undefined) return;
+    const suggested: Record<string, string> = {};
+    for (const pin of manifest.inputs) {
+      const accepted = [canonical(prefix) + pin.id];
+      if (pin.id === "aclk") accepted.push("aclk", "clk", "clki");
+      if (pin.id === "aresetn") accepted.push("aresetn", "rstn", "rstni");
+      if (pin.id.startsWith("tl")) accepted.push(pin.id);
+      else
+        accepted.push(
+          ...accepted.map((n) => n + "i"),
+          ...accepted.map((n) => n + "o"),
+        );
+      for (const name of accepted) {
+        const found = candidates.filter(
+          (s) =>
+            canonical(s.name) === name &&
+            (pin.width === undefined || s.width === pin.width),
+        );
+        if (found.length === 1) {
+          suggested[pin.id] = found[0].scope + "." + found[0].name;
+          break;
+        }
+      }
+      if (!suggested[pin.id] && pin.required !== false) suggested[pin.id] = "";
+    }
+    const json = await vscode.window.showInputBox({
+      prompt: "AXI4 信号绑定（JSON，可修改路径或补全空值）",
+      value: JSON.stringify(suggested),
+      validateInput(text) {
+        try {
+          const bindings = JSON.parse(text);
+          if (
+            !bindings ||
+            Array.isArray(bindings) ||
+            typeof bindings !== "object"
+          )
+            return "请输入绑定对象";
+          const missing = manifest.inputs.find(
+            (pin) => pin.required !== false && !bindings[pin.id],
+          );
+          if (missing) return "缺少 " + missing.id;
+          if (
+            Object.entries(bindings).some(
+              ([id, path]) =>
+                !manifest.inputs.some((pin) => pin.id === id) ||
+                typeof path !== "string" ||
+                !path.trim(),
+            )
+          )
+            return "请检查输入名和路径";
+        } catch {
+          return "无效的 JSON";
+        }
+      },
+    });
+    return json === undefined
+      ? undefined
+      : (JSON.parse(json) as Record<string, string>);
   }
   async function configureWaveDecoder(viewer: Viewer) {
     const { definitions, warnings } = await listWaveDecoders(viewer);
@@ -120,6 +224,17 @@ export function createWaveDecoders(
     );
     if (!choice) return;
     const selected: Signal | undefined = await viewer.ui("activeSignal");
+    if (isAxiDecoder(choice.manifest.id)) {
+      const bindings = await bindAxi(viewer, choice.manifest, selected);
+      if (bindings)
+        await viewer.ui("decoderAttach", {
+          instanceId: randomUUID(),
+          decoderId: choice.manifest.id,
+          engine: "builtin",
+          bindings,
+        });
+      return;
+    }
     const bindings: Record<string, string> = {};
     for (const input of choice.manifest.inputs) {
       const name = await vscode.window.showInputBox({

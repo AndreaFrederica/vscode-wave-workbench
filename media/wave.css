@@ -592,3 +592,116 @@ body[data-dock] .undock-action { display: inline-block; }
 }
 #dockedNotice p { margin: 0; }
 body.wave-docked > :not(#dockedNotice) { visibility: hidden; }
+
+.decoderTrack{flex-wrap:wrap}
+#decoderTracks{overflow:auto;max-height:45%}
+.decoderTransaction.selected{outline:2px solid var(--vscode-focusBorder);outline-offset:-2px;z-index:1}
+.transactionBrowser,.transactionDetails{min-width:0}
+.transactionBrowser select{display:block;width:100%}
+.transactionDetails>div{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.transactionDetails label{display:grid;grid-template-columns:auto minmax(7em,1fr) 2fr;align-items:center;gap:6px}
+.transactionDetails code{overflow-wrap:anywhere}
+.transactionBeats>div{display:flex;align-items:baseline;gap:.6em;flex-wrap:wrap;padding:2px 0;border-bottom:1px solid var(--line)}
+.transactionDetails>.transactionBeats{display:block}
+.protocolPoint,.protocolBin{position:absolute;min-width:2px;overflow:hidden}
+.protocolPoint{height:24px;font-size:11px;border-left:2px solid var(--vscode-focusBorder)}
+.protocolBin{bottom:0;padding:0;background:var(--vscode-charts-blue,#397ab8)}
+.protocolBin.warning{background:var(--vscode-editorWarning-foreground)}
+.protocolBin.error{background:var(--vscode-editorError-foreground)}
+
+/* Keep protocol tracks and raw signals in the same time-aligned viewport. */
+#protocolExplorer[hidden],#protocolInspector[hidden]{display:none}
+main.hasProtocols{
+  display:grid;
+  grid-template-columns:clamp(156px,18%,280px) minmax(0,1fr) clamp(182px,21%,340px);
+  grid-template-rows:minmax(0,1fr);
+  grid-template-areas:"protocols waveform inspector";
+}
+main.hasProtocols>#viewer{grid-area:waveform;min-height:0}
+main.hasProtocols>aside{display:none}
+body main.hasProtocols.protocolCatalogVisible>aside{
+  grid-area:protocols;display:flex;width:100%;min-width:0;max-width:none;min-height:0;
+  margin-top:36px;resize:none;z-index:1;box-sizing:border-box;
+}
+main.protocolCatalogVisible #protocolInterfaces{display:none}
+#protocolExplorer,#protocolInspector{
+  display:flex;flex-direction:column;min-width:0;min-height:0;padding:0;gap:0;
+  background:var(--panel);overflow:hidden;align-items:stretch;flex-wrap:nowrap;
+}
+#protocolExplorer{grid-area:protocols;border-right:1px solid var(--line)}
+#protocolInspector{grid-area:inspector;border-left:1px solid var(--line)}
+#protocolExplorer>header,#protocolInspector>header{
+  flex:0 0 36px;height:36px;box-sizing:border-box;gap:6px;padding:0 8px;
+  justify-content:space-between;overflow:hidden;white-space:nowrap;
+}
+#protocolDetailInterface,#protocolInterfaces summary span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#protocolDetailInterface,#protocolInterfaces small{font-size:11px;color:var(--muted)}
+#protocolInterfaces,#protocolDetails{min-height:0;overflow:auto;padding:4px;scrollbar-gutter:stable}
+#protocolInterfaces summary{cursor:pointer;padding:3px 4px;overflow-wrap:anywhere}
+#protocolInterfaces>details>summary{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:0 4px}
+#protocolInterfaces>details>summary::before{content:"▸"}
+#protocolInterfaces>details[open]>summary::before{content:"▾"}
+#protocolInterfaces small{grid-column:2/-1}
+#protocolInterfaces>details.active>summary{background:var(--selection);color:var(--selection-fg)}
+#protocolInterfaces .transactionBrowser{padding:4px}
+#protocolInterfaces input,#protocolInterfaces select{width:100%;box-sizing:border-box}
+.protocolStreams details details{margin-left:8px;border-left:1px solid var(--line)}
+#protocolDetails{padding:8px;max-height:none}
+#protocolDetails>div:first-child{margin-bottom:8px}
+#protocolDetails label{grid-template-columns:auto minmax(0,1fr) minmax(0,1fr);overflow-wrap:anywhere;padding:3px 0;border-top:1px solid var(--line)}
+@media(max-width:780px){
+  main.hasProtocols{
+    grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+    grid-template-rows:minmax(0,1fr) minmax(80px,28%);
+    grid-template-areas:"waveform waveform" "protocols inspector";
+  }
+  #protocolExplorer,#protocolInspector{border-top:1px solid var(--line)}
+}
+main.hasProtocols{--protocol-left:clamp(156px,18%,280px);--protocol-right:clamp(182px,21%,340px);grid-template-columns:var(--protocol-left) minmax(0,1fr) var(--protocol-right)}
+main.hideProtocol-explorer{--protocol-left:0px}
+main.hideProtocol-inspector{--protocol-right:0px}
+#protocolPaneChoices:not([hidden]){display:grid;gap:4px;padding:4px 0;border-bottom:1px solid var(--line)}
+#protocolPaneChoices label{display:flex;gap:6px}
+#protocolDetails .protocolHandshakes>summary{cursor:pointer;padding:6px 0}
+#protocolExplorer>header button:last-child,#protocolInspector>header button:last-child{margin-left:auto}
+.protocolActions:popover-open{display:grid;position:fixed;margin:0;right:auto;bottom:auto;gap:2px;padding:4px;min-width:145px;background:var(--panel);color:inherit;border:1px solid var(--line)}
+.protocolActions button{text-align:start}
+.decoderTrackControls{overflow:hidden;flex-wrap:nowrap}
+.decoderTrack.folded .decoderTrackPlot{visibility:hidden;min-height:0!important;height:24px}
+.decoderTrack.folded .decoderTrackItems{display:none}
+@media(max-width:780px){
+  main.hasProtocols{grid-template-columns:1fr 1fr}
+  main.hideProtocol-explorer{grid-template-columns:0 1fr}
+  main.hideProtocol-inspector{grid-template-columns:1fr 0}
+  main.hideProtocol-inspector.hideProtocol-explorer{grid-template-rows:minmax(0,1fr) 0}
+}
+.decoderTrack.pinnedProtocol{position:absolute;left:0;right:0;z-index:2;background:var(--panel)}
+.decoderTrack[hidden],.protocolSatellite[hidden],#protocolInspector>header[hidden]{display:none}
+.protocolSatellite{overflow:auto;max-height:40%;min-height:0;background:var(--panel);border-block:1px solid var(--line)}
+#protocolInspector>.protocolSatellite:only-of-type{max-height:100%}
+.protocolSatellite>details>summary{display:flex;align-items:center;gap:5px;overflow-wrap:anywhere}
+.protocolSatellite small{color:var(--muted)}
+.splitProtocolTrees #protocolInterfaces>details,.splitProtocolTrees .protocolSatellite>details{overflow:auto;max-height:32vh;border-bottom:1px solid var(--line)}
+.protocolActions label{display:grid;gap:2px;padding:2px 4px}
+#displayMenu>.menuPanel{max-height:calc(100vh - 115px);overflow-y:auto}
+#protocolPaneChoices select{margin-inline-start:auto}
+.protocolDisclosure{display:inline-flex;align-items:center;gap:5px;border:0;background:transparent;color:inherit;cursor:pointer}
+.protocolDisclosure span{min-width:1em}
+.protocolSatellite>.protocolDisclosure{width:100%;padding:4px 8px;justify-content:flex-start}
+.protocolSatellite>div>details>summary{display:flex;align-items:center;gap:5px;overflow-wrap:anywhere}
+.splitProtocolTrees .protocolSatellite>div>details{overflow:auto;max-height:32vh;border-bottom:1px solid var(--line)}
+#protocolExplorer [hidden],#protocolInspector [hidden],.protocolSatellite [hidden]{display:none}
+.protocolLeftRail #protocolCatalog,.protocolLeftRail #closeProtocolExplorer,.protocolRightRail #closeProtocolInspector,.protocolRightRail #protocolDetailInterface{display:none}
+@media(min-width:781px){
+  main.protocolLeftRail{--protocol-left:32px}
+  main.protocolRightRail{--protocol-right:32px}
+  .protocolLeftRail #protocolExplorer>header,.protocolRightRail #protocolInspector>header{padding:0;flex-basis:auto;justify-content:center}
+  .protocolLeftRail #foldProtocolExplorer,.protocolRightRail #foldProtocolInspector,.protocolRightRail .protocolSatellite>.protocolDisclosure{writing-mode:vertical-rl;padding:8px 4px}
+}
+@media(max-width:780px){
+  main.hasProtocols:is(.protocolLeftRail,.hideProtocol-explorer):is(.protocolRightRail,.hideProtocol-inspector):not(.hideProtocol-explorer.hideProtocol-inspector){grid-template-rows:minmax(0,1fr) 36px}
+}
+
+#rows .row{position:relative}
+.signalHeightGrip{position:absolute;inset:auto 0 -1px 0;height:5px;cursor:ns-resize;touch-action:none;z-index:1}
+.signalHeightGrip:hover{border-bottom:2px solid var(--accent)}

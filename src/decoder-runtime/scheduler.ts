@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
+import { ProtocolIndex } from "./protocol-index";
+import { isAxiDecoder } from "../shared/axi-decoder";
+import { axiRuntime } from "./axi4";
+import { uhRuntime, uhManifest } from "./tluh";
+import { tlulManifest, tlulRuntime } from "./tlul";
 import { createHash } from "node:crypto";
 import type { Backend } from "../backend";
 import type { Metadata, Signal } from "../shared/protocol";
@@ -27,6 +32,7 @@ type Job = {
   start: string;
   end: string;
   signal?: AbortSignal;
+  filter?: string;
 };
 
 export class DecoderScheduler {
@@ -36,6 +42,7 @@ export class DecoderScheduler {
     Map<string, { tick: bigint; state: Json }[]>
   >();
   #active = 0;
+  #protocolIndex = new ProtocolIndex();
 
   constructor(private readonly binary: string) {}
 
@@ -87,11 +94,33 @@ export class DecoderScheduler {
     }
     if (this.#active >= 4) throw Error("Too many active decoder queries.");
     this.#active++;
-    const timeout = AbortSignal.timeout(15_000);
+    const protocol =
+      definition.manifest.engine === "builtin" &&
+      (definition.manifest.id === tlulManifest.id ||
+        definition.manifest.id === uhManifest.id ||
+        isAxiDecoder(definition.manifest.id));
+    const timeout = AbortSignal.timeout(protocol ? 120_000 : 15_000);
     const signal = job.signal
       ? AbortSignal.any([job.signal, timeout])
       : timeout;
     try {
+      if (protocol)
+        return await this.#protocolIndex.query(
+          backend,
+          meta,
+          bindings,
+          stateKey,
+          start,
+          end,
+          () =>
+            isAxiDecoder(definition.manifest.id)
+              ? axiRuntime(context, definition.manifest)
+              : definition.manifest.id === uhManifest.id
+                ? uhRuntime(bindings[2]!.width, bindings[5]!.width)
+                : tlulRuntime(bindings[2]!.width),
+          signal,
+          job.filter,
+        );
       const open = async () =>
         definition.profile
           ? builtinRuntime(definition.profile, context)

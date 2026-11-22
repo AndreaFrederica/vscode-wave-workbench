@@ -30,6 +30,16 @@ export interface DecoderInstance {
   decoderId: string;
   engine?: DecoderEngine;
   bindings: Record<string, string>;
+  anchor?: { kind: "signal" | "group"; target: string };
+  signalRule?: {
+    signal: string;
+    profile: import("../shared/decoders").DecoderProfile;
+    bitOffset?: number;
+  };
+  treeDock?: "left" | "right" | "bottom";
+  rowHeight?: number;
+  pinnedFields?: string[];
+  fieldRadix?: "hex" | "dec";
   options?: Record<string, Json>;
 }
 export interface DecoderContext {
@@ -37,11 +47,18 @@ export interface DecoderContext {
   inputs: ({ id: string; width: number; real?: boolean } | null)[];
   options: Record<string, Json>;
 }
+export interface TransactionPoint {
+  label: string;
+  tick: string;
+  channel?: string;
+  fields?: Record<string, Json>;
+}
 export interface DecoderTransaction {
   start: string;
   end: string;
   label: string;
   kind?: string;
+  points?: TransactionPoint[];
   fields?: Record<string, Json>;
   severity?: "info" | "warning" | "error";
 }
@@ -52,6 +69,13 @@ export interface DecodeVirtualSample {
   value: string;
 }
 export interface DecodeResult {
+  overview?: {
+    start: string;
+    end: string;
+    count: number;
+    errors: number;
+    warnings: number;
+  }[];
   virtualSamples?: DecodeVirtualSample[];
   transactions: DecoderTransaction[];
   warnings: string[];
@@ -89,6 +113,9 @@ export interface DecoderRuntime {
   restoreState?(state: Json, signal: AbortSignal): Promise<void>;
   dispose(): void;
 }
+export interface ProtocolRuntime extends DecoderRuntime {
+  pendingBefore(tick: bigint): boolean;
+}
 export const maxTransactions = 4096;
 export const maxBatchEvents = 4096;
 export const tickPattern = /^(0|[1-9][0-9]{0,79})$/;
@@ -116,6 +143,27 @@ export function validateResult(result: unknown): DecodeResult {
       BigInt(transaction.start) >= BigInt(transaction.end) ||
       typeof transaction.label !== "string" ||
       transaction.label.length > 1024 ||
+      (transaction.points !== undefined &&
+        (!Array.isArray(transaction.points) ||
+          transaction.points.length > 258 ||
+          transaction.points.some(
+            (point) =>
+              !point ||
+              typeof point.label !== "string" ||
+              point.label.length > 64 ||
+              (point.channel !== undefined &&
+                (typeof point.channel !== "string" ||
+                  !idPattern.test(point.channel))) ||
+              (point.fields !== undefined &&
+                (!point.fields ||
+                  typeof point.fields !== "object" ||
+                  Array.isArray(point.fields) ||
+                  JSON.stringify(point.fields).length > 8192)) ||
+              typeof point.tick !== "string" ||
+              !tickPattern.test(point.tick) ||
+              BigInt(point.tick) < BigInt(transaction.start) ||
+              BigInt(point.tick) >= BigInt(transaction.end),
+          ))) ||
       (transaction.kind !== undefined &&
         (typeof transaction.kind !== "string" ||
           transaction.kind.length > 64)) ||
@@ -174,7 +222,7 @@ export function readCheckpoint(state: unknown): Json {
 export function validDecoderInstances(
   items: unknown,
 ): items is DecoderInstance[] {
-  if (!Array.isArray(items) || items.length > 4) return false;
+  if (!Array.isArray(items) || items.length > 100000) return false;
   const ids = new Set<string>();
   for (const item of items) {
     if (
@@ -185,6 +233,28 @@ export function validDecoderInstances(
       typeof item.decoderId !== "string" ||
       !idPattern.test(item.decoderId) ||
       !["builtin", "lua", "javascript"].includes(item.engine) ||
+      (item.pinnedFields !== undefined &&
+        (!Array.isArray(item.pinnedFields) ||
+          item.pinnedFields.length > 256 ||
+          item.pinnedFields.some((s: unknown) => typeof s !== "string"))) ||
+      (item.fieldRadix !== undefined &&
+        !["hex", "dec"].includes(item.fieldRadix)) ||
+      (item.anchor !== undefined &&
+        (!item.anchor ||
+          !["signal", "group"].includes(item.anchor.kind) ||
+          typeof item.anchor.target !== "string")) ||
+      (item.treeDock !== undefined &&
+        !["left", "right", "bottom"].includes(item.treeDock)) ||
+      (item.signalRule !== undefined &&
+        (!item.signalRule ||
+          typeof item.signalRule.signal !== "string" ||
+          item.engine !== "builtin" ||
+          !item.signalRule.profile ||
+          item.signalRule.profile.id !== item.decoderId)) ||
+      (item.rowHeight !== undefined &&
+        (!Number.isInteger(item.rowHeight) ||
+          item.rowHeight < 24 ||
+          item.rowHeight > 320)) ||
       !item.bindings ||
       typeof item.bindings !== "object" ||
       Array.isArray(item.bindings) ||

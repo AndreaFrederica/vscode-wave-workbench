@@ -6,6 +6,7 @@
 import type * as vscode from "vscode";
 import { loadDecoderCatalog, saveDecoderProfile } from "./decoder-config";
 import type { DecoderInstance } from "./decoder-runtime/types";
+import { findSignal } from "./signal-lookup";
 import type { Viewer } from "./viewer";
 import type { createWaveDecoders } from "./wave-decoders";
 
@@ -27,6 +28,8 @@ export function createWaveEditorDecoders(
 ) {
   const queries = new Map<string, AbortController>();
 
+  let active = 0;
+  const waiting: Array<() => void> = [];
   async function materialize(
     surface: vscode.Webview,
     instance: DecoderInstance,
@@ -43,13 +46,18 @@ export function createWaveEditorDecoders(
     queries.get(id)?.abort();
     const controller = new AbortController();
     queries.set(id, controller);
+    if (active >= 4)
+      await new Promise<void>((resolve) => waiting.push(resolve));
+    else active++;
     try {
+      if (controller.signal.aborted) return;
       const decoded = await actions.decodeWindow(
         viewer,
         msg.instance,
         msg.start,
         msg.end,
         controller.signal,
+        typeof msg.filter === "string" ? msg.filter.slice(0, 1024) : undefined,
       );
       if (!controller.signal.aborted)
         await surface.postMessage({
@@ -67,6 +75,9 @@ export function createWaveEditorDecoders(
           error: error.message,
         });
     } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active--;
       if (queries.get(id) === controller) queries.delete(id);
     }
   }
@@ -115,6 +126,83 @@ export function createWaveEditorDecoders(
 
   function receive(surface: vscode.Webview, msg): Promise<void> | undefined {
     switch (msg.type) {
+      case "revealDecoderInputs":
+        return (async () => {
+          const bindings: Record<string, string> = msg.instance.bindings;
+          const paths =
+            typeof msg.channel === "string" &&
+            Object.hasOwn(bindings, msg.channel)
+              ? [bindings[msg.channel]]
+              : Object.values(bindings);
+          const signals = await Promise.all(
+            [...new Set(paths)].map((path) => findSignal(viewer.backend, path)),
+          );
+          await surface.postMessage({
+            type: "sidebarAdd",
+            signals,
+            focusSignals: signals,
+            reveal: msg.reveal,
+          });
+        })();
+      case "revealAxiHandshake":
+        return (async () => {
+          const channels =
+            msg.channel === "read"
+              ? ["ar", "r"]
+              : msg.channel === "write"
+                ? ["aw", "w", "b"]
+                : [msg.channel];
+          if (
+            !channels.every((ch) =>
+              ["aw", "w", "b", "ar", "r", "tla", "tld"].includes(ch),
+            )
+          )
+            return;
+          const bindings: Record<string, string> = msg.instance.bindings;
+          const paths = Object.entries(bindings)
+            .filter(
+              ([id]) =>
+                id === "aclk" || channels.some((ch) => id.startsWith(ch)),
+            )
+            .map(([, path]) => path);
+          const signals = await Promise.all(
+            paths.map((path) => findSignal(viewer.backend, path)),
+          );
+          await surface.postMessage({
+            type: "sidebarAdd",
+            signals,
+            focusSignals: signals.filter((_, i) => paths[i] !== bindings.aclk),
+            reveal: msg.reveal,
+          });
+        })();
+      case "revealTlulHandshake":
+        return (async () => {
+          const { clk, h2d, d2h } = msg.instance.bindings;
+          const [clock, host, device] = await Promise.all(
+            [clk, h2d, d2h].map((path) => findSignal(viewer.backend, path)),
+          );
+          const bit = (bus: typeof host, offset: number, name: string) => ({
+            ...bus,
+            width: 1,
+            sourceWidth: bus.width,
+            bitOffset: offset,
+            displayName: name,
+          });
+          await surface.postMessage({
+            type: "sidebarAdd",
+            reveal: msg.reveal,
+            focusSignals: [msg.channel === "D" ? device : host],
+            signals: [
+              clock,
+              bit(host, host.width - 1, "a_valid"),
+              bit(device, 0, "a_ready"),
+              bit(device, device.width - 1, "d_valid"),
+              bit(host, 0, "d_ready"),
+              host,
+              device,
+            ],
+          });
+        })();
       case "selectDecoder":
         return actions.selectDecoder(viewer);
       case "editDecoderConfig":
