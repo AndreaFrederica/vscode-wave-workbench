@@ -22,6 +22,12 @@
 
 ## RTL Trace
 
+- [x] 将扩展宿主的追踪协调文件 `src/wave-analysis.ts` 从 4,851 行拆到 88 行。Linux VS Code 前台 MCP 与静默 MCP 通过真实 VCS/KDB 的两组在线断点和离线回放。拆分前后的分页节点、边、Mermaid 和报告一致，比较报告时归一化了 VIDE revision 与会话标识。类型检查和构建通过，Node 163 项通过、70 项跳过，Playwright 含单独补跑的大型 FST 共 42 项通过，百万信号 FSDB 用例跳过。 [模块职责](ARCHITECTURE.md)
+- [x] 真实 VCS 的动态位选阻塞赋值保留两层分支入口、请求位与写入下标。在线断点与离线回放从 7 ns 的提交 8 追到 `q[2]` 的目标下标，8 ns 的无目标结果 11 可回到带入口证据的求值 10。前台与静默 MCP 的分页图和报告一致，报告比较归一化本地 revision 和会话标识。Chromium 渲染两图，原始和探针波形的四个设计信号共 13 条记录一致。Node 162 项通过、70 项跳过。 [复现步骤](test/fixtures/trace/README.md#vcs-indexed-packed-writes)
+- [x] 真实 VCS 验证带嵌套条件的动态位段 NBA。7 ns 的提交 9 写入 `q[2:3]`，从 `q[2]` 追到 6 ns 的目标下标及两处条件实际读取的位。前台与静默 MCP 的在线图和离线图分别一致，报告比较时归一化本地 revision 和会话标识。Chromium 渲染两图，原始和探针 VCD 的四个设计信号共 12 条初值及变化记录一致。Node 160 项通过、70 项跳过，随后单独通过旧索引和截断范围回归。 [复现步骤](test/fixtures/trace/README.md#vcs-indexed-packed-writes)
+- [x] 真实 VCS 延迟进入 NBA 的嵌套条件保留两处位级来源。3 ns 入口发生后同槽将 `req[0]` 拉低再恢复，图仍回溯到 2 ns 的回调 0。5 ns 的 `else` 入口回溯到 `req[1]=X` 的回调 3。在线断点和离线回放核对 7 ns 的提交 9，前台与静默 MCP 的分页图及报告一致，比较报告时归一化本地 revision 和在线会话 ID。Chromium 渲染两图，原始和探针 VCD 对三个设计信号的 11 条初值及变化记录一致。Node 159 项通过、70 项跳过。 [复现步骤](test/fixtures/trace/README.md#vcs-nested-packed-guards)
+- [x] 真实 VCS 嵌套条件的两次总线读取使用各自的入口位和时间。在线和离线时间图从 7 ns 的提交 7 追到 `req[0] @ 2 ns`、`req[1] @ 4 ns`，分页边、Mermaid 和详细报告均保留两处条件的 RTL 位置。前台与静默 MCP 的图、分页和报告一致，在线报告比较时归一化会话标识。Chromium 渲染两张图。原始与插桩 VCD 的三个设计信号在五个记录时间槽末值一致。Node 158 项通过、70 项跳过。 [复现步骤](test/fixtures/trace/README.md#vcs-nested-packed-guards)
+- [x] 捕获 VCS 仲裁循环的阻塞赋值分支入口。真实双 hart 波形和执行记录验证 `selected_valid` 提交 187、213 分别回溯到请求位 1、0，图保留循环下标及 RTL 位置。Linux VS Code 前台和静默 MCP 的在线分页图及详细报告逐字节一致。两张时间图经 Chromium 渲染。探针与原始仿真的 11 路信号在 11,495 个槽末值一致。Node 157 项通过、70 项跳过。 [复现步骤](test/fixtures/trace/README.md#vcs-rv32a-dual-hart-ready-callbacks)
 - [x] VCS 动态位选阻塞赋值贯通映射、探针及回放。双 hart 的在线断点和离线回放从 `hart_q` 提交 168、226 追到 `ready` 提交 162、219，并从对应 RTL 求值回溯 `state_q`、`init_busy_i` 和 `selected_valid`。分页路径可选择三跳外的 `state_q`。前台与静默 MCP 的图和详细报告一致，Chromium 渲染两张在线图。11 路信号在 11,495 个槽末值与原始仿真一致。Node 156 项通过、70 项跳过。 [复现步骤](test/fixtures/trace/README.md#vcs-rv32a-dual-hart-ready-callbacks)
 - [x] 真实 VCS 双 hart 仲裁从 `hart_q` 的提交 136 和 174 回溯到各自的 `ready[1]` 和 `ready[0]` 变化。VPI 采集支持枚举状态 `state_q`，在线断点快照与回放均读取到四位状态值。Linux VS Code 前台和静默 MCP 的两组离线路径及两组在线路径分别比较，Mermaid 和详细报告逐字节一致。Chromium 渲染两张在线时间图。原始与探针波形的 11 路信号比较了 11,495 个槽末值。Node 155 项通过、70 项跳过。 [复现步骤](test/fixtures/trace/README.md#vcs-rv32a-dual-hart-ready-callbacks)
 - [x] 为可核实的无延时单驱动连续赋值标出使 RHS 达到输出值的输入回调。真实 VCS 在 5 ns 由 `a[1]` 的回调 0 变更 RHS，`q` 在回调 1 更新。前台与静默 MCP 的完整图、分页路径、Mermaid 和详细报告一致，Chromium 渲染通过。回归覆盖同槽两次输出各自归因、回调缺失、记录值与波形不一致、RHS 反复到达输出值。双 hart 回放保留握手路径，未记录的操作数使其维持候选。Node 154 项通过，70 项跳过。 [复现步骤](test/fixtures/trace/README.md#vcs-late-callbacks-on-an-undelayed-assignment)
@@ -127,7 +133,9 @@
 - [x] 同一构建清单的单个 MCP 批次复用相同信号、方向和预算的 RTL 查询。OpenTitan 三批共 192 段实测复用 37 次，前台与静默 MCP 的节点、边、缺口和源码分页，与缓存前的静默结果逐项一致。Node 108 项通过、67 项跳过。
 - [x] 用真实 VCS VCD 验证单一无延迟连续驱动的组合输入归因。直连和反相排除了无法产生输出的旧值，显式延迟、net 声明延迟和多驱动保留候选。五张时间图在前台和静默 MCP 一致。
 - [x] 验证 VCS 同槽三次重叠 modport 求值。VCD、恢复槽内变化后的 FSDB、在线 MCP 及 VS Code 报告对五次物理值变化返回相同的求值序号。回归覆盖缺失回调时保留兼容组件。
-- [ ] 复核不同调度器、复杂左值与合并更新中的实际物理提交。重叠 modport 的延后传播、同值及歧义写入仍需独立的提交证据。
+- [ ] 复核不同调度器、复杂左值与合并更新中的实际物理提交。VCS 同范围 NBA 在观测前合并时保留未观测。支持唯一可核对的 modport 延后传播。
+  - [x] 复验 8 项开放的 RTL Trace 验收，按非跨平台的 7 项更新实现和验证记录。记录包含真实 VCS 和 Verilator 的跨文件引用、虚接口、KDB 端口表达式、宏插桩、外部事件、延后物理回调和单次 `x28` 查询。 [逐项结果](RTL_TRACE_AUDIT.md#2026-11-23-非跨平台修复)
+  - [x] 用同一份 RTL 比较同槽三次写入 `q[2:1]`。VCS T-2022.06-SP2 在 2 ns 和 4 ns 分别观测到最终提交 11 和 20，两槽各保留两条未观测结果，位级时间图保留 `incomplete`。Xcelium 23.09-s013 的 VCD 与 VPI 在两槽各保留三次总线变化，4 ns 的 `q[2]` 可按 `changeOrder` 定位回调 9 和 11，写入来源仍为候选。Linux VS Code 前台与静默 MCP 的六份分页图、Mermaid 和报告一致，在线报告仅需归一化会话 ID。VCS 在线与离线原始执行记录逐字节一致，Chromium 渲染六张图。 [复现步骤](test/fixtures/trace/README.md#same-range-nba-writes-in-vcs-and-xcelium)
   - [x] VCS T-2022.06-SP2 同步重叠 modport 样本在 3 ns 取得四次物理提交。VCD、FSDB 及在线暂停回放对提交 13、15、22、23 的归因一致。前台和静默 MCP 设置的提交断点均命中 23，图与报告一致，VS Code 界面报告保留四条提交。延后传播及 4 ns 两组件同时兼容的反例继续报告 `assignment-unobserved`。Node 回归 144 项通过、58 项跳过。
   - [x] VCS 混合 NBA 样本分别核对动态位段、固定范围和整信号的提交。`mixed[1] @ 2 ns` 两次变化分别关联提交 15、17，回溯至 `a[0]` 和 `b[1]`。4 ns 的整信号提交 28 保留实际写入。前台与静默 MCP 共 14 份分页结果一致，报告对比归一化会话 ID 和本地 VIDE revision。插桩前后 `q` 和 `mixed` 的槽末值一致，在线和离线原始执行记录逐字节一致。Chromium 渲染 8 张时间图。
   - [x] 固定重叠位段在 VCS T-2022.06-SP2 分别核实提交。2 ns 的 `q[2:1]`、`q[1:0]`、`q[3]` 分别对应提交 8、10、12。在线和离线 MCP 可按 `changeOrder` 将 `q[1]` 的两次变化追到 `a[0]` 和 `b[1]`，前台与静默宿主的图和报告一致，比较时归一化会话 ID。在线回调和提交序列共同恢复中间变化。插桩前后槽末值一致。新旧重叠记录及原有整信号合并样本通过回归，Node 124 项通过、68 项跳过。
@@ -158,8 +166,23 @@
 - [x] 用 VCS 的 FSDB 和 VCD 核对混合位宽枚举及隐式递增。前台与静默 MCP 均从 `direct_q @ 5 ps` 追到 `DIRECT_MIX=00010011`。同样的嵌套混合符号表达式在 VCS 为 2，在 Verilator 为 18。追踪保留其声明和波形根值，并将常量编码留作缺口。
 - [x] 用 VCS 的 FSDB、VCD 和 KDB 核对字面量枚举范围，覆盖计数、升序与降序下标。前台与静默 MCP 的 Driver、Load 和 12 条时间查询一致。各生成项有独立身份，并指向共享的 RTL 声明。
 - [x] VCS 的 FSDB 和 VCD 复验无法确认的枚举编码。前台与静默 MCP 均返回 `enumValueUnavailable`，保留根波形值和枚举声明，详细报告忽略 VIDE revision 后一致。Mermaid 图已用 Chromium 渲染。
-- [ ] 核对 macOS 和 Windows 的 VS Code 桌面运行，并在原生 Windows x64 与 arm64 重新运行管道注册冒烟。上次原生工作流停在注册断言。 [平台矩阵](https://github.com/AndreaFrederica/vscode-wave-workbench/actions/runs/44798601976)
-- [ ] 逐项核对 RTL Trace 尚未验收的测试、性能预算、通用调度器和缺口。保留原计划及其未勾选事项。
+- [ ] 核对 macOS 和 Windows 的 VS Code 桌面 Trace。原生 Windows x64 与 arm64 的 MCP 命名管道注册已复验通过。 [平台矩阵](https://github.com/AndreaFrederica/vscode-wave-workbench/actions/runs/45012295235)
+- [x] 逐项核对 454 条 RTL Trace 清单中的 31 条开放项。核查表记录现有证据、验收状态和缺口，覆盖 Phase 0–7，并附本轮仿真回归、Linux 桌面实测和性能复测。 [全量核查](RTL_TRACE_AUDIT.md)
+- [x] 复验并通过 9 项 Trace 验收，覆盖隔离编译配置、Driver/Load、递归、图与报告。修复 Verdi NPI 切片别名的物理总线范围、Verilator 展开参数读取和解码器实例标识。Linux VSIX、当前 Windows x64 Node 在 Wine 下的 MCP 命名管道，以及三个真实双 hart VCS 回放用例均通过。 [修复与复验](RTL_TRACE_AUDIT.md#修复与复验)
+- [x] VCS KDB 上的静态和时间图已能绑定普通向下层次引用。复验子实例端口、局部网线、双实例引用隔离、常量索引 generate 和从 RHS 追踪的写入目标。Linux VS Code 与静默 MCP 的 `q_pair` 图一致。 [复现夹具](test/fixtures/trace/README.md#vcs-hierarchical-reads)
+- [x] 用 VCS 跨文件夹具从子实例反向查找父层的层次读写。独立 MCP 核对同名实例、generate 元素及 Load 的继续追踪。Linux VS Code 扩展宿主核对 Driver、Load 和父层赋值源码跳转。 [复现夹具](test/fixtures/trace/README.md#vcs-hierarchical-reads)
+- [x] 用 VCS KDB 与 VCD 复验子实例中以父模块类型名限定的向上读写。两个相同父模块的读写分别绑定各自实例，并在不同 tick 核对读取时间图。 [复现夹具](test/fixtures/trace/README.md#vcs-upward-references)
+- [x] 从父层信号反查子层向上读写。VCS 跨文件夹具核对两个父实例分别查到各自叶实例。同文件向下引用夹具核对兄弟实例的引用点不会造成误报。 [复现夹具](test/fixtures/trace/README.md#vcs-upward-references)
+- [x] 用 VCS 验证 `lane[SELECT]` 在两个实例中分别选中 `lane[0]` 和 `lane[1]`，反查 Load 只命中被选元素，读取时间图分别核对 2 ns 和 4 ns。 [复现夹具](test/fixtures/trace/README.md#vcs-parameterized-xmr)
+- [x] 复验 Trace 版本契约，VCS 与 Verilator 的新旧实时快照生产端与读取端通过 8 组交叉验证。回归覆盖不支持的版本、能力缺失、时基不匹配及无效时基。 [全量核查](RTL_TRACE_AUDIT.md)
+- [x] 复验真实双 hart 仲裁、并发自动 task 回放和 Verilator 单线程 NBA 探针。修复动态 Verilator 输出位段及迟到的 Trace 响应。实际仿真、MCP 与 Linux 桌面的证据已写回。 [全量核查](RTL_TRACE_AUDIT.md)
+- [x] 用 VCS 核对 Driver/Load、异步复位、同过程 NBA 覆盖与保持，并修复虚接口成员写入误指向 handle 变量。OpenTitan RV32A 的 189 个编译根也通过增量 Trace 与 Definition、References、Rename 实测。 [全量核查](RTL_TRACE_AUDIT.md)
+- [x] 在静默 MCP 核对真实 VCD、FST 及两种 FSDB 后端的图分页、取消、关闭和重启，关闭后旧续查失效，同一进程保留已生成的快照。 [全量核查](RTL_TRACE_AUDIT.md)
+- [x] 修复数组字读口的单个位误用整字比较。在真实 OpenTitan FSDB 核对 `cpu_rdata_o[5]` 到 `mem[36][5]` 的来源及同槽歧义。整图的剩余缺口记在核查表。 [全量核查](RTL_TRACE_AUDIT.md)
+- [x] 修复整字段的执行日志与位读取的匹配。OpenTitan 从解码器指令输入发起一次 MCP 查询，连到实际取指、IMEM 四次提交及文件偏移 16–19。 [全量核查](RTL_TRACE_AUDIT.md)
+- [x] 复跑 Xcelium SHM 和 Vivado WDB 的 Trace 生命周期。修复普通 MCP 续查漏核对设计索引更新的问题。 [全量核查](RTL_TRACE_AUDIT.md)
+- [x] 修复长 `case` 条件缺失。真实 CV32E40P FSDB 的 ALU 在操作码 `0x18` 下只保留实际匹配的 case 分支，直接上游边从 84 条降到 18 条。VIDE 增加 48 标签回归。 [全量核查](RTL_TRACE_AUDIT.md)
+- [x] 修复跨文件 Load 从中间信号展开时漏掉完整层次路径，以及头文件宏生成路径时的声明查询和反向索引问题。真实 VCS 核对两个同名实例和 2 ns 的时间图。 [复现夹具](test/fixtures/trace/README.md#vcs-load-through-an-intermediate-cross-file-reference)
 
 ## 模拟波形与混合信号解码
 

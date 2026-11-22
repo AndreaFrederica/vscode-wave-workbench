@@ -129,6 +129,8 @@ input.on("line", (request) => {
   if (request === "advance") process.exit(1);
   console.log(JSON.stringify({ snapshot: { tick: "0", scale: "1ps", values: { clk: "0" }, done: false } }));
 });
+
+
 `, { mode: 0o755 });
   const session = await LiveTraceSession.start(executable, directory, () => {});
   t.after(() => session.dispose());
@@ -142,6 +144,74 @@ input.on("line", (request) => {
   assert.equal(paused.state, "error");
   assert.equal(stepped.elapsedCycles, 0);
   assert.match(paused.failure, /closed before its reply/);
+});
+
+test("live Trace rejects an invalid provider time unit before publishing a sample", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "wave-live-scale-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const executable = path.join(directory, "harness");
+  await fs.writeFile(executable, "#!/usr/bin/env node\n" + `
+const input = require("node:readline").createInterface({ input: process.stdin });
+input.once("line", () => {
+  const { argv } = process;
+  console.log(JSON.stringify({ snapshot: {
+    tick: "0", scale: argv[2].slice(1), values: { q: "0" }, done: false,
+  } }));
+  input.close();
+  process.stdin.pause();
+});
+`, { mode: 0o755 });
+  for (const scale of ["ticks", "0ps", "1e999ns", "1e-320fs"]) {
+    await assert.rejects(
+      async () => {
+        const session = await LiveTraceSession.start(executable, directory, () => {}, undefined, {
+          plusargs: ["+" + scale],
+        });
+        await session.dispose();
+      },
+      /Unsupported time scale/,
+    );
+  }
+});
+
+test("live Trace accepts stable legacy and version 1 snapshots", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "wave-live-schema-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const executable = path.join(directory, "harness");
+  await fs.writeFile(executable, "#!/usr/bin/env node\n" + `
+const input = require("node:readline").createInterface({ input: process.stdin });
+const versions = JSON.parse(process.argv[2].slice(1));
+let tick = 0;
+input.on("line", () => {
+  const schemaVersion = versions[tick];
+  console.log(JSON.stringify({ snapshot: {
+    ...(schemaVersion === null ? {} : { schemaVersion }),
+    tick: String(tick), scale: "1ps", values: { clk: String(tick++ % 2) }, done: false,
+  } }));
+});
+`, { mode: 0o755 });
+  const start = (versions) => LiveTraceSession.start(executable, directory, () => {}, undefined, {
+    plusargs: ["+" + JSON.stringify(versions)],
+  });
+  for (const version of [0, 2, "1"])
+    await assert.rejects(start([version]), /Unsupported live simulation snapshot schema/);
+  for (const [versions, expected] of [[[null, null], undefined], [[1, 1], 1]]) {
+    const session = await start(versions);
+    t.after(() => session.dispose());
+    assert.equal(session.status().snapshot.schemaVersion, expected);
+    const result = await session.stepClock("clk", 1);
+    assert.equal(result.snapshot.schemaVersion, expected);
+  }
+  const changed = await start([1, null]);
+  t.after(() => changed.dispose());
+  const result = await changed.stepClock("clk", 1);
+  assert.equal(result.state, "error");
+  assert.match(result.failure, /snapshot schema changed/);
+  assert.equal(result.snapshot.tick, "0");
 });
 
 test("a simulator-commit breakpoint skips end-of-slot observations", {

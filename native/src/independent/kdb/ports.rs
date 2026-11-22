@@ -1043,6 +1043,7 @@ impl Session {
                     children
                 }
                 0x0e0023..=0x220023 => values::operands(view, expression, 2)?,
+                0x270023 => values::operands(view, expression, 3)?,
                 _ => return Ok(false),
             }
         };

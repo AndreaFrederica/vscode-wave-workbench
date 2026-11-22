@@ -896,7 +896,7 @@ fn run(
         #[cfg(fsdb)]
         "kdbResolve" => native_kdb.resolve(&r.query.ok_or("Missing hierarchy")?),
         #[cfg(fsdb)]
-        "kdbInterfaceMember" => kdb::lookup(&r.query.ok_or("Missing interface member")?, "interfaceMember"),
+        "kdbInterfaceMember" => native_kdb.interface_member(&r.query.ok_or("Missing interface member")?),
         #[cfg(fsdb)]
         "kdbInterfaceUsers" => kdb::lookup(&r.query.ok_or("Missing interface member")?, "interfaceUsers"),
         #[cfg(fsdb)]

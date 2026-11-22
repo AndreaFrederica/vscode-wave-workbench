@@ -17,6 +17,12 @@ const probeStore = new RegExp(
     String.raw`)\s*=\s*(?<sample>(?:vlSelfRef\.)?\w*wave_probe_(?<prefix>[a-f0-9]{16}));`,
   "g",
 );
+const constantStore = new RegExp(
+  String.raw`\b\w+____Vdpiimwrap_wave_workbench_write_\w+\([^;]*?(?<site>"[a-f0-9]{64}"s),\s*"(?<bits>[01]{1,64})"s,\s*0U\);\s*(?<destination>` +
+    cppRef +
+    String.raw`)\s*=\s*(?<constant>0x[0-9a-fA-F]+|[0-9]+)U(?:LL)?;`,
+  "g",
+);
 const nbaFunction = /^void \w+___nba_sequent__\w+\([^\n]*\) \{\n[\s\S]*?^\}/gm;
 const storageCommit = new RegExp(
   String.raw`^\s*(?<target>` +
@@ -31,21 +37,37 @@ const targetArgs = ({ instance, signal }) =>
 function instrumentBody(body, probes, seen) {
   const edits = [];
   const stores = new Map();
-  for (const match of body.matchAll(probeStore)) {
-    const { destination, sample, prefix } = match.groups;
+  const candidates = [
+    ...body.matchAll(probeStore),
+    ...body.matchAll(constantStore),
+  ];
+  for (const match of candidates) {
+    const { destination, sample, prefix, bits, constant } = match.groups;
     const scope = /\bvlSymsp->__Vscopep_(\w+)\b/.exec(match[0])?.[1];
     const site = /"([a-f0-9]{64})"s,/.exec(match[0])?.[1];
     const probe = probes.get(scope + "/" + site);
     if (!probe) continue;
-    const width = Number(/VL_SFORMATF_N_NX\("%b",\s*(\d+)/.exec(match[0])?.[1]);
+    const width =
+      bits?.length ??
+      Number(/VL_SFORMATF_N_NX\("%b",\s*(\d+)/.exec(match[0])?.[1]);
+    const originalSignal =
+      "vlSelfRef." +
+      probe.instance.slice(4).split(".").join("__DOT__") +
+      "__DOT__" +
+      probe.signal;
+    const matchingStore =
+      bits === undefined
+        ? site.startsWith(prefix) &&
+          match[0].slice(0, match[0].indexOf(";")).includes("," + sample + ")")
+        : destination === originalSignal &&
+          BigInt(constant) === BigInt("0b" + bits);
     if (
       seen.has(probe) ||
-      !site.startsWith(prefix) ||
+      !matchingStore ||
       !Number.isInteger(width) ||
       width < 1 ||
       width > 64 ||
-      !/,\s*0U\);\s*[^;]+;$/.test(match[0]) ||
-      !match[0].slice(0, match[0].indexOf(";")).includes("," + sample + ")")
+      !/,\s*0U\);\s*[^;]+;$/.test(match[0])
     )
       throw Error(
         "Cannot verify generated evaluation for " +

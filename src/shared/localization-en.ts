@@ -679,9 +679,11 @@ export const english: Record<string, string> = {
   独立后端: "Independent (Rust)",
   "Verdi 后端": "Verdi",
   "Cadence 后端": "Cadence",
-  "优先用 Rust 读取，打开失败时尝试 Cadence": "Use Rust first, with Cadence as an open fallback.",
+  "优先用 Rust 读取，打开失败时尝试 Cadence":
+    "Use Rust first, with Cadence as an open fallback.",
   "使用 Rust 直接读取 SHM 和 PSFXL": "Read SHM and PSFXL directly with Rust.",
-  "使用本机 Xcelium / Cadence 读取工具": "Use the locally installed Xcelium / Cadence tools.",
+  "使用本机 Xcelium / Cadence 读取工具":
+    "Use the locally installed Xcelium / Cadence tools.",
   "选择 FSDB 后端…": "Select FSDB Backend…",
   选择一个标签后可修改颜色: "Select a tag to change its color",
   "选择历史指令填入输入框…": "Select a command from history…",

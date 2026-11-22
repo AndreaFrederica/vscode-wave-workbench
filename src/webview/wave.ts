@@ -2704,8 +2704,9 @@ window.addEventListener("message", async (e) => {
     $("file").textContent = msg.title;
     $("backend").textContent =
       `${msg.backendLabel || msg.backend} · Vide ${msg.vide || localize("未安装")}`;
-    document.querySelector<HTMLButtonElement>('[data-action="selectBackend"]').disabled =
-      !msg.canSelectBackend;
+    document.querySelector<HTMLButtonElement>(
+      '[data-action="selectBackend"]',
+    ).disabled = !msg.canSelectBackend;
     start = Number.isFinite(saved.start) ? saved.start : Number(msg.start);
     end = Number.isFinite(saved.end)
       ? saved.end

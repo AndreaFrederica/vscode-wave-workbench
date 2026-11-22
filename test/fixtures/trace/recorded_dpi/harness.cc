@@ -29,7 +29,7 @@ int main() {
     for (std::string command; std::getline(std::cin, command);) {
       if (command == "advance" && tick < 4) eval(++tick);
       else if (command != "current") return 2;
-      std::printf("{\"snapshot\":{\"tick\":\"%u\",\"scale\":\"1ps\","
+      std::printf("{\"snapshot\":{\"schemaVersion\":1,\"tick\":\"%u\",\"scale\":\"1ps\","
         "\"done\":%s,\"executionEvents\":true,\"values\":{"
         "\"TOP.recorded_dpi_tb.clk\":\"%u\","
         "\"TOP.recorded_dpi_tb.input_arg\":\"%s\","

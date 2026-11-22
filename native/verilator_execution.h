@@ -4,8 +4,18 @@
 #include <cstdint>
 
 void wave_workbench_begin_slot(std::uint64_t tick);
+struct WaveWorkbenchExternalStamp {
+  std::uint64_t tick;
+  std::uint64_t ordinal;
+};
+WaveWorkbenchExternalStamp wave_workbench_stamp_external();
+void wave_workbench_observe_external(const char *instance, const char *signal,
+                                     const char *statement, const char *operation,
+                                     const char *value = nullptr);
 void wave_workbench_external_step(const char *statement, const char *operation,
                                   const char *value = nullptr);
+void wave_workbench_external_step(const char *statement, const char *operation,
+                                  const char *value, WaveWorkbenchExternalStamp stamp);
 bool wave_workbench_observe_nba(const char *instance, const char *signal,
                                 const char *value);
 bool wave_workbench_nba_evaluation(const char *instance, const char *signal,

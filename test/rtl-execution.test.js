@@ -388,6 +388,22 @@ test("VCS modport probes confirm unique physical changes and preserve ambiguous 
   ]);
 });
 
+test("VCS modport replay records uniquely matched callbacks after the assignment returns", {
+  skip: !process.env.WAVE_TEST_VCS_MODPORT_DEFERRED,
+}, async () => {
+  const directory = process.env.WAVE_TEST_VCS_MODPORT_DEFERRED;
+  const replay = await readExecutionEvidence(
+    path.join(directory, "execution-vcd.jsonl"), path.join(directory, "nested.vcd"),
+    "1ns", "nested_tb.overlap", "data", "1", "2",
+  );
+  assert.equal(replay.waveformMatch, "verified");
+  const commits = replay.events.filter(({ kind }) => kind === "assignment-committed");
+  assert.deepEqual(commits.map(({ tick, evaluationOrdinal, valueChangeOrdinal }) =>
+    [tick, evaluationOrdinal, valueChangeOrdinal]), [["1", 17, 20], ["2", 27, 29], ["2", 26, 31]]);
+  assert(replay.events.some(({ tick, kind }) => tick === "1" && kind === "assignment-unobserved"));
+  assert.equal(replay.coverage.pendingEvaluations, 0);
+});
+
 test("VCS PLI replay links synchronous writes to ordered foreign steps", {
   skip: !process.env.WAVE_TEST_VCS_PLI,
 }, async (t) => {
@@ -1130,6 +1146,43 @@ test("replays mapped C++ steps of a recorded DPI assignment", {
   assert.equal(matchLiveExecution(replay, session.executionWindow(instance, "result", "0", "3"), true), "matched");
 });
 
+test("replays data from a deferred Verilator DPI worker", {
+  skip: !process.env.WAVE_TEST_DEFERRED_DPI,
+}, async (t) => {
+  const stage = process.env.WAVE_TEST_DEFERRED_DPI;
+  const instance = "TOP.recorded_dpi_tb";
+  const replay = await readExecutionEvidence(
+    path.join(stage, "execution.jsonl"), path.join(stage, "trace.vcd"),
+    "1ps", instance, "result", "0", "3",
+  );
+  assert.equal(replay.coverage.status, "complete");
+  const evaluation = replay.events.find(event =>
+    event.tick === "3" && event.kind === "assignment-evaluated");
+  assert.deepEqual(evaluation.resolvedExternalSteps.map(step => [
+    step.statementId, Number.parseInt(step.value, 2), step.source.identity,
+  ]), [["worker.input", 3, "matched"], ["worker.result", 6, "matched"]]);
+  if (process.env.WAVE_TEST_DEFERRED_DPI_STAMPS === "1")
+    assert.deepEqual(evaluation.resolvedExternalSteps.map(step => step.captured), [
+      {tick: "1", ordinal: 0}, {tick: "1", ordinal: 1},
+    ]);
+  if (process.env.WAVE_TEST_DEFERRED_DPI_AUTONOMOUS === "1") {
+    const independent = replay.events.find(event => event.kind === "external-observation");
+    assert.equal(independent.tick, "2");
+    assert.equal(independent.externalSteps[0].statementId, "worker.complete");
+    assert.equal(independent.resolvedExternalSteps[0].source.identity, "matched");
+    assert.deepEqual(independent.externalSteps[0].captured, {tick: "1", ordinal: 2});
+    assert.equal(Number.parseInt(independent.externalSteps[0].value, 2), 6);
+  }
+  const binary = process.platform === "win32" ? "Vrecorded_dpi_tb.exe" : "Vrecorded_dpi_tb";
+  const session = await LiveTraceSession.start(path.join(stage, "obj_dir", binary), stage, () => {});
+  t.after(() => session.dispose());
+  const { snapshot } = await session.stepClock(instance + ".clk", 2);
+  assert.equal(snapshot.tick, "3");
+  assert.equal(Number.parseInt(snapshot.values[instance + ".input_arg"], 2), 4);
+  assert.equal(Number.parseInt(snapshot.values[instance + ".result"], 2), 6);
+  assert.equal(matchLiveExecution(replay, session.executionWindow(instance, "result", "0", "3"), true), "matched");
+});
+
 test("recorded commits correlate with same-tick changes only when their sequences agree", () => {
   const tick = "5";
   const history = ["1", "0", "1"].map(value => ({ tick, value }));
@@ -1860,6 +1913,18 @@ test("execution coverage independently validates log gaps, pending writes and re
   assert.equal(standalone.scale, "1ps");
   assert.equal(standalone.coverage.status, "complete");
   assert.match(executionReport(standalone), /Recording-only playback/);
+  await assert.rejects(
+    readExecutionEvidence(log, waveform, "10ps", "top.first", "q", "1", "1"),
+    /different waveform time unit/,
+  );
+  for (const schemaVersion of [undefined, 0, 2, "1"]) {
+    await fs.writeFile(log, [{ ...header, schemaVersion }, evaluation, commit, end]
+      .map(JSON.stringify).join("\n") + "\n");
+    await assert.rejects(
+      readExecutionEvidence(log, waveform, "1ps", "top.first", "q", "1", "1"),
+      /Unsupported execution trace header/,
+    );
+  }
   await fs.writeFile(source, "module updated_tb; endmodule\n");
   const stale = await replay([evaluation, commit, end]);
   assert.equal(stale.cursor.latestCommit.source.identity, "changed");

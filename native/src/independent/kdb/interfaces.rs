@@ -763,7 +763,7 @@ impl Session {
         let mut target = None;
         for connection in lexical::chain(&view, view.pointer(source + 48)?)? {
             let header = view.uint(connection, 4)?;
-            if header & 255 != 49 {
+            if !matches!(header & 255, 49 | 50) {
                 return Err(invalid("Unrecognized KDB actual port object"));
             }
             let matches = if header & 0x80000000 != 0 {

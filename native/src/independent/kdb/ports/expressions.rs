@@ -64,6 +64,7 @@ enum Value {
     Repeat(u64, Box<Value>),
     Unary(&'static str, Box<Value>),
     Binary(&'static str, Box<Value>, Box<Value>),
+    Conditional(Box<Value>, Box<Value>, Box<Value>),
 }
 
 pub(super) fn read(
@@ -198,12 +199,32 @@ impl Reader<'_> {
                 .value(child, depth + 1)?
                 .map(|(value, width)| (Value::Unary("bitNot", Box::new(value)), width)));
         }
+        if opcode == 0x270023 {
+            let operands = values::operands(self.view, key, 3)?;
+            // The KDB chain starts with the last operand.
+            let Some((condition, _)) = self.value(operands[1], depth + 1)? else {
+                return Ok(None);
+            };
+            let Some((yes, yes_width)) = self.value(operands[2], depth + 1)? else {
+                return Ok(None);
+            };
+            let Some((no, no_width)) = self.value(operands[0], depth + 1)? else {
+                return Ok(None);
+            };
+            return Ok(Some((
+                Value::Conditional(Box::new(condition), Box::new(yes), Box::new(no)),
+                yes_width.max(no_width),
+            )));
+        }
         let operator = match opcode {
             0x0e0023 => "add",
             0x0f0023 => "subtract",
+            0x100023 => "multiply",
             0x1e0023 => "bitAnd",
             0x1f0023 => "bitOr",
             0x200023 => "bitXor",
+            0x210023 => "shiftLeft",
+            0x220023 => "shiftRight",
             _ => return Ok(None),
         };
         let operands = values::operands(self.view, key, 2)?;
@@ -213,9 +234,14 @@ impl Reader<'_> {
         let Some((right, right_width)) = self.value(operands[0], depth + 1)? else {
             return Ok(None);
         };
+        let width = if matches!(operator, "shiftLeft" | "shiftRight") {
+            left_width
+        } else {
+            left_width.max(right_width)
+        };
         Ok(Some((
             Value::Binary(operator, Box::new(left), Box::new(right)),
-            left_width.max(right_width),
+            width,
         )))
     }
 

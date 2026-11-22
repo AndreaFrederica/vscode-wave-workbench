@@ -419,23 +419,37 @@ fn scan_ports(instance: &str) -> Result<(PortScan, bool), String> {
 impl NativeKdb {
     pub fn resolve(&mut self, name: &str) -> Result<serde_json::Value, String> {
         let mut results = lookup_locations(name, "resolve")?;
-        for location in &mut results {
-            if location.fullname != name
-                || location.line <= 0
-                || !matches!(location.kind.as_str(), "npiNet" | "npiReg" | "npiBitVar")
-            {
-                continue;
-            }
-            location.packed_range = self.expression_reader().and_then(|reader| {
-                reader.checked_packed_range(
-                    name,
-                    &location.instance,
-                    &location.file,
-                    location.line as u32,
-                )
-            });
+        for location in results
+            .iter_mut()
+            .filter(|location| location.fullname == name)
+        {
+            self.fill_packed_range(location);
         }
         Ok(serde_json::json!(results))
+    }
+
+    pub fn interface_member(&mut self, name: &str) -> Result<serde_json::Value, String> {
+        let mut results = lookup_locations(name, "interfaceMember")?;
+        for location in &mut results {
+            self.fill_packed_range(location);
+        }
+        Ok(serde_json::json!(results))
+    }
+
+    fn fill_packed_range(&mut self, location: &mut Location) {
+        if location.line <= 0
+            || !matches!(location.kind.as_str(), "npiNet" | "npiReg" | "npiBitVar")
+        {
+            return;
+        }
+        location.packed_range = self.expression_reader().and_then(|reader| {
+            reader.checked_packed_range(
+                &location.fullname,
+                &location.instance,
+                &location.file,
+                location.line as u32,
+            )
+        });
     }
 
     pub fn ports(&mut self, instance: &str) -> Result<serde_json::Value, String> {

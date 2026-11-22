@@ -8,7 +8,12 @@
 | `src/wave-commands.ts`、`src/wave-files.ts` | 通用 VS Code 命令、最近文件、波形工程打开与保存 |
 | `src/wave-sidebar.ts`、`src/wave-source-navigation.ts` | 波形侧栏、源码与波形双向定位 |
 | `src/wave-rtl-hover.ts` | RTL 悬停取值、端口与实参映射、总线解码 |
-| `src/wave-analysis.ts` | 静态、动态与精确执行追踪的查询协调及 MCP 分页 |
+| `src/wave-analysis.ts` | 组装追踪模块，向扩展宿主与静默 MCP 提供统一入口 |
+| `src/wave-analysis-projects.ts`、`src/wave-analysis-static.ts` | VIDE 工程生命周期、续查上下文校验，以及静态驱动与负载查询 |
+| `src/wave-analysis-bindings.ts` | 波形信号绑定、位段投影、记录字段读取和静态续查 |
+| `src/wave-analysis-context.ts`、`src/wave-analysis-observations.ts`、`src/wave-analysis-reports.ts` | 离线和在线采样、波形与执行事件关联、追踪报告 |
+| `src/wave-analysis-design.ts` | 源码定位、原理图、执行探针映射与日志查询 |
+| `src/wave-analysis-tools.ts`、`src/wave-analysis-trace-tool.ts`、`src/wave-analysis-graphs.ts` | MCP 请求派发、追踪参数和结果组装、图表分页及续查游标 |
 | `src/wave-trace-view.ts` | Trace Explorer 命令、选中信号、A 游标联动与视图状态 |
 | `src/wave-trace-continuation.ts` | 续查请求、检查点校验、恢复批次、合并结果和续查报告 |
 | `src/wave-vide-project.ts` | VIDE 仿真工程选择 |

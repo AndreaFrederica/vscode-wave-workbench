@@ -535,6 +535,11 @@ export const toolDefinitions = [
     {
       ...traceProperties,
       ...temporalLimits,
+      continueFrom: {
+        type: "object",
+        description:
+          "Trace upstream from an exact transition in the first graph and join the two graphs. Set signal and tick. Optional changeOrder selects a same-tick transition, and optional historyStart applies only to the selected signal.",
+      },
       tick: {
         type: "string",
         description: "Observation tick as a decimal string.",
@@ -704,7 +709,10 @@ export const toolDefinitions = [
     "Open an FSDB, FST or VCD file or restore a .waveproj project in Wave Workbench.",
     {
       path: { type: "string" },
-      backend: { type: "string", enum: ["auto", "independent", "verdi", "cadence"] },
+      backend: {
+        type: "string",
+        enum: ["auto", "independent", "verdi", "cadence"],
+      },
     },
     ["path"],
   ),

@@ -30,6 +30,8 @@ export type { AssignmentValue } from "./shared/protocol";
 
 export interface TraceOptions {
   module?: string;
+  hierarchicalOnly?: true;
+  includeHierarchicalModules?: boolean;
   maxDepth?: number;
   maxSignals?: number;
   maxAssignments?: number;
@@ -74,6 +76,8 @@ export interface VideTrace {
     id: number;
     name: string;
     declaration: Location | null;
+    hierarchicalModules?: { name: string; declaration: Location }[];
+    hasMoreHierarchicalModules?: true;
     instance?: string;
     signed?: boolean;
     packedRange?: [number, number];
@@ -110,6 +114,8 @@ export interface VideTrace {
       signal: number;
       location: Location;
       byteColumn?: number;
+      hierarchicalPath?: string[];
+      hierarchicalIndices?: [number, AssignmentValue][];
       interfacePath?: string;
       interfaceIndex?: AssignmentValue;
       interfaceRange?: [number, number];
@@ -123,6 +129,8 @@ export interface VideTrace {
       hierarchical?: boolean;
       byteColumn?: number;
       sourceOffset?: number;
+      hierarchicalPath?: string[];
+      hierarchicalIndices?: [number, AssignmentValue][];
       interfacePath?: string;
       interfaceIndex?: AssignmentValue;
       interfaceRange?: [number, number];
@@ -308,6 +316,8 @@ export async function queryTrace(
       await wait(100);
     }
   }
+  if (token?.isCancellationRequested)
+    throw Error("The RTL trace was cancelled.");
   if (!trace)
     throw new UnresolvedTraceSignal(
       "VIDE could not resolve an RTL signal at this position.",
@@ -908,21 +918,23 @@ export function temporalEdgeLabel(edge: TemporalEdgeEvidence) {
         : "") +
     (edge.arrayIndexEvidence === "recordedTarget"
       ? " · matches recorded array index"
-      : edge.controlSampleEvidence === "recordedWaitResume"
-        ? " · matches recorded wait resume"
-        : edge.controlSampleEvidence === "recordedBranchEntry"
-          ? " · matches recorded branch entry"
-          : edge.controlSampleEvidence === "recordedEvaluation"
-            ? " · matches recorded guard operand"
-            : edge.rhsSampleEvidence === "recordedEvaluation"
-              ? " · matches recorded RHS"
-              : edge.rhsSampleEvidence === "waveformCombination"
-                ? " · RHS matches a waveform sample combination"
-                : edge.rhsSample === "matches"
-                  ? " · RHS compatible"
-                  : edge.rhsSample === "differs"
-                    ? " · RHS differs"
-                    : "") +
+      : edge.packedIndexEvidence === "recordedTarget"
+        ? " · matches recorded packed target index"
+        : edge.controlSampleEvidence === "recordedWaitResume"
+          ? " · matches recorded wait resume"
+          : edge.controlSampleEvidence === "recordedBranchEntry"
+            ? " · " + recordedBranchEdgeLabel(edge)
+            : edge.controlSampleEvidence === "recordedEvaluation"
+              ? " · matches recorded guard operand"
+              : edge.rhsSampleEvidence === "recordedEvaluation"
+                ? " · matches recorded RHS"
+                : edge.rhsSampleEvidence === "waveformCombination"
+                  ? " · RHS matches a waveform sample combination"
+                  : edge.rhsSample === "matches"
+                    ? " · RHS compatible"
+                    : edge.rhsSample === "differs"
+                      ? " · RHS differs"
+                      : "") +
     (edge.sourceWriteEvidence === "recordedSameValueWrite"
       ? " · same-value write"
       : "") +
@@ -931,6 +943,20 @@ export function temporalEdgeLabel(edge: TemporalEdgeEvidence) {
       : edge.waitResumeCause === "orderedCallbacks"
         ? " · callback " + edge.waitResumeCallbackOrdinal + " enabled wait"
         : "")
+  );
+}
+
+export function recordedBranchEdgeLabel(edge: TemporalEdgeEvidence) {
+  const entry = edge.branchEntry;
+  return (
+    "matches recorded branch entry" +
+    (entry
+      ? " at L" +
+        entry.line +
+        ":" +
+        entry.column +
+        (entry.tick === undefined ? "" : ", tick " + entry.tick)
+      : "")
   );
 }
 
@@ -1228,6 +1254,7 @@ export const temporalGapLabels: Record<TemporalGap["reason"], string> = {
   nodeBudget: "Time graph node budget reached",
   edgeBudget: "Time graph edge budget reached",
   staticBudget: "Static traversal budget reached",
+  selectedContinuation: "Selected waveform transition for further tracing",
 };
 
 const traceBindingIssueLabels: Record<TraceBindingIssue, string> = {
@@ -1345,7 +1372,7 @@ function temporalNames(
   return names;
 }
 
-function temporalSignalName(name: string, bit?: number) {
+export function temporalSignalName(name: string, bit?: number) {
   return bit === undefined
     ? name
     : name.replace(/\s*\[\s*-?\d+\s*(?::\s*-?\d+\s*)?\]$/, "") +
@@ -1906,7 +1933,8 @@ export function mergeTemporalContinuationGraph(
         status !== "joined" &&
         evidence.reason !== "nodeBudget" &&
         evidence.reason !== "edgeBudget" &&
-        evidence.reason !== "staticBudget";
+        evidence.reason !== "staticBudget" &&
+        evidence.reason !== "selectedContinuation";
       gapSummary[status]++;
       (gapSummary.byReason[evidence.reason] ??= { ...emptyCounts })[status]++;
       if (evidence.bindingIssue) {

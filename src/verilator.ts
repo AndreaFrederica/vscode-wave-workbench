@@ -13,8 +13,14 @@ import type {
   DesignSession,
   VerilatorArtifacts,
 } from "./kdb";
-import { codeOnly } from "./rtl-selection";
-import type { DesignPortEndpoint, Location, Signal } from "./shared/protocol";
+import { codeOnly, simpleAssignmentMacro } from "./rtl-selection";
+import {
+  portSources,
+  type AssignmentValue,
+  type DesignPortEndpoint,
+  type Location,
+  type Signal,
+} from "./shared/protocol";
 
 import type {
   SchematicGraph,
@@ -56,6 +62,7 @@ interface AstNode {
   modp?: string;
   modName?: string;
   varType?: string;
+  isParam?: boolean;
   direction?: string;
   modVarp?: string;
   varp?: string;
@@ -70,6 +77,7 @@ interface AstNode {
   rhsp?: AstNode[];
   pinsp?: AstNode[];
   exprp?: AstNode[];
+  valuep?: AstNode[];
   fromp?: AstNode[];
   lsbp?: AstNode[];
   widthConst?: number;
@@ -772,13 +780,24 @@ export class VerilatorDesign implements DesignSession {
       variables.get(name) ||
       variables.get(name.replace(/(?:\s*\[-?\d+(?::-?\d+)?\])+$/, ""));
     if (!node) return undefined;
+    const parameter =
+      node.isParam || node.varType === "GPARAM" || node.varType === "LPARAM";
+    const value =
+      parameter && node.valuep?.length === 1
+        ? packedPortConstant(node.valuep[0])
+        : undefined;
     return {
       ...parent.record,
       ...this.location(node.loc),
       fullname,
-      kind: node.varType === "WIRE" ? "npiNet" : "npiReg",
+      kind: parameter
+        ? "npiParameter"
+        : node.varType === "WIRE"
+          ? "npiNet"
+          : "npiReg",
       module: rtlName(parent.definition),
       packedRange: node.dtypep && this.packedRanges.get(node.dtypep),
+      ...(value && { parameterValue: value }),
     };
   }
 
@@ -927,20 +946,41 @@ export class VerilatorDesign implements DesignSession {
           }
         }
         const text = lineText?.slice(source.column - 1);
+        const expanded =
+          sourceFile &&
+          simpleAssignmentMacro(sourceFile.lines, source.line, source.column);
+        const macro =
+          expanded &&
+          expanded.lhs === signal &&
+          (kind === "nonblocking"
+            ? expanded.operator === "<="
+            : kind === "blocking" && expanded.operator === "=")
+            ? {
+                name: expanded.name,
+                definition: {
+                  file: source.file,
+                  sha256: sourceFile.sha256,
+                  ...expanded.definition,
+                },
+              }
+            : undefined;
         if (
           !processFile ||
           !process.line ||
           !process.column ||
           !sourceFile ||
           !source.column ||
-          !text?.startsWith(signal) ||
-          /[\w$]/.test(text[signal.length] ?? "")
+          (!macro &&
+            (!text?.startsWith(signal) ||
+              /[\w$]/.test(text[signal.length] ?? "")))
         )
           return {
             kind,
             source,
             process,
-            diagnostic: "sourceUnmapped" as const,
+            diagnostic: /^`[a-zA-Z_][\w$]*/.test(text ?? "")
+              ? ("unsupportedMacroExpansion" as const)
+              : ("sourceUnmapped" as const),
           };
         const adjustEntry = (entry: BeginSite | undefined) =>
           entry?.first.file === reported.file &&
@@ -952,7 +992,8 @@ export class VerilatorDesign implements DesignSession {
           kind,
           source: { ...source, sha256: sourceFile.sha256 },
           process: { ...process, sha256: processFile.sha256 },
-          operator,
+          operator: macro ? source : operator,
+          ...(macro ? { macro } : {}),
           processBody: adjustEntry(processBody),
           branches: branches.length ? branches.map(adjustEntry) : undefined,
           processId: id([
@@ -1031,6 +1072,93 @@ export class VerilatorDesign implements DesignSession {
     return undefined;
   }
 
+  private outputSelectIndex(
+    child: Scope,
+    index: AstNode,
+    range: [number, number],
+    width: number,
+  ): DesignPortLink["targetSelectIndex"] {
+    const operands: DesignPortEndpoint[] = [];
+    const lower = (node: AstNode, depth = 0): AssignmentValue | undefined => {
+      if (depth >= 8) return undefined;
+      const lowerChild = (nodes?: AstNode[]) =>
+        nodes?.length === 1 ? lower(nodes[0], depth + 1) : undefined;
+      if (node.type === "VARREF") {
+        const endpoint = this.portParent(child, node);
+        if (!endpoint) return undefined;
+        const slot = operands.findIndex(
+          ({ instance, signal }) =>
+            instance === endpoint.instance && signal === endpoint.signal,
+        );
+        if (slot >= 0) return { op: "signal", args: slot };
+        return { op: "signal", args: operands.push(endpoint) - 1 };
+      }
+      const constant = packedPortConstant(node);
+      if (constant) return { op: "literal", args: [constant.bits, false] };
+      if (node.type === "SEL") {
+        const source = lowerChild(node.fromp);
+        const first = node.lsbp?.[0] && packedPortConstant(node.lsbp[0]);
+        const size = node.widthConst;
+        if (!source || !first || !size || !/^[01]+$/.test(first.bits))
+          return undefined;
+        const right = Number.parseInt(first.bits, 2);
+        if (right + size > 64) return undefined;
+        return { op: "slice", args: [source, right + size - 1, right] };
+      }
+      if (node.type !== "ADD" && node.type !== "SUB") return undefined;
+      const bounds = node.dtypep && this.packedRanges.get(node.dtypep);
+      const left = lowerChild(node.lhsp);
+      const right = lowerChild(node.rhsp);
+      if (!bounds || !left || !right) return undefined;
+      const size = Math.abs(bounds[0] - bounds[1]) + 1;
+      if (size > 64) return undefined;
+      const leftValue: AssignmentValue = {
+        op: "cast",
+        args: [size, false, false, left],
+      };
+      const rightValue: AssignmentValue = {
+        op: "cast",
+        args: [size, false, false, right],
+      };
+      return {
+        op: "binary",
+        args: [node.type === "ADD" ? "add" : "subtract", leftValue, rightValue],
+      };
+    };
+    let value = lower(index);
+    if (!value || !operands.length) return undefined;
+    const [left, right] = range;
+    const descending = left >= right;
+    if (right !== 0 || !descending) {
+      // The tree's index starts at the physical least-significant end.
+      const base: AssignmentValue = {
+        op: "literal",
+        args: [
+          BigInt.asUintN(64, BigInt(right)).toString(2).padStart(64, "0"),
+          true,
+        ],
+      };
+      const offset: AssignmentValue = {
+        op: "cast",
+        args: [
+          64,
+          true,
+          false,
+          { op: "cast", args: [null, false, false, value] },
+        ],
+      };
+      value = {
+        op: "binary",
+        args: descending ? ["add", base, offset] : ["subtract", base, offset],
+      };
+    }
+    return {
+      operands,
+      value,
+      part: width === 1 ? undefined : { width, ascendingIndices: descending },
+    };
+  }
+
   private pinLinks(
     child: Scope,
     result: PortConnections,
@@ -1066,6 +1194,37 @@ export class VerilatorDesign implements DesignSession {
         if (output)
           result.links.push({ from: inside, to: outside, file, line });
         continue;
+      }
+      const width = expression.widthConst;
+      const index = expression.lsbp?.[0];
+      const portRange = port.dtypep && this.packedRanges.get(port.dtypep);
+      const range = /^\[(-?\d+):(-?\d+)\]$/.exec(expression.declRange ?? "");
+      if (
+        port.direction === "OUTPUT" &&
+        expression.type === "SEL" &&
+        parent &&
+        range &&
+        expression.declElWidth === 1 &&
+        typeof width === "number" &&
+        Number.isSafeInteger(width) &&
+        width === (portRange ? Math.abs(portRange[0] - portRange[1]) + 1 : 1) &&
+        index &&
+        (!requireSource || (file && line >= 1))
+      ) {
+        const bounds: [number, number] = [Number(range[1]), Number(range[2])];
+        const selector = bounds.every(Number.isSafeInteger)
+          ? this.outputSelectIndex(child, index, bounds, width)
+          : undefined;
+        if (selector) {
+          result.links.push({
+            from: inside,
+            to: parent,
+            file,
+            line,
+            targetSelectIndex: selector,
+          });
+          continue;
+        }
       }
       const insideKey = portKey(inside.instance, inside.signal);
       if (
@@ -1415,9 +1574,12 @@ export class VerilatorDesign implements DesignSession {
   async portLinks(instance: string, signal: string) {
     return (
       this.resolvePortConnections(instance)?.links.filter(
-        ({ from, to }) =>
-          (from?.instance === instance && from.signal === signal) ||
-          (to.instance === instance && to.signal === signal),
+        (link) =>
+          (link.to.instance === instance && link.to.signal === signal) ||
+          portSources(link).some(
+            (endpoint) =>
+              endpoint.instance === instance && endpoint.signal === signal,
+          ),
       ) ?? []
     );
   }

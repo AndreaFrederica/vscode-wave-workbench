@@ -235,7 +235,6 @@ export async function vcsExecutionStatements(
     const targetIndexedPart = dynamic?.[2]
       ? assignment.targetIndexedPart
       : undefined;
-    if (kind === "blocking" && dynamic?.[2]) continue;
     if (
       dynamic?.[2] &&
       (!targetIndexedPart ||
@@ -275,9 +274,7 @@ export async function vcsExecutionStatements(
           (expression !== undefined && expression !== null),
       );
     const guardNames =
-      (kind === "blocking" || (kind === "nonblocking" && !dynamic)) &&
-      canCaptureGuards &&
-      (captureGuards || captureGuardEntry)
+      canCaptureGuards && (captureGuards || captureGuardEntry)
         ? [
             ...new Set(
               assignment.inputs.flatMap(({ kind, signal, hierarchical }) => {
@@ -303,12 +300,7 @@ export async function vcsExecutionStatements(
       caseBody?: { first: Position; last: Position; defaultBranch: boolean };
       wait?: true | "standalone";
     }[] = [];
-    if (
-      kind === "nonblocking" &&
-      captureGuardEntry &&
-      guardNames.length &&
-      guardNames.length <= 8
-    ) {
+    if (captureGuardEntry && guardNames.length && guardNames.length <= 8) {
       for (const guard of assignment.guards ?? []) {
         const { start: first, end: last } = guard.location.range;
         if (!last || guard.location.uri !== location.uri) continue;
@@ -377,7 +369,9 @@ export async function vcsExecutionStatements(
           standalone: true,
         })),
       ];
-      for (const { condition, standalone } of waits) {
+      for (const { condition, standalone } of kind === "nonblocking"
+        ? waits
+        : []) {
         if (condition.uri !== location.uri || !condition.range.end) continue;
         const from = offsetAt(condition.range.start);
         const to = offsetAt(condition.range.end);
@@ -419,8 +413,9 @@ export async function vcsExecutionStatements(
           wait: standalone ? "standalone" : true,
         });
       }
-      for (const { selector, body, defaultBranch } of assignment.caseEntries ??
-        []) {
+      for (const { selector, body, defaultBranch } of (kind === "nonblocking"
+        ? assignment.caseEntries
+        : undefined) ?? []) {
         if (
           selector.uri !== location.uri ||
           body.uri !== location.uri ||
@@ -578,6 +573,7 @@ type EventKind =
   | "assignment-unobserved"
   | "assignment-no-target"
   | "assignment-superseded"
+  | "external-observation"
   | "signal-value-changed";
 
 type WriteKind = "blocking" | "nonblocking" | "subroutineCall";
@@ -586,6 +582,7 @@ type ExternalStep = {
   statementId: string;
   operation: string;
   value?: string;
+  captured?: { tick: string; ordinal: number };
 };
 
 export interface ExecutionEvent {
@@ -597,6 +594,7 @@ export interface ExecutionEvent {
   statementSite?: { file: string; line: number };
   kind: EventKind;
   signal?: string;
+  interfaceAccesses?: (ExecutionSignal & { direction: "read" | "write" })[];
   targetRange?: [number, number];
   targetPackedRange?: [number, number];
   attemptedTargetRange?: [number, number];
@@ -679,6 +677,7 @@ interface SourceStatement {
   line: number;
   column: number;
   sha256?: string;
+  macro?: { name: string; definition: Omit<SourceStatement, "macro"> };
 }
 
 type SourceIdentity = "matched" | "changed" | "missing" | "unverified";
@@ -879,6 +878,7 @@ const eventKinds = new Set<EventKind>([
   "assignment-unobserved",
   "assignment-no-target",
   "assignment-superseded",
+  "external-observation",
   "signal-value-changed",
 ]);
 
@@ -970,7 +970,20 @@ function isHeader(value: unknown): value is ExecutionHeader {
         source.column > 0 &&
         (source.sha256 === undefined ||
           (typeof source.sha256 === "string" &&
-            hashPattern.test(source.sha256))),
+            hashPattern.test(source.sha256))) &&
+        (source.macro === undefined ||
+          (!!source.macro &&
+            typeof source.macro.name === "string" &&
+            /^[A-Za-z_$][\w$]*$/.test(source.macro.name) &&
+            !!source.macro.definition &&
+            source.macro.definition.file === source.file &&
+            source.sha256 !== undefined &&
+            source.macro.definition.sha256 === source.sha256 &&
+            Number.isSafeInteger(source.macro.definition.line) &&
+            source.macro.definition.line > 0 &&
+            source.macro.definition.line < source.line &&
+            Number.isSafeInteger(source.macro.definition.column) &&
+            source.macro.definition.column > 0)),
     ) &&
     (header.coverage === undefined ||
       (Array.isArray(header.coverage)
@@ -997,7 +1010,10 @@ function finishesEvaluation(event: ExecutionEvent) {
   );
 }
 
-function isExternalStep(value: unknown): value is ExternalStep {
+function isExternalStep(
+  value: unknown,
+  evaluationTick: string,
+): value is ExternalStep {
   const step = value as ExternalStep;
   return (
     !!step &&
@@ -1005,6 +1021,13 @@ function isExternalStep(value: unknown): value is ExternalStep {
     /^[\w.-]{1,128}$/.test(step.statementId) &&
     typeof step.operation === "string" &&
     /^[ -~]{1,128}$/.test(step.operation) &&
+    (step.captured === undefined ||
+      (!!step.captured &&
+        typeof step.captured.tick === "string" &&
+        tickPattern.test(step.captured.tick) &&
+        BigInt(step.captured.tick) <= BigInt(evaluationTick) &&
+        Number.isSafeInteger(step.captured.ordinal) &&
+        step.captured.ordinal >= 0)) &&
     (step.value === undefined ||
       (typeof step.value === "string" && /^[01xz]{1,4096}$/i.test(step.value)))
   );
@@ -1026,6 +1049,30 @@ export function isExecutionEvent(value: unknown): value is ExecutionEvent {
     )
   )
     return false;
+  if (event.interfaceAccesses !== undefined) {
+    const accesses = event.interfaceAccesses;
+    if (
+      event.kind !== "assignment-entered" ||
+      !Array.isArray(accesses) ||
+      !accesses.length ||
+      accesses.length > 2 ||
+      !accesses.every(
+        (access) =>
+          !!access &&
+          (access.direction === "read" || access.direction === "write") &&
+          typeof access.instance === "string" &&
+          !!access.instance &&
+          !access.instance.includes("\0") &&
+          typeof access.signal === "string" &&
+          !!access.signal &&
+          !access.signal.includes("\0") &&
+          access.instance.length + access.signal.length < 4096,
+      ) ||
+      new Set(accesses.map(({ direction }) => direction)).size !==
+        accesses.length
+    )
+      return false;
+  }
   if (event.targetRange !== undefined) {
     if (
       (!finishesEvaluation(event) && event.kind !== "assignment-evaluated") ||
@@ -1155,6 +1202,22 @@ export function isExecutionEvent(value: unknown): value is ExecutionEvent {
     );
   }
   if (event.statementSite !== undefined) return false;
+  if (event.kind === "external-observation")
+    return (
+      typeof event.signal === "string" &&
+      !!event.signal &&
+      event.processId === undefined &&
+      event.statementId === undefined &&
+      event.value === undefined &&
+      event.writeKind === undefined &&
+      event.timing === undefined &&
+      event.evaluationOrdinal === undefined &&
+      event.replacementOrdinal === undefined &&
+      Array.isArray(event.externalSteps) &&
+      event.externalSteps.length === 1 &&
+      isExternalStep(event.externalSteps[0], event.tick) &&
+      event.externalSteps[0].captured !== undefined
+    );
   if (event.kind === "signal-value-changed")
     return (
       typeof event.signal === "string" &&
@@ -1185,7 +1248,9 @@ export function isExecutionEvent(value: unknown): value is ExecutionEvent {
         Array.isArray(event.externalSteps) &&
         event.externalSteps.length > 0 &&
         event.externalSteps.length <= 64 &&
-        event.externalSteps.every(isExternalStep))) &&
+        event.externalSteps.every((step) =>
+          isExternalStep(step, event.tick),
+        ))) &&
     (event.writeKind === undefined ||
       event.writeKind === "blocking" ||
       event.writeKind === "nonblocking" ||
@@ -2173,12 +2238,20 @@ export async function readExecutionEvidenceBatch(
           ? undefined
           : byInstance.get(data.instance)
         : bySignal.get(data.instance)?.get(data.signal);
+    const interfaceSignals = data.interfaceAccesses?.flatMap(
+      ({ instance, signal }) => bySignal.get(instance)?.get(signal) ?? [],
+    );
     // Keep the root stream and the outcomes or callbacks for reachable signals.
-    const relevant = matching?.filter(
+    const relevant = (
+      interfaceSignals?.length
+        ? [...new Set([...(matching ?? []), ...interfaceSignals])]
+        : matching
+    )?.filter(
       (signal) =>
         signal === signals[0] ||
         data.kind === "signal-value-changed" ||
         data.kind === "assignment-entered" ||
+        data.kind === "external-observation" ||
         (signal.coverage &&
           (data.signal !== undefined ||
             signal.coverage.writers.includes(data.processId))),
@@ -2234,9 +2307,19 @@ export async function readExecutionEvidenceBatch(
       } else if (finishesEvaluation(data)) {
         const evaluation = evaluations.get(data.evaluationOrdinal!);
         const expectedRange = data.attemptedTargetRange ?? data.targetRange;
-        const expectedValue = data.attemptedTargetRange
-          ? evaluation?.value?.slice(-data.value!.length)
-          : evaluation?.value;
+        const clipOffset =
+          data.attemptedTargetRange && data.writeKind === "blocking"
+            ? Math.abs(data.attemptedTargetRange[0] - data.targetRange![0])
+            : undefined;
+        const expectedValue =
+          clipOffset !== undefined
+            ? evaluation?.value?.slice(
+                clipOffset,
+                clipOffset + data.value!.length,
+              )
+            : data.attemptedTargetRange
+              ? evaluation?.value?.slice(-data.value!.length)
+              : evaluation?.value;
         if (data.kind === "assignment-superseded") {
           const replacement = evaluations.get(data.replacementOrdinal!);
           if (
@@ -2491,6 +2574,20 @@ export function executionEventLines(events: readonly ResolvedEvent[]) {
           : site
             ? " · " + clean(site.file) + " L" + site.line
             : ""),
+      ...(event.source?.macro
+        ? [
+            "  - Macro " +
+              clean(event.source.macro.name) +
+              " · Definition L" +
+              event.source.macro.definition.line +
+              " C" +
+              event.source.macro.definition.column,
+          ]
+        : []),
+      ...(event.interfaceAccesses ?? []).map(
+        ({ direction, instance, signal }) =>
+          "  - Interface " + direction + " · " + clean(instance + "." + signal),
+      ),
       ...Object.entries(event.operandValues ?? {}).map(
         ([name, bits]) =>
           "  - Captured operand · " + clean(name) + " = " + bits,
@@ -2516,7 +2613,11 @@ export function executionEventLines(events: readonly ResolvedEvent[]) {
 
 export function externalStepText(step: ExternalStep) {
   return (
-    clean(step.operation) + (step.value === undefined ? "" : " = " + step.value)
+    clean(step.operation) +
+    (step.value === undefined ? "" : " = " + step.value) +
+    (step.captured
+      ? " · Captured at " + step.captured.tick + " · #" + step.captured.ordinal
+      : "")
   );
 }
 
@@ -4627,8 +4728,7 @@ export function executionMermaidPages(evidence: {
       const identity = event.resolvedExternalSteps?.[index]?.source.identity;
       graph.node(
         stepNode,
-        step.operation +
-          (step.value === undefined ? "" : " = " + step.value) +
+        externalStepText(step) +
           (identity === undefined ? "" : " · Source " + identity),
       );
       if (previousStep)
@@ -4636,6 +4736,7 @@ export function executionMermaidPages(evidence: {
       previousStep = stepNode;
     }
     if (previousStep) graph.edge(previousStep, node, "external execution");
+    if (event.kind === "external-observation") continue;
     const process = JSON.stringify([
       event.instance,
       event.processId,

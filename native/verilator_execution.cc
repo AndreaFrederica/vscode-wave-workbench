@@ -7,8 +7,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <inttypes.h>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -31,7 +34,16 @@ const bool live = std::getenv("WAVE_WORKBENCH_LIVE") != nullptr;
 std::unordered_map<const Probe *, std::uint64_t> pending_blocking;
 struct ExternalStep {
   std::string statement, operation, value;
+  std::optional<WaveWorkbenchExternalStamp> captured;
 };
+std::mutex external_clock_mutex;
+std::uint64_t external_tick = 0;
+std::uint64_t external_ordinal = 0;
+struct ExternalObservation {
+  std::string instance, signal;
+  ExternalStep step;
+};
+std::vector<ExternalObservation> external_observations;
 struct EvaluationFrame {
   const Probe *probe;
   std::vector<ExternalStep> steps;
@@ -87,6 +99,21 @@ void close_event() {
   std::puts(live ? "}}" : "}");
 }
 
+void write_external_step(const ExternalStep &step) {
+  std::printf("{\"statementId\":\"%s\",\"operation\":\"", step.statement.c_str());
+  for (const char character : step.operation) {
+    if (character == '"' || character == '\\') std::putchar('\\');
+    std::putchar(character);
+  }
+  std::putchar('"');
+  if (!step.value.empty())
+    std::printf(",\"value\":\"%s\"", step.value.c_str());
+  if (step.captured)
+    std::printf(",\"captured\":{\"tick\":\"%" PRIu64 "\",\"ordinal\":%" PRIu64 "}",
+                step.captured->tick, step.captured->ordinal);
+  std::putchar('}');
+}
+
 void emit(const Probe *probe, const char *value, const std::uint64_t *evaluation,
           const char *timing = nullptr,
           const std::vector<ExternalStep> *steps = nullptr) {
@@ -103,15 +130,7 @@ void emit(const Probe *probe, const char *value, const std::uint64_t *evaluation
     for (const auto &step : *steps) {
       if (!first) std::putchar(',');
       first = false;
-      std::printf("{\"statementId\":\"%s\",\"operation\":\"", step.statement.c_str());
-      for (const char character : step.operation) {
-        if (character == '"' || character == '\\') std::putchar('\\');
-        std::putchar(character);
-      }
-      std::putchar('"');
-      if (!step.value.empty())
-        std::printf(",\"value\":\"%s\"", step.value.c_str());
-      std::putchar('}');
+      write_external_step(step);
     }
     std::putchar(']');
   }
@@ -124,6 +143,26 @@ void wave_workbench_begin_slot(std::uint64_t tick) {
     std::abort();
   if (tick != current_tick) pending_nba.clear();
   current_tick = tick;
+  std::vector<ExternalObservation> pending;
+  {
+    const std::lock_guard<std::mutex> lock(external_clock_mutex);
+    external_tick = tick;
+    pending.swap(external_observations);
+  }
+  for (const auto &entry : pending) {
+    if (live) std::fputs("{\"execution\":", stdout);
+    std::printf("{\"tick\":\"%" PRIu64 "\",\"ordinal\":%" PRIu64
+                ",\"kind\":\"external-observation\",\"instance\":\"%s\",\"signal\":\"%s\",\"externalSteps\":[",
+                tick, next_ordinal++, entry.instance.c_str(), entry.signal.c_str());
+    write_external_step(entry.step);
+    std::putchar(']');
+    close_event();
+  }
+}
+
+WaveWorkbenchExternalStamp wave_workbench_stamp_external() {
+  const std::lock_guard<std::mutex> lock(external_clock_mutex);
+  return {external_tick, external_ordinal++};
 }
 
 extern "C" void wave_workbench_begin_evaluation(const char *site) {
@@ -135,22 +174,56 @@ extern "C" void wave_workbench_begin_evaluation(const char *site) {
   }
 }
 
-void wave_workbench_external_step(const char *statement, const char *operation,
-                                  const char *value) {
-  if (evaluations.empty()) return;
+static ExternalStep external_step(const char *statement, const char *operation,
+                                  const char *value,
+                                  std::optional<WaveWorkbenchExternalStamp> captured) {
   constexpr const char *id_characters =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-";
-  auto &steps = evaluations.back().steps;
   if (!statement || !operation || !*statement || !*operation ||
       std::strlen(statement) > 128 || statement[std::strspn(statement, id_characters)] ||
       std::strlen(operation) > 128 ||
       (value && (!*value || std::strlen(value) > 4096 ||
-                 value[std::strspn(value, "01xXzZ")])) ||
-      steps.size() >= 64)
+                 value[std::strspn(value, "01xXzZ")])))
     std::abort();
   for (const char *character = operation; *character; ++character)
     if (*character < 32 || *character > 126) std::abort();
-  steps.push_back({statement, operation, value ? value : ""});
+  return {statement, operation, value ? value : "", captured};
+}
+
+void wave_workbench_observe_external(const char *instance, const char *signal,
+                                     const char *statement, const char *operation,
+                                     const char *value) {
+  constexpr const char *path_characters =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_$.[]-";
+  if (!instance || !signal || !*instance || !*signal ||
+      std::strlen(instance) + std::strlen(signal) > 4096 ||
+      instance[std::strspn(instance, path_characters)] ||
+      signal[std::strspn(signal, path_characters)])
+    std::abort();
+  auto step = external_step(statement, operation, value, std::nullopt);
+  const std::lock_guard<std::mutex> lock(external_clock_mutex);
+  if (external_observations.size() >= 4096) std::abort();
+  step.captured = WaveWorkbenchExternalStamp{external_tick, external_ordinal++};
+  external_observations.push_back({instance, signal, std::move(step)});
+}
+
+static void record_external_step(const char *statement, const char *operation,
+                                 const char *value,
+                                 std::optional<WaveWorkbenchExternalStamp> captured) {
+  if (evaluations.empty()) return;
+  auto &steps = evaluations.back().steps;
+  if (steps.size() >= 64 || (captured && captured->tick > current_tick)) std::abort();
+  steps.push_back(external_step(statement, operation, value, captured));
+}
+
+void wave_workbench_external_step(const char *statement, const char *operation,
+                                  const char *value) {
+  record_external_step(statement, operation, value, std::nullopt);
+}
+
+void wave_workbench_external_step(const char *statement, const char *operation,
+                                  const char *value, WaveWorkbenchExternalStamp stamp) {
+  record_external_step(statement, operation, value, stamp);
 }
 
 extern "C" void wave_workbench_process(const char *site) {

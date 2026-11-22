@@ -4,7 +4,7 @@
 
 ## 安装两份扩展
 
-在 Wave Workbench 工作树执行 `npm ci` 和 `npm run package:native`。驱动与负载追踪、按仿真工程追踪和 VCS KDB 模块内的 RTL 逻辑显示需要项目 fork 提供的 VIDE 接口。此版本已验证的 VIDE 提交是 `cfb0a7c0`，位于 `wave-workbench-trace` 分支。 [Wave Workbench 构建要求](README.md#安装) · [修改版 VIDE 提交](https://github.com/AndreaFrederica/vide/commit/cfb0a7c04e77a93e5f3f2396fc68f91bcc1b97ad)
+在 Wave Workbench 工作树执行 `npm ci` 和 `npm run package:native`。驱动与负载追踪、按仿真工程追踪和 VCS KDB 模块内的 RTL 逻辑显示需要项目 fork 提供的 VIDE 接口。下面的命令固定已验证的公开基线 `cfb0a7c0`。本地核查另验证了该基线之后的层次引用和虚接口诊断改动。 [Wave Workbench 构建要求](README.md#安装) · [修改版 VIDE 提交](https://github.com/AndreaFrederica/vide/commit/cfb0a7c04e77a93e5f3f2396fc68f91bcc1b97ad) · [当前核查和平台范围](RTL_TRACE_AUDIT.md)
 
 ```sh
 git clone --recurse-submodules --branch wave-workbench-trace https://github.com/AndreaFrederica/vide.git
@@ -83,6 +83,8 @@ jq -er '.report' context.json > trace-report.md
 MCP 结果含 `continuationCursor` 时，将它交给 `wave_trace_resume` 可查询下一批上游，并把新证据接到同一张图上。后续使用当前 MCP 会话中最新响应的游标。 [跨请求续查](COMMANDS.md#rtl-追踪与波形证据)
 
 MCP 可从单个信号设置 `followAllContinuations: true` 自动追踪可解析路径。静态查询用 `wave_trace_drivers` 或 `wave_trace_loads`，离线时间因果用 `wave_trace_context`，在线仿真用 `wave_live_trace`。达到单次预算时可用 `wave_trace_resume` 继续。分页图的 `frontier`、`queryFailures` 和 `gaps` 分别列出剩余入口、失败查询与证据缺口。
+
+已知上游的波形变化时，可在 `wave_trace_context` 中用 `continueFrom` 指定 `signal`、`tick` 以及可选的 `changeOrder` 和 `historyStart`。追踪会核对根图包含该变化，再用入口自己的历史窗口生成并接合第二段。此参数独立使用。
 
 合并时间图的节点保留可用的 `declaration` 和 `waveformSignal`。从 Trace Explorer 或本次追踪原理图选中续查节点，可跳到其 RTL 声明或加入对应的波形。只有已绑定到参考波形的节点提供加入波形操作。
 

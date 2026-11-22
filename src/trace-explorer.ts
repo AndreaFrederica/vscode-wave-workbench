@@ -8,6 +8,7 @@ import {
   temporalGapLabel,
   temporalGapUseLabel,
   guardEntryLabels,
+  recordedBranchEdgeLabel,
   staticTraceCoverage,
   wordWriteLabel,
   type mergeTemporalContinuationGraph,
@@ -1309,21 +1310,23 @@ export function createTraceExplorer(
             : undefined,
         edge?.arrayIndexEvidence === "recordedTarget"
           ? "Matches recorded array index"
-          : edge?.controlSampleEvidence === "recordedWaitResume"
-            ? "Matches recorded wait resume"
-            : edge?.controlSampleEvidence === "recordedBranchEntry"
-              ? "Matches recorded branch entry"
-              : edge?.controlSampleEvidence === "recordedEvaluation"
-                ? "Matches recorded guard operand"
-                : edge?.rhsSampleEvidence === "recordedEvaluation"
-                  ? "Matches recorded RHS"
-                  : edge?.rhsSampleEvidence === "waveformCombination"
-                    ? "RHS matches a waveform sample combination"
-                    : edge?.rhsSample === "matches"
-                      ? "RHS compatible"
-                      : edge?.rhsSample === "differs"
-                        ? "RHS differs"
-                        : undefined,
+          : edge?.packedIndexEvidence === "recordedTarget"
+            ? "Matches recorded packed target index"
+            : edge?.controlSampleEvidence === "recordedWaitResume"
+              ? "Matches recorded wait resume"
+              : edge?.controlSampleEvidence === "recordedBranchEntry"
+                ? recordedBranchEdgeLabel(edge)
+                : edge?.controlSampleEvidence === "recordedEvaluation"
+                  ? "Matches recorded guard operand"
+                  : edge?.rhsSampleEvidence === "recordedEvaluation"
+                    ? "Matches recorded RHS"
+                    : edge?.rhsSampleEvidence === "waveformCombination"
+                      ? "RHS matches a waveform sample combination"
+                      : edge?.rhsSample === "matches"
+                        ? "RHS compatible"
+                        : edge?.rhsSample === "differs"
+                          ? "RHS differs"
+                          : undefined,
         edge?.callbackOrder
           ? edge.callbackOrder === "sourceBeforeTarget"
             ? "Source callback before target"

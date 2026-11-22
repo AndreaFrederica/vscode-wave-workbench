@@ -28,6 +28,12 @@ export type TracePortQuery = (
   site?: DesignHierarchicalAccess | DesignInterfaceUser,
 ) => Promise<VideTrace | undefined>;
 
+export type TraceModuleQuery = (
+  file: string,
+  line: number,
+  module: string,
+) => Promise<VideTrace | undefined>;
+
 export async function seedModportAlias(
   anchor: VideTrace,
   alias: Port,
@@ -338,6 +344,7 @@ export async function expandInstanceTrace(
   query: TracePortQuery,
   designMatches: boolean | "unverifiedVcsParameterPath" = true,
   rootElement?: number,
+  queryModule?: TraceModuleQuery,
 ) {
   if (designMatches !== true)
     return {
@@ -391,6 +398,9 @@ export async function expandInstanceTrace(
   const visited = new Map<number, number>();
   const assignments = new Set<string>();
   const interfaceSites = new Set<string>();
+  const kdbSites = new Set<string>();
+  const kdbModules = new Map<string, Promise<VideTrace | undefined>>();
+  const sourceModules = new Map<string, Promise<VideTrace | undefined>>();
   const siteKey = (signal: number, location: TraceLocation, write: boolean) =>
     JSON.stringify([signal, location.uri, location.range.start, write]);
   const pending: {
@@ -439,6 +449,8 @@ export async function expandInstanceTrace(
       assignment.instance,
       assignment.targets,
       assignment.targetRange,
+      assignment.targetIndex,
+      assignment.targetIndexedPart,
       assignment.hierarchicalTargets,
       assignment.inputs,
       assignment.port,
@@ -469,6 +481,11 @@ export async function expandInstanceTrace(
       if (signal.instanceParameterValue)
         result.signals[existing].instanceParameterValue =
           signal.instanceParameterValue;
+      if (signal.hierarchicalModules)
+        result.signals[existing].hierarchicalModules =
+          signal.hierarchicalModules;
+      if (signal.hasMoreHierarchicalModules)
+        result.signals[existing].hasMoreHierarchicalModules = true;
       return existing;
     }
     if (result.signals.length >= discoverySignalLimit) {
@@ -518,7 +535,7 @@ export async function expandInstanceTrace(
           design,
           sourceUri,
           undefined,
-          await interfaceBindings(selected, instance, design, sourceUri),
+          await operandBindings(selected, instance, design, sourceUri),
         );
     const scoped = bound
       ? operands
@@ -683,9 +700,225 @@ export async function expandInstanceTrace(
       }
       if ((visited.get(id) ?? -1) >= remainingDepth) continue;
       visited.set(id, remainingDepth);
-      const { name, declaration } = result.signals[id];
+      const {
+        name,
+        declaration,
+        hierarchicalModules,
+        hasMoreHierarchicalModules,
+      } = result.signals[id];
       const here = { instance: scoped ?? instance, signal: name };
       if (!declaration) continue;
+      if (design.kind === "kdb" && queryModule) {
+        const owners = new Set<string>();
+        if (hierarchicalModules) {
+          for (const module of hierarchicalModules) {
+            const instances = await design.instances(module.name);
+            for (const location of instances) {
+              if (
+                location.definitionFile &&
+                sourceUri(location.definitionFile) === module.declaration.uri &&
+                location.definitionLine ===
+                  module.declaration.range.start.line + 1
+              )
+                owners.add(location.fullname);
+              if (owners.size >= discoverySignalLimit) break;
+            }
+            if (owners.size >= discoverySignalLimit) break;
+          }
+          if (hasMoreHierarchicalModules || owners.size >= discoverySignalLimit)
+            result.frontier.push({ signal: id, reason: "signals" });
+        }
+        if (!hierarchicalModules || signal !== trace.root) {
+          const scope = here.instance.split(".");
+          while (scope.length > 1) {
+            scope.pop();
+            owners.add(scope.join("."));
+          }
+        }
+        for (const owner of owners) {
+          let moduleTrace = kdbModules.get(owner);
+          if (!moduleTrace) {
+            moduleTrace = (async () => {
+              const location = await design
+                .resolve(owner)
+                .catch(() => undefined);
+              if (
+                location?.fullname !== owner ||
+                location.kind !== "npiModule" ||
+                !location.module ||
+                !location.definitionFile ||
+                location.definitionLine < 1
+              )
+                return;
+              const source = JSON.stringify([
+                location.definitionFile,
+                location.definitionLine,
+                location.module,
+              ]);
+              let request = sourceModules.get(source);
+              if (!request) {
+                request = queryModule(
+                  location.definitionFile,
+                  location.definitionLine,
+                  location.module,
+                );
+                sourceModules.set(source, request);
+              }
+              const trace = await request;
+              if (!trace) return;
+              return bindModuleGenerateBranches(
+                trace,
+                owner,
+                design,
+                sourceUri,
+              );
+            })();
+            kdbModules.set(owner, moduleTrace);
+          }
+          const graph = await moduleTrace;
+          if (!graph) continue;
+          if (graph.revision !== initial.revision)
+            throw Error("RTL changed during the instance trace.");
+          const write = direction === "drivers";
+          if (graph.diagnostics.includes("Module assignment limit reached"))
+            result.frontier.push({ signal: id, reason: "assignments" });
+          const root = graph.signals.find(
+            (signal) =>
+              signal.name === name &&
+              JSON.stringify(signal.declaration) ===
+                JSON.stringify(declaration),
+          );
+          if (!root) continue;
+          const unresolvedSites = new Set(
+            result.frontier.flatMap(({ signal, reason, location }) =>
+              signal === id &&
+              location &&
+              reason ===
+                (write
+                  ? "unresolvedHierarchicalWrite"
+                  : "unresolvedHierarchicalLoad")
+                ? [siteKey(signal, location, write)]
+                : [],
+            ),
+          );
+          const otherSites = new Set<string>();
+          const matchingSites = new Set<string>();
+          const matches: VideTrace["assignments"] = [];
+          for (const assignment of graph.assignments) {
+            let connected = false;
+            const operands = write
+              ? (assignment.hierarchicalTargets ?? [])
+              : assignment.inputs;
+            for (const operand of operands) {
+              if (operand.signal !== root.id || !operand.hierarchicalPath)
+                continue;
+              const member = await resolveKdbOperand(
+                design,
+                assignment.instance ?? owner,
+                operand,
+                name,
+                graph,
+                assignment,
+                sourceUri,
+              );
+              const site = siteKey(id, operand.location, write);
+              if (
+                !member?.file ||
+                member.line !== declaration.range.start.line + 1 ||
+                sourceUri(member.file) !== declaration.uri
+              ) {
+                matchingSites.add(site);
+                continue;
+              }
+              if (member.instance === here.instance) {
+                connected = true;
+                matchingSites.add(site);
+              } else if (unresolvedSites.has(site)) {
+                otherSites.add(site);
+              }
+            }
+            if (connected) matches.push(assignment);
+          }
+          for (const site of otherSites)
+            if (!matchingSites.has(site)) kdbSites.add(site);
+          if (!matches.length) continue;
+          if (remainingDepth <= 0 || pending.length >= signalLimit) {
+            result.frontier.push({
+              signal: id,
+              reason: remainingDepth <= 0 ? "depth" : "signals",
+            });
+            continue;
+          }
+          const selected = { ...graph, root: root.id, assignments: matches };
+          const relation = bindHierarchicalOperands(
+            selected,
+            owner,
+            design,
+            sourceUri,
+            here,
+            await operandBindings(selected, owner, design, sourceUri),
+          );
+          const boundRoot = relation.signals.find(
+            ({ id }) => id === relation.root,
+          );
+          const connected = relation.assignments.filter((assignment) =>
+            write
+              ? assignment.targets.includes(relation.root)
+              : assignment.inputs.some(
+                  ({ signal }) => signal === relation.root,
+                ),
+          );
+          if (boundRoot?.instance !== here.instance || !connected.length) {
+            result.frontier.push({
+              signal: id,
+              reason: write
+                ? "unresolvedHierarchicalWrite"
+                : "unresolvedHierarchicalLoad",
+            });
+            continue;
+          }
+          for (const assignment of connected)
+            for (const operand of write
+              ? (assignment.hierarchicalTargets ?? [])
+              : assignment.inputs)
+              if (operand.signal === boundRoot.id)
+                kdbSites.add(siteKey(id, operand.location, write));
+          pending.push({
+            trace: { ...relation, assignments: connected },
+            instance: owner,
+            depth: remainingDepth,
+            bound: true,
+          });
+          for (const assignment of connected) {
+            const nextDepth = remainingDepth - 1;
+            const endpoints = write
+              ? assignment.inputs.map(({ signal }) => signal)
+              : assignment.targets;
+            for (const endpoint of endpoints) {
+              const signal = relation.signals.find(({ id }) => id === endpoint);
+              if (!signal) continue;
+              const other = {
+                instance: signal.instance ?? assignment.instance ?? owner,
+                signal: signal.name,
+              };
+              const identity = key(other);
+              if ((queried.get(identity) ?? -1) >= nextDepth) continue;
+              if (pending.length >= signalLimit) {
+                result.frontier.push({ signal: id, reason: "signals" });
+                break;
+              }
+              queried.set(identity, nextDepth);
+              const next = await query(other, nextDepth);
+              if (next)
+                pending.push({
+                  trace: next,
+                  instance: other.instance,
+                  depth: nextDepth,
+                });
+            }
+          }
+        }
+      }
       if (
         design.interfaceUsers &&
         (await design.resolve(here.instance).catch(() => undefined))?.kind ===
@@ -740,7 +973,7 @@ export async function expandInstanceTrace(
             design,
             sourceUri,
             here,
-            await interfaceBindings(selected, user.instance, design, sourceUri),
+            await operandBindings(selected, user.instance, design, sourceUri),
           );
           const root = relation.signals.find(({ id }) => id === relation.root);
           if (
@@ -1017,6 +1250,17 @@ export async function expandInstanceTrace(
       .filter((id) => id !== undefined);
     const from = link.from && ports.get(key(link.from));
     const index = link.selectIndex && ports.get(key(link.selectIndex));
+    const targetIndex =
+      link.targetSelectIndex &&
+      remapValue(
+        link.targetSelectIndex.value,
+        new Map(
+          link.targetSelectIndex.operands.flatMap((operand, i) => {
+            const id = ports.get(key(operand));
+            return id === undefined ? [] : [[i, id] as const];
+          }),
+        ),
+      );
     const indexedPart = link.selectIndex?.part;
     if (inputs.some((id) => id === undefined))
       result.frontier.push({
@@ -1050,7 +1294,10 @@ export async function expandInstanceTrace(
           : { op: "bitSelect", args: [from, indexValue] };
       } else if (sourceRange)
         value = { op: "select", args: [from, ...sourceRange] };
-      else if (!link.selectIndex && (targetRange || link.conversion))
+      else if (
+        !link.selectIndex &&
+        (targetRange || link.conversion || targetIndex !== undefined)
+      )
         value = { op: "signal", args: from };
     }
     if (value && link.conversion?.twoState)
@@ -1069,6 +1316,8 @@ export async function expandInstanceTrace(
         hasUnresolvedOperands: inputs.some((id) => id === undefined),
         value: link.from?.field || link.to.field ? undefined : value,
         targetRange,
+        targetIndex,
+        targetIndexedPart: link.targetSelectIndex?.part,
         port: {
           fromField: link.from?.field,
           toField: link.to.field,
@@ -1091,7 +1340,8 @@ export async function expandInstanceTrace(
     const { signal, location, reason, interfaceArrayAccess } = item;
     const write = reason === "unresolvedHierarchicalWrite";
     if (location && (write || reason === "unresolvedHierarchicalLoad")) {
-      if (interfaceSites.has(siteKey(signal, location, write))) continue;
+      const site = siteKey(signal, location, write);
+      if (interfaceSites.has(site) || kdbSites.has(site)) continue;
       const target = result.signals[signal];
       const interfaceMember = design.interfaceMember?.bind(design);
       if (
@@ -1129,6 +1379,10 @@ export async function expandInstanceTrace(
     frontier.push(item);
   }
   result.frontier = frontier;
+  for (const signal of result.signals) {
+    delete signal.hierarchicalModules;
+    delete signal.hasMoreHierarchicalModules;
+  }
   return limitInstanceTrace(result, direction, signalLimit, assignmentLimit);
 }
 
@@ -1505,6 +1759,9 @@ async function bindGenerateAssignments(
         inputs: assignment.inputs.map((input) => ({
           ...input,
           signal: ids.get(input.signal)!,
+          hierarchicalIndices: input.hierarchicalIndices?.map(
+            ([position, index]) => [position, remapValue(index, ids)],
+          ),
           interfaceIndex:
             input.interfaceIndex && remapValue(input.interfaceIndex, ids),
         })),
@@ -1541,6 +1798,9 @@ async function bindGenerateAssignments(
                   {
                     ...target,
                     signal,
+                    hierarchicalIndices: target.hierarchicalIndices?.map(
+                      ([position, index]) => [position, remapValue(index, ids)],
+                    ),
                     interfaceIndex:
                       target.interfaceIndex &&
                       remapValue(target.interfaceIndex, ids),
@@ -1708,26 +1968,7 @@ async function resolveInterfacePaths(
   async function lookupParameter(id: number, owner: string) {
     const signal = declarations.get(id);
     if (!signal?.declaration) return;
-    for (let scope = signal.instance ?? owner; scope; ) {
-      const record = await design
-        .resolve(scope + "." + signal.name)
-        .catch(() => undefined);
-      if (record) {
-        if (
-          record.kind === "npiParameter" &&
-          record.instance === scope &&
-          record.parameterValue &&
-          sourceUri(record.file) === signal.declaration.uri &&
-          record.line === signal.declaration.range.start.line + 1
-        )
-          return record.parameterValue;
-        return;
-      }
-      if (signal.instance) return;
-      const node = await design.resolve(scope).catch(() => undefined);
-      if (node?.kind !== "npiGenScope") return;
-      scope = await design.parent(scope).catch(() => "");
-    }
+    return resolveInstanceParameter(design, sourceUri, owner, signal);
   }
 
   function parameter(id: number, owner: string) {
@@ -1927,13 +2168,18 @@ type OperandBinding = Pick<
   shape?: { width: number; twoState: boolean };
 };
 
-async function interfaceBindings(
+async function operandBindings(
   trace: VideTrace,
   owner: string,
   design: DesignSession,
   sourceUri: (file: string) => string,
 ): Promise<OperandBinding[]> {
-  if (!design.interfaceMember && !design.interfaceMembers) return [];
+  if (
+    design.kind !== "kdb" &&
+    !design.interfaceMember &&
+    !design.interfaceMembers
+  )
+    return [];
   const declarations = new Map(
     trace.signals.map((signal) => [signal.id, signal]),
   );
@@ -1944,24 +2190,39 @@ async function interfaceBindings(
       [true, assignment.hierarchicalTargets ?? []],
     ] as const) {
       for (const operand of operands) {
-        if (!operand.interfacePath || operand.interfaceIndex) continue;
         const signal = declarations.get(operand.signal);
+        if (
+          !signal?.declaration ||
+          operand.interfaceIndex ||
+          (!operand.interfacePath && !operand.hierarchicalPath)
+        )
+          continue;
         const scope = assignment.instance ?? owner;
         const part = operand.interfaceComponent;
         const members =
           part &&
+          operand.interfacePath &&
           (await design
             .interfaceMembers?.(scope, operand.interfacePath)
             .catch(() => undefined));
-        const member = part
-          ? members?.length === part[1]
-            ? members[part[0]]
-            : undefined
-          : await design
-              .interfaceMember?.(scope, operand.interfacePath)
-              .catch(() => undefined);
+        const member = operand.interfacePath
+          ? part
+            ? members && members.length === part[1]
+              ? members[part[0]]
+              : undefined
+            : await design
+                .interfaceMember?.(scope, operand.interfacePath)
+                .catch(() => undefined)
+          : await resolveKdbOperand(
+              design,
+              scope,
+              operand,
+              signal.name,
+              trace,
+              assignment,
+              sourceUri,
+            );
         if (
-          !signal?.declaration ||
           !member?.file ||
           !member.instance ||
           (part &&
@@ -1997,6 +2258,144 @@ async function interfaceBindings(
     }
   }
   return references;
+}
+
+async function resolveInstanceParameter(
+  design: DesignSession,
+  sourceUri: (file: string) => string,
+  owner: string,
+  signal: VideTrace["signals"][number],
+) {
+  const declaration = signal.declaration;
+  if (!declaration) return;
+  for (let scope = signal.instance ?? owner; scope; ) {
+    const record = await design
+      .resolve(scope + "." + signal.name)
+      .catch(() => undefined);
+    if (record) {
+      if (
+        record.kind === "npiParameter" &&
+        record.instance === scope &&
+        record.parameterValue &&
+        sourceUri(record.file) === declaration.uri &&
+        record.line === declaration.range.start.line + 1
+      )
+        return record.parameterValue;
+      return;
+    }
+    if (signal.instance) return;
+    const node = await design.resolve(scope).catch(() => undefined);
+    if (node?.kind !== "npiGenScope") return;
+    scope = await design.parent(scope).catch(() => "");
+  }
+}
+
+async function resolveKdbOperand(
+  design: DesignSession,
+  owner: string,
+  operand: {
+    hierarchicalPath?: string[];
+    hierarchicalIndices?: [number, AssignmentValue][];
+  },
+  signal: string,
+  trace: VideTrace,
+  assignment: VideTrace["assignments"][number],
+  sourceUri: (file: string) => string,
+) {
+  const { hierarchicalPath: path, hierarchicalIndices } = operand;
+  if (design.kind !== "kdb" || !path?.length || path.length > 64) return;
+  const indices = new Map(hierarchicalIndices);
+  const scopes: string[] = [];
+  for (const [position, segment] of path.entries()) {
+    const parsed =
+      /^([a-zA-Z_][\w$]*)(?:\[(-?\d+|[a-zA-Z_][\w$]*|\?)\])?$/.exec(segment);
+    if (!parsed) return;
+    const [, name, index] = parsed;
+    if (!index || /^-?\d+$/.test(index)) {
+      scopes.push(segment);
+      continue;
+    }
+    const expression = indices.get(position);
+    let value;
+    if (index === "?") {
+      if (!expression) return;
+      const parameters = new Set<number>();
+      remapValue(expression, {
+        get(id) {
+          parameters.add(id);
+          return id;
+        },
+      });
+      const values = new Map(
+        await Promise.all(
+          [...parameters].map(async (id) => {
+            const parameter = trace.signals.find(
+              (candidate) => candidate.id === id,
+            );
+            const value =
+              parameter &&
+              (parameter.packageParameterValue ??
+                (await resolveInstanceParameter(
+                  design,
+                  sourceUri,
+                  owner,
+                  parameter,
+                )));
+            return [
+              id,
+              value && { ...value, width: value.bits.length },
+            ] as const;
+          }),
+        ),
+      );
+      value = evaluateTraceValue(expression, undefined, (id) => values.get(id));
+    } else {
+      const parameters = trace.signals.filter(
+        (candidate) =>
+          candidate.name === index &&
+          (candidate.instanceParameter || candidate.packageParameterValue) &&
+          assignment.inputs.some(
+            (input) => input.signal === candidate.id && !input.hierarchical,
+          ),
+      );
+      if (parameters.length !== 1) return;
+      const parameter = parameters[0];
+      value =
+        parameter.packageParameterValue ??
+        (await resolveInstanceParameter(design, sourceUri, owner, parameter));
+    }
+    const resolved = value && traceInteger(value.bits, value.signed);
+    if (
+      resolved === undefined ||
+      resolved < -2147483648n ||
+      resolved > 2147483647n
+    )
+      return;
+    scopes.push(`${name}[${resolved}]`);
+  }
+  async function memberAt(instance: string) {
+    const fullname = instance + "." + signal;
+    const member = await design.resolve(fullname).catch(() => undefined);
+    if (member?.fullname === fullname && member.instance === instance)
+      return member;
+  }
+  const local = await memberAt([owner, ...scopes].join("."));
+  if (local) return local;
+  const [qualifier, ...children] = scopes;
+  const ancestors = owner.split(".");
+  while (ancestors.length) {
+    const scope = ancestors.join(".");
+    const location = await design.resolve(scope).catch(() => undefined);
+    // A module type can qualify an upward scope even when each instance
+    // has a different name. Match the nearest elaborated scope.
+    if (
+      location?.fullname === scope &&
+      (ancestors.at(-1) === qualifier ||
+        (location.kind === "npiModule" && location.module === qualifier))
+    )
+      return memberAt([scope, ...children].join("."));
+    ancestors.pop();
+  }
 }
 
 async function hierarchicalLoad(
@@ -2164,7 +2563,8 @@ function bindHierarchicalOperands(
           member.id,
         );
       }
-      return [{ ...input, signal: member.id }];
+      const { hierarchicalPath, hierarchicalIndices, ...bound } = input;
+      return [{ ...bound, signal: member.id }];
     });
     const originalTargets = new Set(
       assignment.hierarchicalTargets?.map(({ signal }) => signal),
@@ -2176,7 +2576,8 @@ function bindHierarchicalOperands(
         if (member) {
           if (target.interfaceComponent && member.shape)
             shapes.set(target.interfaceComponent[0], member.shape);
-          return [{ ...target, signal: member.id }];
+          const { hierarchicalPath, hierarchicalIndices, ...bound } = target;
+          return [{ ...bound, signal: member.id }];
         }
         for (const input of inputs)
           frontier.push({

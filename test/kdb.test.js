@@ -170,6 +170,25 @@ test('VCS KDB: modport aliases retain the backing packed selection', {
   }
 });
 
+test('VCS KDB: wildcard port binding preserves composite modport targets', {
+  skip: !process.env.WAVE_TEST_WILDCARD_KDB,
+}, async t => {
+  const session = createSession();
+  t.after(() => session.dispose());
+  await session.open(process.env.WAVE_TEST_WILDCARD_KDB);
+  const members = await session.interfaceMembers('wildcard_tb.sink', 'link.selected');
+  assert.deepEqual(
+    members.map(({ fullname, packedRange, interfaceRange }) => [fullname, packedRange, interfaceRange]),
+    [
+      ['wildcard_tb.link.data', [7, 4], [7, 7]],
+      ['wildcard_tb.link.data', [7, 4], [5, 4]],
+    ],
+  );
+  const links = await session.portLinks('wildcard_tb.sink', 'result');
+  assert.ok(links.some(({ from, to }) => from.instance === 'wildcard_tb.sink' &&
+    from.signal === 'result' && to.instance === 'wildcard_tb' && to.signal === 'result'));
+});
+
 test('VCS KDB: modport bit and part selections preserve negative and wide indices', {
   skip: !process.env.WAVE_TEST_MODPORT_BOUNDS_KDB,
 }, async t => {
@@ -614,6 +633,36 @@ test('independent KDB: loop-local assignments retain iteration identity and acti
     Number(BigInt.asIntN(32, BigInt('0b' + node.value.args[1].args[0]))) ]).sort(), [
     [top + '.lanes[-1]', 2, -1], [top + '.lanes[0]', 1, 0], [top + '.lanes[1]', 0, 1],
   ]);
+});
+
+test('Independent VCS KDB retains shift, multiplication and conditional port operands', {
+  skip: !independent || !process.env.WAVE_TEST_KDB_EXTRA_PORTS,
+}, async t => {
+  const session = createSession();
+  t.after(() => session.dispose());
+  await session.open(process.env.WAVE_TEST_KDB_EXTRA_PORTS);
+  const instance = 'extra_port_tb';
+  const expected = [
+    ['left_shift', 'shiftLeft', ['data', 'amount']],
+    ['right_shift', 'shiftRight', ['data', 'amount']],
+    ['multiply', 'multiply', ['data', 'alternate']],
+    ['conditional', undefined, ['choose', 'data', 'alternate']],
+  ];
+  for (const [name, operator, operands] of expected) {
+    const scope = instance + '.' + name;
+    const [link] = await session.portLinks(scope, 'value');
+    assert.equal(await session.unresolvedPortExpression(scope, 'value', 'drivers'), false);
+    assert.deepEqual(link.expression.operands, operands.map(signal => ({ instance, signal })));
+    if (operator) {
+      assert.deepEqual(link.expression.value, {
+        op: 'binary', args: [operator, { op: 'signal', args: 0 }, { op: 'signal', args: 1 }],
+      });
+    } else {
+      assert.deepEqual(link.expression.value, {
+        op: 'conditional', args: [0, 1, 2].map(args => ({ op: 'signal', args })),
+      });
+    }
+  }
 });
 
 test('Verdi NPI KDB: generate port selections retain instance indices and runtime operands', {

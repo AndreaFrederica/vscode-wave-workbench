@@ -9,6 +9,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
   codeOnly,
+  simpleAssignmentMacro,
   vcsCaseEntry,
   vcsStandaloneWait,
   vcsGuardEntry,
@@ -147,6 +148,7 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
         guardEntries,
         arrayElement,
         modport,
+        macro,
       } = entry;
       const arraySelector = arrayElement?.selector;
       if (
@@ -181,10 +183,6 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
       if (
         sampleGuards !== undefined &&
         (!vcsNba ||
-          !(
-            (kind === "nonblocking" && targetIndex === undefined) ||
-            kind === "blocking"
-          ) ||
           !Array.isArray(sampleGuards) ||
           !sampleGuards.length ||
           new Set(sampleGuards).size !== sampleGuards.length ||
@@ -199,8 +197,7 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
         );
       if (
         guardEntries !== undefined &&
-        (kind !== "nonblocking" ||
-          !sampleGuards ||
+        (!sampleGuards ||
           !Array.isArray(guardEntries) ||
           !guardEntries.length ||
           guardEntries.length > 8 ||
@@ -208,6 +205,8 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
             (entry) =>
               !Array.isArray(entry?.names) ||
               !entry.names.length ||
+              (kind === "blocking" &&
+                (entry.wait !== undefined || entry.caseBody !== undefined)) ||
               (entry.takenWhenTrue !== undefined &&
                 typeof entry.takenWhenTrue !== "boolean") ||
               (entry.caseBody !== undefined &&
@@ -236,6 +235,14 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
           "Select mapped procedural assignments with an original source operator.",
         );
       if (
+        macro &&
+        (vcsNba ||
+          !identifier.test(macro.name ?? "") ||
+          macro.definition?.file !== source.file ||
+          macro.definition?.sha256 !== source.sha256)
+      )
+        throw Error("Invalid Verilator macro source mapping.");
+      if (
         targetRange !== undefined &&
         (!vcsNba ||
           !Array.isArray(targetRange) ||
@@ -262,8 +269,7 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
         throw Error("Dynamic packed targets require a simple VCS index.");
       if (
         targetIndexedPart !== undefined &&
-        (kind !== "nonblocking" ||
-          !targetIndex ||
+        (!targetIndex ||
           !targetIndexedPart ||
           !Number.isInteger(targetIndexedPart.width) ||
           targetIndexedPart.width < 1 ||
@@ -396,6 +402,7 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
         ...(arrayElement ? { word, arraySelector } : {}),
         source,
         operator,
+        macro,
         kind,
         targetRange,
         targetIndex,
@@ -408,7 +415,7 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
           externalAssignments.has(statementId) ||
           file.replacements.get(site)?.recordExternal,
       });
-      statements[statementId] = source;
+      statements[statementId] = macro ? { ...source, macro } : source;
       sites.push({
         site,
         instance: map.instance,
@@ -490,6 +497,7 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
       signal,
       source,
       operator,
+      macro,
       kind,
       targetRange,
       targetIndex,
@@ -505,8 +513,29 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
       const start = offset(lineStarts, source);
       const op = offset(lineStarts, operator);
       const token = kind === "blocking" ? "=" : "<=";
-      const end = lexical.indexOf(";", op + token.length);
-      const left = lexical.slice(start, op).trim().replace(/\s+/g, "");
+      const expanded =
+        macro &&
+        simpleAssignmentMacro(text.split(/\r?\n/), source.line, source.column);
+      if (
+        macro &&
+        (!expanded ||
+          expanded.name !== macro.name ||
+          expanded.lhs !== signal ||
+          expanded.operator !== token ||
+          expanded.definition.line !== macro.definition.line ||
+          expanded.definition.column !== macro.definition.column)
+      )
+        throw Error(
+          "The selected macro no longer matches its definition at " +
+            filename +
+            ":" +
+            source.line,
+        );
+      const end = expanded
+        ? start + expanded.length - 1
+        : lexical.indexOf(";", op + token.length);
+      const left =
+        expanded?.lhs ?? lexical.slice(start, op).trim().replace(/\s+/g, "");
       const base =
         arraySelector === undefined
           ? signal
@@ -524,14 +553,17 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
           targetIndexedPart.width
         : "";
       if (
-        op <= start ||
-        !(
-          selection ?? [
-            targetIndex ? base + "[" + targetIndex + indexedSuffix + "]" : base,
-          ]
-        ).includes(left) ||
-        !lexical.startsWith(token, op) ||
-        end < 0
+        !expanded &&
+        (op <= start ||
+          !(
+            selection ?? [
+              targetIndex
+                ? base + "[" + targetIndex + indexedSuffix + "]"
+                : base,
+            ]
+          ).includes(left) ||
+          !lexical.startsWith(token, op) ||
+          end < 0)
       )
         throw Error(
           "Source does not match a complete assignment at " +
@@ -539,7 +571,7 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
             ":" +
             source.line,
         );
-      const originalRhs = text.slice(op + token.length, end);
+      const originalRhs = expanded?.rhs ?? text.slice(op + token.length, end);
       let rhs = vcsNba ? originalRhs : originalRhs.trim();
       const descriptor =
         fileRead &&
@@ -553,7 +585,10 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
         throw Error(
           "File reads require a blocking whole-variable assignment from $fgetc with a simple descriptor.",
         );
-      if (!rhs.trim() || /[`#]/.test(lexical.slice(op + token.length, end)))
+      if (
+        !rhs.trim() ||
+        (!expanded && /[`#]/.test(lexical.slice(op + token.length, end)))
+      )
         throw Error(
           "Select an assignment without macros or intra-assignment delays.",
         );
@@ -658,12 +693,14 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
           ")"
         : "";
       const sampledBlockingEvaluation =
-        "wave_workbench_probe::wave_workbench_blocking_evaluate_sampled(" +
+        "wave_workbench_probe::wave_workbench_blocking_evaluate_" +
+        (entryValues.length ? "guarded(" : "sampled(") +
         JSON.stringify(site) +
         ', $sformatf("%b", ' +
         sample +
         ")" +
         operandArguments +
+        vcsGuardArguments(entryValues) +
         ");";
       const probe = (value, committed) =>
         "wave_workbench_probe::wave_workbench_write(" +
@@ -674,12 +711,33 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
         committed +
         ");";
       const savedIndex = targetIndex && sample + "_index";
+      const sampledNbaIndex =
+        kind === "nonblocking" && savedIndex && operandLocals.size;
+      const guardArguments = vcsGuardArguments(entryValues);
       const savedTarget = savedIndex
         ? signal + "[" + savedIndex + indexedSuffix + "]"
         : left;
       const indexedBlocking = kind === "blocking" && !!savedIndex;
+      const blockingPartProbe = (committed) =>
+        "wave_workbench_probe::wave_workbench_blocking_write_part(" +
+        [
+          JSON.stringify(site),
+          '$sformatf("%b", ' + sample + ")",
+          '$sformatf("%0d", ' + savedIndex + ")",
+          "$left(" + signal + ")",
+          "$right(" + signal + ")",
+          committed,
+          committed ? '$sformatf("%b", ' + signal + ")" : '""',
+        ].join(", ") +
+        (committed
+          ? ', "", ""'
+          : (operandArguments || ', ""') + (guardArguments || ', ""')) +
+        ");";
       const indexedProbe = (value, committed) =>
-        "wave_workbench_probe::wave_workbench_blocking_write_index(" +
+        "wave_workbench_probe::" +
+        (!committed && guardArguments
+          ? "wave_workbench_blocking_evaluate_index_guarded("
+          : "wave_workbench_blocking_write_index(") +
         JSON.stringify(site) +
         ', $sformatf("%b", ' +
         value +
@@ -691,9 +749,12 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
         signal +
         "), $high(" +
         signal +
-        "), " +
-        committed +
-        (committed || !operandLocals.size ? ', ""' : operandArguments) +
+        ")" +
+        (!committed && guardArguments
+          ? operandArguments + guardArguments
+          : ", " +
+            committed +
+            (committed || !operandLocals.size ? ', ""' : operandArguments)) +
         ");";
       let write = savedTarget + " " + token + " " + sample + ";";
       let nbaToken;
@@ -771,7 +832,9 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
                 nbaToken +
                 " = wave_workbench_probe::" +
                 (savedIndex
-                  ? "wave_workbench_nba_evaluate_index"
+                  ? sampledNbaIndex
+                    ? "wave_workbench_nba_evaluate_index_sampled"
+                    : "wave_workbench_nba_evaluate_index"
                   : entryValues.length
                     ? "wave_workbench_nba_evaluate_guarded"
                     : operandLocals.size
@@ -784,19 +847,27 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
                 ")" +
                 (savedIndex ? ', $sformatf("%0d", ' + savedIndex + ")" : "") +
                 operandArguments +
-                vcsGuardArguments(entryValues) +
+                (guardArguments || (sampledNbaIndex ? ', ""' : "")) +
                 ");",
             ]
           : [
               indexedBlocking
-                ? indexedProbe(sample, 0)
+                ? targetIndexedPart
+                  ? blockingPartProbe(0)
+                  : indexedProbe(sample, 0)
                 : operandLocals.size
                   ? sampledBlockingEvaluation
                   : probe(sample, 0),
             ]),
         write,
         ...(kind === "blocking"
-          ? [indexedBlocking ? indexedProbe(savedTarget, 1) : probe(left, 1)]
+          ? [
+              indexedBlocking
+                ? targetIndexedPart
+                  ? blockingPartProbe(1)
+                  : indexedProbe(savedTarget, 1)
+                : probe(left, 1),
+            ]
           : []),
         "end",
       ].join(vcsNba ? " " : "\n");
@@ -1017,10 +1088,34 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
               '  import "DPI-C" context function longint unsigned wave_workbench_nba_evaluate(input string site, input string value);',
               '  import "DPI-C" context function longint unsigned wave_workbench_nba_evaluate_index(input string site, input string value, input string index_value);',
               ...(sites.some(
+                ({ kind, targetIndex, sampleGuards }) =>
+                  kind === "nonblocking" && targetIndex && sampleGuards,
+              )
+                ? [
+                    '  import "DPI-C" context function longint unsigned wave_workbench_nba_evaluate_index_sampled(input string site, input string value, input string index_value, input string operands, input string guards);',
+                  ]
+                : []),
+              ...(sites.some(
                 ({ kind, targetIndex }) => kind === "blocking" && targetIndex,
               )
                 ? [
                     '  import "DPI-C" context function void wave_workbench_blocking_write_index(input string site, input string value, input string index_value, input int low_index, input int high_index, input bit committed, input string operands);',
+                  ]
+                : []),
+              ...(sites.some(
+                ({ kind, targetIndexedPart }) =>
+                  kind === "blocking" && targetIndexedPart,
+              )
+                ? [
+                    '  import "DPI-C" context function void wave_workbench_blocking_write_part(input string site, input string value, input string index_value, input int left, input int right, input bit committed, input string storage, input string operands, input string guards);',
+                  ]
+                : []),
+              ...(sites.some(
+                ({ kind, targetIndex, guardEntries }) =>
+                  kind === "blocking" && targetIndex && guardEntries,
+              )
+                ? [
+                    '  import "DPI-C" context function void wave_workbench_blocking_evaluate_index_guarded(input string site, input string value, input string index_value, input int low_index, input int high_index, input string operands, input string guards);',
                   ]
                 : []),
               ...(sites.some(
@@ -1046,6 +1141,13 @@ async function generate(mapsFile, output, externalFile, vcsNba = false) {
                     '  import "DPI-C" context function longint unsigned wave_workbench_nba_evaluate_guarded(input string site, input string value, input string operands, input string guards);',
                     '  import "DPI-C" context function longint unsigned wave_workbench_guard_tick();',
                     '  import "DPI-C" context function longint unsigned wave_workbench_guard_next_ordinal();',
+                  ]
+                : []),
+              ...(sites.some(
+                ({ kind, guardEntries }) => kind === "blocking" && guardEntries,
+              )
+                ? [
+                    '  import "DPI-C" context function void wave_workbench_blocking_evaluate_guarded(input string site, input string value, input string operands, input string guards);',
                   ]
                 : []),
             ]

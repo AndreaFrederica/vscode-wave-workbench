@@ -8,6 +8,506 @@ const path = require("node:path");
 const { test } = require("node:test");
 
 const sparseCaseFixture = process.env.WAVE_TEST_GENERATE_WITHOUT_DEFAULT;
+const hierarchicalReadFixture = process.env.WAVE_TEST_VCS_XMR;
+for (const [suffix, intermediateXmrFixture] of [
+  ["", process.env.WAVE_TEST_VCS_XMR_INTERMEDIATE],
+  [" via an included macro", process.env.WAVE_TEST_VCS_XMR_INTERMEDIATE_MACRO],
+  [" via nested token-pasting macros", process.env.WAVE_TEST_VCS_XMR_NESTED_MACRO],
+]) test("standalone MCP expands a cross-file Load from an intermediate signal" + suffix, {
+  skip: !intermediateXmrFixture,
+}, () => {
+  const fixture = path.resolve(intermediateXmrFixture);
+  const waveform = path.join(fixture, "trace.vcd");
+  const options = { waveform, filelist: path.join(fixture, "sources.f"), maxDepth: 4 };
+  const [, , loads, other, context, continued] = callTraceMcp(fixture, [
+    ["wave_open", { path: waveform, backend: "independent" }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "simv.daidir") }],
+    ["wave_trace_loads", { ...options, signal: "mid_tb.u_leaf.stimulus" }],
+    ["wave_trace_loads", { ...options, signal: "mid_tb.u_other.stimulus" }],
+    ["wave_trace_context", {
+      ...options, signal: "mid_tb.u_observer.observed", tick: "2", historyStart: "0",
+    }],
+    ["wave_trace_context", {
+      ...options, signal: "mid_tb.u_observer.observed", tick: "2", historyStart: "0",
+      output: "paged", continueFrom: { signal: "mid_tb.u_leaf.middle", tick: "2", historyStart: "0" },
+    }],
+  ]);
+  const name = (trace, id) => {
+    const signal = trace.signals.find(signal => signal.id === id);
+    return signal.instance + "." + signal.name;
+  };
+  assert(loads.assignments.some(assignment =>
+    assignment.targets.some(id => name(loads, id) === "mid_tb.u_observer.observed") &&
+    assignment.inputs.some(({signal}) => name(loads, signal) === "mid_tb.u_leaf.middle")));
+  assert(!other.signals.some(({instance}) => instance === "mid_tb.u_observer"));
+  const {nodes, edges} = context.context.temporalTrace;
+  assert(edges.some(({source, target}) =>
+    name(context, nodes[source].signal) === "mid_tb.u_leaf.middle" &&
+    nodes[source].tick === "2" && nodes[source].value === "1" &&
+    nodes[target].signal === context.root));
+  assert.equal(continued.graphSnapshot.metadata.gapSummary.byReason.selectedContinuation.joined, 1);
+});
+
+const macroMapFixture = process.env.WAVE_TEST_VERILATOR_MACRO_MAP;
+test("standalone MCP maps both Verilator assignment macro sites in each instance", {
+  skip: !macroMapFixture,
+}, () => {
+  const fixture = path.resolve(macroMapFixture);
+  const waveform = path.join(fixture, "macro.vcd");
+  const source = path.join(fixture, "macro_map_tb.sv");
+  const instances = ["macro_map_tb.left", "macro_map_tb.right"];
+  const [, , ...maps] = callTraceMcp(fixture, [
+    ["wave_open", { path: waveform }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "obj_dir/Vmacro_map_tb.tree.json") }],
+    ...instances.map(instance => ["wave_execution_map", { waveform, instance, signal: "q" }]),
+  ]);
+  for (const [index, map] of maps.entries()) {
+    assert.equal(map.instance, instances[index]);
+    assert.deepEqual(map.statements.map(statement => [
+      statement.source.file, statement.source.line, statement.source.column,
+      statement.process.line, statement.diagnostic, statement.macro.name,
+      statement.macro.definition.line, statement.macro.definition.column,
+    ]), [
+      [source, 5, 5, 4, undefined, "WRITE_Q", 2, 1],
+      [source, 6, 14, 4, undefined, "WRITE_Q", 2, 1],
+    ]);
+  }
+  const statements = maps.flatMap(map => map.statements);
+  assert.equal(new Set(statements.map(({statementId}) => statementId)).size, 4);
+  assert(statements.every(({statementId}) => /^[a-f0-9]{64}$/.test(statementId)));
+});
+
+const driverLoadFixture = process.env.WAVE_TEST_VCS_DRIVER_LOAD;
+test("standalone MCP traces VCS case data, NBA overrides, holds and async reset", {
+  skip: !driverLoadFixture,
+}, () => {
+  const fixture = path.resolve(driverLoadFixture);
+  const waveform = path.join(fixture, "trace.vcd");
+  const options = { waveform, filelist: path.join(fixture, "sources.f") };
+  const scope = "driver_load_tb.dut.";
+  const expected = [
+    ["1", "1", "0000", 18],
+    ["3", "3", "0101", 24],
+    ["5", "3", "0101", 24],
+    ["7", "7", "0010", 21],
+    ["9", "9", "0011", 21],
+    ["10", "10", "0000", 18],
+  ];
+  const loads = {
+    "a[1]": [["continuous", "data"], ["blocking", "data"]],
+    b: [["blocking", "data"]],
+    c: [["blocking", "data"]],
+    d: [["nonblocking", "data"]],
+    e: [["nonblocking", "data"]],
+    rst_n: [["nonblocking", "control"], ["nonblocking", "trigger", "falling"]],
+    clk: [["nonblocking", "trigger", "rising"]],
+    en: [["nonblocking", "control"], ["blocking", "control"]],
+    replace: [["nonblocking", "control"]],
+    mode: [["nonblocking", "control"]],
+    sel: [["blocking", "control"]],
+    acc: [["blocking", "data"]],
+  };
+  const [, , ...traces] = callTraceMcp(fixture, [
+    ["wave_open", { path: waveform, backend: "independent" }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "simv.daidir") }],
+    ...expected.map(([tick]) => ["wave_trace_context", {
+      ...options, signal: scope + "q", tick, historyStart: "0",
+    }]),
+    ...Object.keys(loads).map(signal => ["wave_trace_loads", {
+      ...options, signal: scope + signal,
+    }]),
+  ]);
+  for (const [index, [, tick, value, line]] of expected.entries()) {
+    const { context: { temporalTrace, assignmentCandidates } } = traces[index];
+    assert.deepEqual([temporalTrace.nodes[0].tick, temporalTrace.nodes[0].value], [tick, value]);
+    const candidate = assignmentCandidates.candidates
+      .find(({ location }) => location.range.start.line + 1 === line);
+    assert.equal(candidate.status, value === "0000" ? "possible" : "consistentWithObservations");
+  }
+  for (const [index, [signal, relations]] of Object.entries(loads).entries()) {
+    const { assignments, root } = traces[expected.length + index];
+    for (const [kind, inputKind, edge] of relations) {
+      assert(assignments.some(assignment =>
+        assignment.kind === kind && assignment.inputs.some(input =>
+          input.signal === root && input.kind === inputKind && (input.edge ?? undefined) === edge
+        )), signal + " " + [kind, inputKind, edge].join(" "));
+    }
+  }
+});
+
+const virtualInterfaceFixture = process.env.WAVE_TEST_VCS_VIRTUAL_INTERFACE;
+test("standalone MCP preserves the VCS virtual-interface access gaps and observed values", {
+  skip: !virtualInterfaceFixture,
+}, () => {
+  const fixture = path.resolve(virtualInterfaceFixture);
+  const waveform = path.join(fixture, "trace.vcd");
+  const options = { waveform, filelist: path.join(fixture, "sources.f") };
+  const cases = [
+    ["result", "2", "0011"],
+    ["result", "5", "1001"],
+    ["left.data", "1", "0011"],
+    ["right.data", "4", "1001"],
+  ];
+  const [, , loads, ...reads] = callTraceMcp(fixture, [
+    ["wave_open", { path: waveform, backend: "independent" }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "simv.daidir") }],
+    ["wave_trace_loads", { ...options, signal: "virtual_if_tb.stimulus" }],
+    ...cases.map(([signal, tick]) => ["wave_trace_context", {
+      ...options, signal: "virtual_if_tb." + signal, tick, historyStart: "0",
+    }]),
+  ]);
+  const accessLines = trace => trace.frontier
+    .filter(({ reason }) => reason === "unresolvedVirtualInterfaceBinding")
+    .map(({ location }) => location.range.start.line + 1);
+  assert.deepEqual(accessLines(loads), [20, 25]);
+  assert(loads.assignments.every(({ targets }) => !targets.length));
+  assert(loads.signals.every(({ name }) => name !== "write_port"));
+  for (const [index, trace] of reads.entries()) {
+    const [, tick, value] = cases[index];
+    assert.deepEqual(accessLines(trace), index < 2 ? [21, 26] : []);
+    const root = trace.context.temporalTrace.nodes[0];
+    assert.deepEqual([root.tick, root.value], [tick, value]);
+  }
+});
+
+const virtualInterfaceExecution = process.env.WAVE_TEST_VCS_VIRTUAL_INTERFACE_EXECUTION;
+test("standalone MCP replays the physical interface accesses on both sides of rebinding", {
+  skip: !virtualInterfaceExecution,
+}, () => {
+  const fixture = path.resolve(virtualInterfaceExecution);
+  const waveform = path.join(fixture, "trace.vcd");
+  const executionLog = path.join(fixture, "execution-v2.jsonl");
+  const top = "virtual_if_tb";
+  const [, ...readings] = callTraceMcp(fixture, [
+    ["wave_open", { path: waveform, backend: "independent" }],
+    ...[[top + ".left", "data"], [top + ".right", "data"], [top, "result"]]
+      .map(([instance, signal]) => ["wave_execution_trace", {
+        waveform, executionLog, instance, signal, historyStart: "0", tick: "5",
+      }]),
+  ]);
+  const accesses = ({ events }) => events.flatMap(({ tick, statementSite, interfaceAccesses }) =>
+    (interfaceAccesses ?? []).map(({ direction, instance, signal }) =>
+      [tick, statementSite.line, direction, instance, signal]));
+  const left = [
+    ["1", 20, "write", top + ".left", "data"],
+    ["2", 21, "read", top + ".left", "data"],
+  ];
+  const right = [
+    ["4", 25, "write", top + ".right", "data"],
+    ["5", 26, "read", top + ".right", "data"],
+  ];
+  assert.deepEqual(readings.map(accesses), [left, right, [left[1], right[1]]]);
+  assert.deepEqual(readings.map(({ events }) => events
+    .filter(({ kind }) => kind === "signal-value-changed")
+    .map(({ value }) => value)), [["0011"], ["1001"], ["0011", "1001"]]);
+});
+
+const dynamicOutputFixture = process.env.WAVE_TEST_VERILATOR_DYNAMIC_OUTPUT;
+test("standalone MCP tracks the index and data of a Verilator output part-select", {
+  skip: !dynamicOutputFixture,
+}, () => {
+  const fixture = path.resolve(dynamicOutputFixture);
+  const waveform = path.join(fixture, "dynamic.vcd");
+  const filelist = path.join(fixture, "sources.f");
+  const options = { waveform, filelist, tick: "2", historyStart: "0" };
+  const [, , changed, held, loads] = callTraceMcp(fixture, [
+    ["wave_open", { path: waveform }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "obj_dir/Vdynamic_output_tb.tree.json") }],
+    ["wave_trace_context", { ...options, signal: "dynamic_output_tb.bus[3]" }],
+    ["wave_trace_context", { ...options, signal: "dynamic_output_tb.bus[0]" }],
+    ["wave_trace_loads", { waveform, filelist, signal: "dynamic_output_tb.idx" }],
+  ]);
+  const driver = changed.assignments.find(a => a.kind === "port" && a.targets.includes(changed.root));
+  assert.deepEqual(driver.targetIndexedPart, { width: 2, ascendingIndices: true });
+  const index = changed.signals.find(({ id }) => id === driver.targetIndex.args);
+  assert.equal(index.name, "idx");
+  const { nodes, edges } = changed.context.temporalTrace;
+  assert.deepEqual([nodes[0].tick, nodes[0].bit, nodes[0].value], ["2", 3, "1"]);
+  assert(edges.some(({ source, target }) => target === 0 && nodes[source].signal === index.id));
+  assert(edges.some(({ source, target }) => target === 0 &&
+    changed.signals.some(({ id, instance, name }) => id === nodes[source].signal &&
+      instance === "dynamic_output_tb.dut" && name === "result")));
+  assert.deepEqual([held.context.temporalTrace.nodes[0].tick, held.context.temporalTrace.nodes[0].value], ["0", "1"]);
+  assert(loads.assignments.some(({ targets, targetIndex }) => targetIndex?.args === loads.root &&
+    loads.signals.some(({ id, name }) => targets.includes(id) && name === "bus")));
+});
+
+const outputMatrix = process.env.WAVE_TEST_VERILATOR_OUTPUT_MATRIX;
+test("standalone MCP maps physical Verilator output offsets to declared packed indices", {
+  skip: !outputMatrix,
+}, () => {
+  const fixture = path.resolve(outputMatrix);
+  const waveform = path.join(fixture, "ports.vcd");
+  const options = { waveform, filelist: path.join(fixture, "sources.f") };
+  const cases = [
+    ["plain", 3, "a", true],
+    ["expr", 4, "b", true],
+    ["minus", 3, "c", true],
+    ["asc", 2, "d", false],
+    ["offset", 7, "e", true],
+  ];
+  const [, , loads, ...traces] = callTraceMcp(fixture, [
+    ["wave_open", { path: waveform }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "obj_dir/Vports.tree.json") }],
+    ["wave_trace_loads", { ...options, signal: "ports.idx" }],
+    ...cases.map(([signal, bit]) => ["wave_trace_context", {
+      ...options, signal: `ports.${signal}[${bit}]`, tick: "2", historyStart: "0",
+    }]),
+  ]);
+  const loaded = loads.assignments.flatMap(({ targetIndex, targets }) =>
+    targetIndex ? targets.map(id => loads.signals.find(signal => signal.id === id)?.name) : []);
+  assert.deepEqual(loaded.sort(), cases.map(([signal]) => signal).sort());
+  for (const [index, [signal, bit, scope, ascendingIndices]] of cases.entries()) {
+    const trace = traces[index];
+    const driver = trace.assignments.find(a => a.kind === "port" && a.targets.includes(trace.root));
+    assert.deepEqual(driver.targetIndexedPart, { width: 2, ascendingIndices });
+    const names = new Map(trace.signals.map(({ id, name, instance }) => [id, `${instance}.${name}`]));
+    const { nodes, edges } = trace.context.temporalTrace;
+    assert.deepEqual([names.get(nodes[0].signal), nodes[0].bit, nodes[0].tick, nodes[0].value],
+      [`ports.${signal}`, bit, "2", "1"]);
+    const inputs = edges.filter(({ target }) => target === 0).map(({ source }) => names.get(nodes[source].signal));
+    assert(inputs.includes(`ports.${scope}.result`));
+    assert(inputs.includes("ports.idx"));
+  }
+});
+
+const concurrentTaskFixture = process.env.WAVE_TEST_VCS_CONCURRENT_TASK;
+test("standalone MCP matches concurrent VCS task calls to reverse-order writes", {
+  skip: !concurrentTaskFixture,
+}, () => {
+  const fixture = path.resolve(concurrentTaskFixture);
+  const waveform = path.join(fixture, "task.vcd");
+  const [, , trace] = callTraceMcp(fixture, [
+    ["wave_open", { path: waveform, backend: "independent" }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "simv.daidir") }],
+    ["wave_trace_context", {
+      waveform, filelist: path.join(fixture, "sources.f"),
+      executionLog: path.join(fixture, "sealed.jsonl"),
+      signal: "concurrent_task_tb.result", tick: "3", historyStart: "0", maxDepth: 8,
+    }],
+  ]);
+  const transfers = trace.context.temporalTrace.nodes
+    .filter(({ recordedTaskTransfer }) => recordedTaskTransfer)
+    .sort((left, right) => left.orderAtTick - right.orderAtTick)
+    .map(({ value, recordedTaskTransfer: { index, input, write, reads } }) =>
+      [index, value, input.tick, input.ordinal, write.tick, write.ordinal, reads[0].operation]);
+  assert.deepEqual(transfers, [
+    [2, "00001011", "1", 11, "3", 17, "$fgetc at byte 1"],
+    [1, "00001010", "1", 7, "3", 23, "$fgetc at byte 0"],
+  ]);
+});
+
+const equalDriversFixture = process.env.WAVE_TEST_VCS_EQUAL_DRIVERS;
+test("standalone MCP preserves both equal VCS drivers and same-tick changes", {
+  skip: !equalDriversFixture,
+}, () => {
+  const fixture = path.resolve(equalDriversFixture);
+  const waveform = path.join(fixture, "equal_drivers.vcd");
+  const [, , trace] = callTraceMcp(fixture, [
+    ["wave_open", { path: waveform, backend: "independent" }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "simv.daidir") }],
+    ["wave_trace_context", {
+      waveform,
+      filelist: path.join(fixture, "sources.f"),
+      signal: "equal_drivers_tb.q",
+      tick: "2",
+      historyStart: "0",
+    }],
+  ]);
+  const { candidates, changesAtTick } = trace.context.assignmentCandidates;
+  assert.deepEqual(candidates.map(({ status }) => status), ["possible", "possible"]);
+  assert.deepEqual(candidates.map(({ location }) => location.range.start.line).sort(), [5, 6]);
+  assert.deepEqual(changesAtTick.map(({ value, orderAtTick }) => [value, orderAtTick]), [
+    ["x", 1],
+    ["1", 2],
+  ]);
+});
+
+const upwardReferenceFixture = process.env.WAVE_TEST_VCS_XMR_UPWARD;
+const parameterReferenceFixture = process.env.WAVE_TEST_VCS_XMR_PARAMETER;
+test("standalone MCP binds an XMR generate index using the actual VCS parameter", {
+  skip: !parameterReferenceFixture,
+}, () => {
+  const fixture = path.resolve(parameterReferenceFixture);
+  const waveform = path.join(fixture, "parameter.vcd");
+  const options = { waveform, filelist: path.join(fixture, "sources.f") };
+  const cases = [["u_left", 0, "2"], ["u_right", 1, "4"]];
+  const [, , ...traces] = callTraceMcp(fixture, [
+    ["wave_open", { path: waveform, backend: "independent" }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "simv.daidir") }],
+    ...cases.map(([instance, , tick]) => ["wave_trace_context", {
+      ...options, signal: `xmr_parameter_tb.${instance}.result`, tick, historyStart: "0",
+    }]),
+    ...cases.flatMap(([instance, lane]) => [lane, 1 - lane].map(index => ["wave_trace_loads", {
+      ...options, signal: `xmr_parameter_tb.${instance}.lane[${index}].u_indexed.local_value`,
+    }])),
+    ...cases.map(([instance, lane]) => ["wave_trace_context", {
+      ...options, signal: `xmr_parameter_tb.${instance}.result_expr`,
+      tick: lane ? "2" : "4", historyStart: "0",
+    }]),
+  ]);
+  for (const [index, [instance, lane, tick]] of cases.entries()) {
+    const scope = `xmr_parameter_tb.${instance}`;
+    const trace = traces[index];
+    assert.deepEqual(trace.signals.filter(({ name }) => name === "local_value")
+      .map(({ instance }) => instance), [`${scope}.lane[${lane}].u_indexed`]);
+    const { nodes, edges } = trace.context.temporalTrace;
+    assert(edges.some(({ source, target }) =>
+      nodes[target].signal === trace.root &&
+      nodes[source].tick === tick &&
+      trace.signals.some(({ id, name }) => id === nodes[source].signal && name === "local_value")));
+    const [loads, unused] = traces.slice(cases.length + 2 * index, cases.length + 2 * index + 2);
+    assert(loads.signals.some(({ instance, name }) => instance === scope && name === "result"));
+    assert(!unused.signals.some(({ instance, name }) => instance === scope && name === "result"));
+    assert(!loads.signals.some(({ instance, name }) => instance === scope && name === "result_expr"));
+    assert(unused.signals.some(({ instance, name }) => instance === scope && name === "result_expr"));
+    const expression = traces[cases.length * 3 + index];
+    assert.deepEqual(expression.signals.filter(({ name }) => name === "local_value")
+      .map(({ instance }) => instance), [`${scope}.lane[${1 - lane}].u_indexed`]);
+    const continued = expression.context.temporalTrace;
+    assert(continued.edges.some(({ source, target }) =>
+      continued.nodes[target].signal === expression.root &&
+      continued.nodes[source].tick === (lane ? "2" : "4") &&
+      expression.signals.some(({ id, name }) => id === continued.nodes[source].signal &&
+        name === "local_value")));
+  }
+});
+
+test("standalone MCP binds VCS upward references to each nearest ancestor", {
+  skip: !upwardReferenceFixture,
+}, () => {
+  const fixture = path.resolve(upwardReferenceFixture);
+  const waveform = path.join(fixture, "upward.vcd");
+  const options = { waveform, filelist: path.join(fixture, "sources.f") };
+  const cases = [["u_left", "2"], ["u_right", "4"]];
+  const [, , ...traces] = callTraceMcp(fixture, [
+    ["wave_open", { path: waveform, backend: "independent" }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "simv.daidir") }],
+    ...cases.map(([parent, tick]) => ["wave_trace_context", {
+      ...options, signal: `xmr_up_tb.${parent}.u_leaf.result`, tick, historyStart: "0",
+    }]),
+    ...cases.map(([parent]) => ["wave_trace_loads", {
+      ...options, signal: `xmr_up_tb.${parent}.u_leaf.write_value`,
+    }]),
+    ...cases.map(([parent]) => ["wave_trace_loads", {
+      ...options, signal: `xmr_up_tb.${parent}.shared_value`,
+    }]),
+    ...cases.map(([parent]) => ["wave_trace_drivers", {
+      ...options, signal: `xmr_up_tb.${parent}.external_value`,
+    }]),
+  ]);
+  for (const [index, [parent, tick]] of cases.entries()) {
+    const trace = traces[index];
+    const instance = `xmr_up_tb.${parent}`;
+    const [source] = trace.signals.filter(({ name }) => name === "shared_value");
+    assert.equal(source.instance, instance);
+    const drivers = trace.assignments.filter(({ targets }) => targets.includes(trace.root));
+    assert.equal(drivers.length, 1);
+    assert.deepEqual(drivers[0].inputs.map(({ signal }) => signal), [source.id]);
+    assert(!trace.staticCoverage.stops.some(({ reason }) =>
+      reason === "unresolvedHierarchicalRead"));
+    const { nodes, edges } = trace.context.temporalTrace;
+    assert(edges.some(({ source: from, target }) =>
+      nodes[from].signal === source.id &&
+      nodes[from].tick === tick &&
+      nodes[target].signal === trace.root));
+    const loads = traces[cases.length + index];
+    const [write] = loads.signals.filter(({ name }) => name === "external_value");
+    assert.equal(write.instance, instance);
+    assert(loads.assignments.some(({ targets, inputs }) =>
+      targets.includes(write.id) && inputs.some(({ signal }) => signal === loads.root)));
+    const consumers = traces[2 * cases.length + index];
+    const reads = consumers.signals.filter(({ name, instance: scope }) =>
+      name === "result" && scope.endsWith(".u_leaf"));
+    assert.deepEqual(reads.map(({ instance: scope }) => scope), [instance + ".u_leaf"]);
+    assert(consumers.assignments.some(({ targets, inputs }) =>
+      targets.includes(reads[0].id) && inputs.some(({ signal }) => signal === consumers.root)));
+    const writers = traces[3 * cases.length + index];
+    const sources = writers.signals.filter(({ name }) => name === "write_value");
+    assert.deepEqual(sources.map(({ instance: scope }) => scope), [instance + ".u_leaf"]);
+    assert(writers.assignments.some(({ targets, inputs }) =>
+      targets.includes(writers.root) && inputs.some(({ signal }) => signal === sources[0].id)));
+  }
+});
+
+for (const [layout, fixturePath] of [
+  ["split source files", hierarchicalReadFixture],
+  ["one source file", process.env.WAVE_TEST_VCS_XMR_SINGLE],
+])
+test(`standalone MCP binds VCS hierarchical reads to distinct elaborated instances in ${layout}`, {
+  skip: !fixturePath,
+}, () => {
+  const fixture = path.resolve(fixturePath);
+  const waveform = path.join(fixture, "xmr.vcd");
+  const options = { waveform, filelist: path.join(fixture, "sources.f") };
+  const cases = [
+    ["q_port", [["xmr_tb.u_leaf", "p"]]],
+    ["q_local", [["xmr_tb.u_leaf", "local_value"]]],
+    ["q_pair", [["xmr_tb.u_leaf", "local_value"], ["xmr_tb.u_other", "local_value"]]],
+    ["q_indexed", [["xmr_tb.lane[1].u_indexed", "local_value"]]],
+  ];
+  const [, , ...results] = callTraceMcp(fixture, [
+    ["wave_open", { path: waveform, backend: "independent" }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "simv.daidir") }],
+    ...cases.map(([signal]) => ["wave_trace_drivers", { ...options, signal: "xmr_tb." + signal }]),
+    ["wave_trace_context", { ...options, signal: "xmr_tb.q_pair", tick: "4", historyStart: "0" }],
+    ["wave_trace_loads", { ...options, signal: "xmr_tb.stimulus" }],
+    ["wave_trace_loads", { ...options, signal: "xmr_tb.u_leaf.local_value" }],
+    ["wave_trace_loads", { ...options, signal: "xmr_tb.u_other.local_value" }],
+    ["wave_trace_drivers", { ...options, signal: "xmr_tb.u_leaf.external_value" }],
+    ["wave_trace_loads", { ...options, signal: "xmr_tb.lane[1].u_indexed.local_value" }],
+    ["wave_trace_loads", { ...options, signal: "xmr_tb.lane[0].u_indexed.local_value" }],
+    ["wave_trace_loads", { ...options, signal: "xmr_tb.u_leaf.local_value", maxDepth: 0 }],
+  ]);
+  for (const [index, [, expected]] of cases.entries()) {
+    const graph = results[index];
+    const signals = new Map(graph.signals.map(signal => [signal.id, signal]));
+    const [assignment] = graph.assignments.filter(candidate => candidate.targets.includes(graph.root));
+    assert.equal(assignment.hasUnresolvedOperands, false);
+    assert.deepEqual(assignment.inputs.map(({ signal }) => {
+      const operand = signals.get(signal);
+      return [operand.instance, operand.name];
+    }), expected);
+    assert(!graph.staticCoverage.stops.some(({ reason }) => reason === "unresolvedHierarchicalRead"));
+  }
+  const [trace, loads, leafLoads, otherLoads, written, indexedLoads, unusedLoads, limitedLoads] =
+    results.slice(cases.length);
+  const { nodes, edges } = trace.context.temporalTrace;
+  assert(edges.some(({ source, target }) => {
+    const input = nodes[source];
+    return nodes[target].signal === trace.root &&
+      input.tick === "4" &&
+      trace.signals.some(({ id, instance, name }) =>
+        id === input.signal && instance === "xmr_tb.u_other" && name === "local_value");
+  }));
+  const target = loads.signals.find(({ instance, name }) =>
+    instance === "xmr_tb.u_leaf" && name === "external_value");
+  assert(target);
+  assert(loads.assignments.some(assignment =>
+    assignment.targets.includes(target.id) &&
+    assignment.inputs.some(({ signal }) => signal === loads.root)));
+  function destinations(graph) {
+    const targets = new Set(graph.assignments.flatMap(({ targets }) => targets));
+    return graph.signals
+      .filter(({ id, instance }) => targets.has(id) && instance === "xmr_tb")
+      .map(({ name }) => name)
+      .sort();
+  }
+  assert.deepEqual(destinations(leafLoads), ["q_follow", "q_local", "q_pair"]);
+  assert.deepEqual(destinations(otherLoads), ["q_pair"]);
+  assert.deepEqual(destinations(indexedLoads), ["q_indexed"]);
+  assert.deepEqual(destinations(unusedLoads), []);
+  for (const graph of [leafLoads, otherLoads, indexedLoads, unusedLoads])
+    assert(!graph.staticCoverage.stops.some(({ reason }) => reason === "unresolvedHierarchicalLoad"));
+  assert.deepEqual(destinations(limitedLoads), []);
+  assert(limitedLoads.staticCoverage.stops.some(({ reason }) => reason === "depth"));
+  const stimulus = written.signals.find(({ instance, name }) =>
+    instance === "xmr_tb" && name === "stimulus");
+  assert(stimulus);
+  assert(written.assignments.some(({ targets, inputs }) =>
+    targets.includes(written.root) && inputs.some(({ signal }) => signal === stimulus.id)));
+});
+
 test("standalone MCP keeps only elaborated writers in a generate case without default", {
   skip: !sparseCaseFixture,
   timeout: 45000,
@@ -168,6 +668,232 @@ test("standalone MCP traces a fixed-target NBA to the recorded branch entry", {
     assert.deepEqual(sources.map(edge => nodes[edge.source].value), [expected]);
     assert.match(result.temporalMermaid, /matches recorded branch entry/);
     assert.match(result.report, /Recorded branch entry/);
+  }
+});
+
+for (const { fixture: directory, top, commit, innerValue, innerCallback, innerEntry } of [
+  {
+    fixture: process.env.WAVE_TEST_VCS_NESTED_PACKED_GUARD,
+    top: "nested_packed_guard_tb",
+    commit: 7,
+    innerValue: "1",
+    innerCallback: 1,
+    innerEntry: 3,
+  },
+  {
+    fixture: process.env.WAVE_TEST_VCS_NESTED_PACKED_NBA_GUARD,
+    top: "nested_packed_nba_guard_tb",
+    commit: 9,
+    innerValue: "x",
+    innerCallback: 3,
+    innerEntry: 5,
+  },
+]) test(`standalone MCP projects each nested packed guard in ${top} using its recorded entry`, {
+  skip: !directory,
+  timeout: 25000,
+}, () => {
+  const fixture = path.resolve(directory);
+  const waveform = path.join(fixture, "probe/reference.vcd");
+  const executionLog = path.join(fixture, "probe/covered.jsonl");
+  const [, , result] = callTraceMcp(path.join(fixture, "workspace"), [
+    ["wave_open", { path: waveform }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "original/simv.daidir") }],
+    ["wave_trace_context", {
+      waveform, executionLog, signal: top + ".q", tick: "7",
+      historyStart: "0", detail: "full", format: "mermaid",
+    }],
+  ]);
+  const { nodes, edges } = result.context.temporalTrace;
+  assert.equal(nodes[0].recordedWriter.commitOrdinal, commit);
+  assert.deepEqual(nodes[0].recordedWriter.evaluation.operandValues, {
+    req: "100", idx: "10",
+  });
+  const reads = edges.filter(edge => edge.target === 0 &&
+    result.signals.find(({ id }) => id === nodes[edge.source].signal)?.name === "req");
+  assert.deepEqual(reads.map(edge => {
+    const source = nodes[edge.source];
+    return [source.bit, source.tick, source.value, source.valueChangeOrdinal, edge.branchEntry];
+  }).sort((left, right) => left[0] - right[0]), [
+    [0, "2", "1", 0, { line: 12, column: 9, tick: "3", nextOrdinal: 1 }],
+    [1, "4", innerValue, innerCallback, { line: 14, column: 11, tick: "5", nextOrdinal: innerEntry }],
+  ]);
+  assert.match(result.report, /matches recorded branch entry at L12:9#44; tick 3/);
+  assert.match(result.report, /matches recorded branch entry at L14:11#44; tick 5/);
+});
+
+for (const { fixture: directory, top, commit, range, noTarget } of [
+  {
+    fixture: process.env.WAVE_TEST_VCS_GUARDED_INDEXED_NBA,
+    top: "guarded_indexed_nba_tb",
+    commit: 9,
+    range: [2, 3],
+  },
+  {
+    fixture: process.env.WAVE_TEST_VCS_GUARDED_INDEXED_BLOCKING,
+    top: "guarded_indexed_blocking_tb",
+    commit: 8,
+    range: [2, 2],
+    noTarget: true,
+  },
+]) test(`standalone MCP retains the recorded guards and target in ${top}`, {
+  skip: !directory,
+  timeout: 25000,
+}, () => {
+  const fixture = path.resolve(directory);
+  const waveform = path.join(fixture, "probe/reference.vcd");
+  const executionLog = path.join(fixture, "probe/covered.jsonl");
+  const [, , result, execution] = callTraceMcp(path.join(fixture, "workspace"), [
+    ["wave_open", { path: waveform }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "original/simv.daidir") }],
+    ["wave_trace_context", {
+      waveform, executionLog, signal: top + ".q[2]",
+      tick: "7", historyStart: "0", detail: "full", format: "mermaid",
+    }],
+    ...(noTarget ? [["wave_execution_trace", {
+      waveform, executionLog, instance: top, signal: "q", tick: "8",
+    }]] : []),
+  ]);
+  const { nodes, edges } = result.context.temporalTrace;
+  assert.equal(nodes[0].recordedWriter.commitOrdinal, commit);
+  assert.deepEqual(nodes[0].recordedWriter.targetRange, range);
+  const reads = name => edges.filter(edge => edge.target === 0 &&
+    result.signals.find(({ id }) => id === nodes[edge.source].signal)?.name === name);
+  assert.deepEqual(reads("dest").map(edge => [
+    edge.role, edge.packedIndexEvidence, nodes[edge.source].tick, nodes[edge.source].value,
+  ]), [["index", "recordedTarget", "6", "10"]]);
+  assert.deepEqual(reads("req").map(edge => [
+    nodes[edge.source].bit, nodes[edge.source].tick, edge.branchEntry.tick,
+  ]).sort((a, b) => a[0] - b[0]), [[0, "2", "3"], [1, "4", "5"]]);
+  assert.match(result.temporalMermaid, /matches recorded packed target index/);
+  if (noTarget) {
+    const outcome = execution.events.find(event => event.kind === "assignment-no-target");
+    assert.equal(outcome?.evaluationOrdinal, 10);
+    const evaluation = execution.events.find(event => event.ordinal === outcome.evaluationOrdinal);
+    assert.deepEqual(evaluation.guardEntryTicks, {
+      g13_9_idx: "3", g13_9_req: "3", g15_11f_idx: "5", g15_11f_req: "5",
+    });
+    assert(!execution.events.some(event => event.kind === "assignment-committed"));
+  }
+});
+
+const blockingPartFixture = process.env.WAVE_TEST_VCS_BLOCKING_PART;
+test("standalone MCP traces clipped blocking part selects to the corresponding RHS bit", {
+  skip: !blockingPartFixture,
+  timeout: 25000,
+}, () => {
+  const fixture = path.resolve(blockingPartFixture);
+  const waveform = path.join(fixture, "probe/reference.vcd");
+  const executionLog = path.join(fixture, "probe/covered.jsonl");
+  const instance = "blocking_part_select_tb";
+  const options = { waveform, executionLog, historyStart: "0", detail: "full", format: "mermaid" };
+  const [, , a, b, aWrites, bWrites] = callTraceMcp(path.join(fixture, "workspace"), [
+    ["wave_open", { path: waveform }],
+    ["wave_design_attach", { waveform, path: path.join(fixture, "original/simv.daidir") }],
+    ["wave_trace_context", { ...options, signal: instance + ".a[3]", tick: "4" }],
+    ["wave_trace_context", { ...options, signal: instance + ".b[0]", tick: "6" }],
+    ["wave_execution_trace", { ...options, instance, signal: "a", tick: "12" }],
+    ["wave_execution_trace", { ...options, instance, signal: "b", tick: "12" }],
+  ]);
+  for (const [result, commit, attempted, bit, base] of [
+    [a, 9, [3, 4], 3, "0011"],
+    [b, 13, [0, -1], 0, "0000"],
+  ]) {
+    const { nodes, edges } = result.context.temporalTrace;
+    assert.equal(nodes[0].recordedWriter.commitOrdinal, commit);
+    assert.deepEqual(nodes[0].recordedWriter.targetRange, [bit, bit]);
+    assert.deepEqual(nodes[0].recordedWriter.attemptedTargetRange, attempted);
+    const reads = name => edges.filter(edge => edge.target === 0 &&
+      result.signals.find(({ id }) => id === nodes[edge.source].signal)?.name === name);
+    assert.deepEqual(reads("d").map(({ source }) => nodes[source].bit), [1]);
+    assert.deepEqual(reads("base").map(edge => [
+      edge.packedIndexEvidence, nodes[edge.source].value,
+    ]), [["recordedTarget", base]]);
+  }
+  for (const [result, noTarget, clipped, attempted] of [
+    [aWrites, 22, 16, [-1, 0]], [bWrites, 24, 19, [4, 3]],
+  ]) {
+    assert.equal(result.events.find(event => event.ordinal === noTarget)?.kind, "assignment-no-target");
+    const commit = result.events.find(event => event.ordinal === clipped);
+    assert.equal(commit?.kind, "assignment-committed");
+    assert.equal(commit.value, "0");
+    assert.deepEqual(commit.attemptedTargetRange, attempted);
+  }
+});
+
+const sameRangeFixture = process.env.WAVE_TEST_NBA_SAME_RANGE;
+test("standalone MCP preserves simulator evidence for same-range NBA writes", {
+  skip: !sameRangeFixture,
+  timeout: 25000,
+}, () => {
+  const fixture = path.resolve(sameRangeFixture);
+  const instance = "same_range_tb";
+  const signal = instance + ".q[2]";
+  const vcs = path.join(fixture, "probe/reference.vcd");
+  const xcelium = path.join(fixture, "xcelium/live.vcd");
+  const filelist = path.join(fixture, "original/sources.f");
+  const vcsOptions = {
+    waveform: vcs,
+    executionLog: path.join(fixture, "probe/covered.jsonl"),
+    historyStart: "0",
+  };
+  const xceliumOptions = {
+    waveform: xcelium,
+    executionLog: path.join(fixture, "xcelium/sealed.jsonl"),
+    filelist,
+    historyStart: "0",
+  };
+  const [, , execution, changed, held, , , first, second] = callTraceMcp(
+    path.join(fixture, "workspace"),
+    [
+      ["wave_open", { path: vcs }],
+      ["wave_design_attach", { waveform: vcs, path: path.join(fixture, "original/simv.daidir") }],
+      ["wave_execution_trace", { ...vcsOptions, instance, signal: "q", tick: "4" }],
+      ["wave_trace_context", { ...vcsOptions, signal, tick: "2" }],
+      ["wave_trace_context", { ...vcsOptions, signal, tick: "4" }],
+      ["wave_open", { path: xcelium }],
+      ["wave_design_attach", {
+        waveform: xcelium, path: path.join(fixture, "original/same_range.tree.json"),
+      }],
+      ["wave_trace_context", { ...xceliumOptions, signal, tick: "4", changeOrder: 1 }],
+      ["wave_trace_context", { ...xceliumOptions, signal, tick: "4", changeOrder: 2 }],
+    ],
+  );
+  assert.equal(execution.waveformMatch, "verified");
+  assert.deepEqual(execution.coverage.gaps, ["unobservedCommit"]);
+  for (const [result, tick, evaluationBase, values, waveformValues] of [
+    [changed, "2", 6, ["01", "11", "10"], ["1"]],
+    [held, "4", 15, ["00", "01", "10"], []],
+  ]) {
+    const events = execution.events.filter(event => event.tick === tick);
+    const evaluations = events.filter(event => event.kind === "assignment-evaluated");
+    assert.deepEqual(evaluations.map(event => [event.ordinal, event.value, event.targetRange]),
+      values.map((value, offset) => [evaluationBase + offset, value, [2, 1]]));
+    assert.deepEqual(events.filter(event => event.kind === "assignment-unobserved")
+      .map(event => event.evaluationOrdinal), [evaluationBase, evaluationBase + 1]);
+    const commits = events.filter(event => event.kind === "assignment-committed");
+    assert.deepEqual(commits.map(event => [event.ordinal, event.evaluationOrdinal, event.value]),
+      [[evaluationBase + 5, evaluationBase + 2, "10"]]);
+    assert.deepEqual(events.filter(event => event.kind === "signal-value-changed")
+      .map(event => event.value), tick === "2" ? ["1101"] : []);
+    const transition = result.executionTransitions.find(event => event.tick === tick);
+    assert.deepEqual(transition?.waveformValues, waveformValues);
+    assert.deepEqual(transition?.commitOrdinals, [evaluationBase + 5]);
+    assert.equal(transition?.status, "incomplete");
+    assert(!result.context.temporalTrace.nodes.some(node => node.recordedWriter));
+  }
+  for (const [result, changeOrder, value, ordinal] of [[first, 1, "0", 9], [second, 2, "1", 11]]) {
+    const { nodes, edges } = result.context.temporalTrace;
+    const node = nodes[0];
+    assert.deepEqual([node.tick, node.orderAtTick, node.value, node.valueChangeOrdinal],
+      ["4", changeOrder, value, ordinal]);
+    assert.equal(node.recordedWriter, undefined);
+    const transition = result.executionTransitions.find(event => event.tick === "4");
+    assert.equal(transition?.status, "valueChangesMatch");
+    assert.deepEqual(transition?.recordedChangeValues, ["0", "1"]);
+    assert.deepEqual(transition?.commitOrdinals, []);
+    const inputs = edges.filter(edge => edge.target === 0);
+    assert.equal(inputs.length, 3);
+    assert(inputs.every(edge => edge.confidence === "possible"));
   }
 });
 
@@ -386,7 +1112,7 @@ test("standalone MCP excludes a VCS input callback after a continuous output cha
   assert.match(recorded.report, /callback 0 changed RHS before output callback 1/);
 });
 
-for (const { fixture, captureWriter, stateOrdinal, commits } of [
+for (const { fixture, captureWriter, stateOrdinal, commits, branchCommits } of [
   {
     fixture: process.env.WAVE_TEST_VCS_RV32A_READY,
     captureWriter: false,
@@ -399,10 +1125,17 @@ for (const { fixture, captureWriter, stateOrdinal, commits } of [
     stateOrdinal: 167,
     commits: [[168, 163, 164, 162], [226, 220, 221, 219]],
   },
+  {
+    fixture: process.env.WAVE_TEST_VCS_RV32A_BRANCH,
+    captureWriter: true,
+    stateOrdinal: 199,
+    commits: [[200, 195, 196, 194], [274, 260, 269, 259]],
+    branchCommits: [187, 213],
+  },
 ]) test("standalone MCP traces both RV32A commits to their observed ready callbacks" +
-  (captureWriter ? " and guarded bit writes" : ""), {
+  (branchCommits ? " and arbiter branch entries" : captureWriter ? " and guarded bit writes" : ""), {
   skip: !fixture,
-  timeout: 25000,
+  timeout: branchCommits ? 45000 : 25000,
 }, () => {
   const root = path.resolve(fixture);
   const build = path.join(root, "rebuild");
@@ -413,13 +1146,23 @@ for (const { fixture, captureWriter, stateOrdinal, commits } of [
     waveform, executionLog, signal: instance + ".hart_q", historyStart: "365000",
     maxDepth: 5, detail: "full", format: "mermaid",
   };
-  const [, , hart1, hart0, state] = callTraceMcp(path.join(root, "workspace"), [
+  const [, , hart1, hart0, state, ...held] = callTraceMcp(path.join(root, "workspace"), [
     ["wave_open", { path: waveform }],
     ["wave_design_attach", { waveform, path: path.join(build, "simv.daidir") }],
     ["wave_trace_context", { ...options, tick: "375000" }],
     ["wave_trace_context", { ...options, tick: "465000" }],
     ["wave_execution_trace", { waveform, executionLog, instance, signal: "state_q", tick: "375000" }],
-  ]);
+    ...(branchCommits
+      ? ["380000", "470000"].map(tick => ["wave_trace_context", { ...options, tick }])
+      : []),
+  ], branchCommits ? 40000 : undefined);
+  for (const [index, result] of held.entries()) {
+    const winner = 1 - index;
+    const node = result.context.temporalTrace.nodes[0];
+    assert.equal(node.tick, ["375000", "465000"][index]);
+    assert.equal(node.value, String(winner));
+    assert.equal(node.recordedWriter.commitOrdinal, commits[index][0]);
+  }
   for (const [hart, result] of [[1, hart1], [0, hart0]]) {
     const [commit, readyOrdinal, captureOrdinal, readyCommit] = commits[1 - hart];
     const { nodes, edges } = result.context.temporalTrace;
@@ -443,6 +1186,22 @@ for (const { fixture, captureWriter, stateOrdinal, commits } of [
       assert.ok(edges.some(edge => edge.target === cause.source &&
         edge.controlSampleEvidence === "recordedEvaluation" &&
         name(nodes[edge.source]) === "state_q"));
+    }
+    if (branchCommits) {
+      const branchEdge = edges.find(edge => edge.target === cause.source &&
+        name(nodes[edge.source]) === "selected_valid");
+      assert.ok(branchEdge);
+      const branch = nodes[branchEdge.source];
+      assert.equal(branch.recordedWriter.commitOrdinal, branchCommits[1 - hart]);
+      assert.equal(branch.tick, hart ? "370000" : "380000");
+      const controls = edges.filter(edge => edge.target === branchEdge.source &&
+        edge.controlSampleEvidence === "recordedBranchEntry");
+      const request = controls.filter(edge => name(nodes[edge.source]) === "atomic_req_valid_i");
+      assert.deepEqual(request.map(({ source }) => [nodes[source].bit, nodes[source].tick]),
+        [[hart, "370000"]]);
+      const index = controls.find(edge => edge.role === "index" && name(nodes[edge.source]) === "idx");
+      assert.ok(index);
+      assert.equal(BigInt("0b" + nodes[index.source].value), BigInt(hart));
     }
   }
   assert(state.events.some(event =>
@@ -626,14 +1385,14 @@ function checkAnonymousLoop(fixture, verilator) {
   }
 }
 
-function callTraceMcp(workspace, calls) {
+function callTraceMcp(workspace, calls, timeout = 20000) {
   const child = spawnSync(process.execPath, [path.resolve(__dirname, "../dist/mcp-headless.js"), workspace], {
     input: calls.map(([name, args], id) =>
       JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } })
     ).join("\n") + "\n",
     encoding: "utf8",
     maxBuffer: 8 * 1024 * 1024,
-    timeout: 20000,
+    timeout,
   });
   assert.equal(child.status, 0, child.error || child.stderr);
   const values = child.stdout.trim().split("\n").map((line, index) => {

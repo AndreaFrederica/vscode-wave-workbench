@@ -213,6 +213,11 @@ export type DesignPortLink = {
   file: string;
   line: number;
   conversion?: { fromWidth: number; toWidth: number; twoState: boolean };
+  targetSelectIndex?: {
+    operands: DesignPortEndpoint[];
+    value: AssignmentValue;
+    part?: IndexedPartSelect;
+  };
 } & (
   | {
       from: DesignPortEndpoint;
@@ -234,7 +239,11 @@ export type DesignPortLink = {
 
 export function portSources(link: DesignPortLink) {
   if (link.expression) return link.expression.operands;
-  return link.selectIndex ? [link.from, link.selectIndex] : [link.from];
+  return [
+    link.from,
+    ...(link.selectIndex ? [link.selectIndex] : []),
+    ...(link.targetSelectIndex?.operands ?? []),
+  ];
 }
 export type SavedSignal = Pick<Signal, "id" | "scope" | "name"> &
   Partial<Signal>;

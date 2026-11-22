@@ -18,6 +18,82 @@ function codeOnly(text: string) {
   );
 }
 
+export function simpleAssignmentMacro(
+  lines: readonly string[],
+  line: number,
+  column: number,
+) {
+  const identifier = "[A-Za-z_$][\\w$]*";
+  const code = lines
+    .join("\n")
+    .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (comment) =>
+      comment.replace(/[^\r\n]/g, " "),
+    )
+    .split("\n");
+  const start = (code[line - 1] ?? "").slice(column - 1);
+  const invocation = new RegExp(
+    "^`(" +
+      identifier +
+      ")\\([ \\t]*(" +
+      identifier +
+      "(?:[ \\t]*,[ \\t]*" +
+      identifier +
+      ")*)[ \\t]*\\)",
+  ).exec(start);
+  if (!invocation) return;
+  const [, name, argumentsText] = invocation;
+  const candidates = code.slice(0, line - 1);
+  if (
+    candidates.some((text) =>
+      /^\s*`(?:ifn?def|elsif|include|undef|undefineall)\b/.test(text),
+    )
+  )
+    return;
+  const escapedName = name.replace(/[$]/g, "\\$");
+  const definition = new RegExp(
+    "^([ \\t]*)`define[ \\t]+" +
+      escapedName +
+      "\\((" +
+      identifier +
+      "(?:[ \\t]*,[ \\t]*" +
+      identifier +
+      ")*)\\)[ \\t]+(" +
+      identifier +
+      ")[ \\t]*(<=|=)[ \\t]*(" +
+      identifier +
+      ")[ \\t]*;[ \\t]*(?://.*)?$",
+  );
+  const matches = candidates.flatMap((text, index) => {
+    const match = definition.exec(text);
+    return match ? [{ line: index + 1, match }] : [];
+  });
+  const defineName = new RegExp(
+    "^[ \\t]*`define[ \\t]+" + escapedName + "(?=[ \\t(]|$)",
+  );
+  const definitions = candidates.filter((text) => defineName.test(text));
+  if (matches.length !== 1 || definitions.length !== 1) return;
+  const [{ line: definitionLine, match }] = matches;
+  const [, indent, formals, lhs, operator, rhs] = match;
+  const parameters = formals.split(",").map((value) => value.trim());
+  const arguments_ = argumentsText.split(",").map((value) => value.trim());
+  if (
+    parameters.length !== arguments_.length ||
+    new Set(parameters).size !== parameters.length
+  )
+    return;
+  const values = new Map(
+    parameters.map((name, index) => [name, arguments_[index]]),
+  );
+  return {
+    name,
+    lhs: values.get(lhs) ?? lhs,
+    operator,
+    rhs: values.get(rhs) ?? rhs,
+    length: invocation[0].length,
+    definition: { line: definitionLine, column: indent.length + 1 },
+  };
+}
+
 export function vscOperandExpression(text: string) {
   const code = text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, (comment) =>
     comment.replace(/[^\r\n]/g, " "),

@@ -82,17 +82,29 @@ export type TemporalEdgeEvidence = {
     | "recordedEvaluation"
     | "recordedBranchEntry"
     | "recordedWaitResume";
+  branchEntry?: {
+    line: number;
+    column: number;
+    tick?: string;
+    nextOrdinal?: number;
+  };
   waitResumeCause?: "uniqueObservedTransition" | "orderedCallbacks";
   waitResumeCallbackOrdinal?: number;
   recordedCommitOrdinal?: number;
   arrayIndexEvidence?: "recordedTarget";
+  packedIndexEvidence?: "recordedTarget";
 };
 export type TemporalGap = {
   signal: number;
   bit?: number;
   tick: string;
   value?: string;
-  reason: MissingReason | "nodeBudget" | "edgeBudget" | "staticBudget";
+  reason:
+    | MissingReason
+    | "nodeBudget"
+    | "edgeBudget"
+    | "staticBudget"
+    | "selectedContinuation";
   bindingIssue?: TraceBindingIssue;
   declaration?: VideTrace["signals"][number]["declaration"];
   anchor?: number;
@@ -105,7 +117,7 @@ export type TemporalGap = {
     tick: string;
     changeOrder?: number;
     liveSessionId?: string;
-    historyStart?: "auto";
+    historyStart?: string;
   };
   use?: {
     target: number;
@@ -249,23 +261,32 @@ function guardReadExpression(guard: GuardExpression): AssignmentValue {
   }
 }
 
+function firstSampleAtOrAfter(history: Observation["history"], tick: string) {
+  const cutoff = BigInt(tick);
+  let first = 0;
+  let end = history.length;
+  while (first < end) {
+    const middle = first + Math.floor((end - first) / 2);
+    if (BigInt(history[middle].tick) < cutoff) first = middle + 1;
+    else end = middle;
+  }
+  return first;
+}
+
 function previousValue(observation: Observation, tick: string) {
-  const previous = observation.history.findLast(
-    (event) => BigInt(event.tick) < BigInt(tick),
-  );
+  const index = firstSampleAtOrAfter(observation.history, tick);
+  const previous = observation.history[index - 1];
   return previous ? previous.value : observation.initial?.value;
 }
 
 function valueAtStableTick(observation: Observation | undefined, tick: string) {
   if (!observation || observation.historyTruncated) return undefined;
-  const before = previousValue(observation, tick);
-  if (
-    before === undefined ||
-    observation.history.some(
-      (event) => event.tick === tick && event.value !== before,
-    )
-  )
-    return undefined;
+  const { history, initial } = observation;
+  const index = firstSampleAtOrAfter(history, tick);
+  const before = index === 0 ? initial?.value : history[index - 1].value;
+  if (before === undefined) return undefined;
+  for (let cursor = index; history[cursor]?.tick === tick; cursor++)
+    if (history[cursor].value !== before) return undefined;
   return before;
 }
 
@@ -562,6 +583,34 @@ function recordedOperandValue(
     : undefined;
 }
 
+type AssignmentGuard = NonNullable<
+  VideTrace["assignments"][number]["guards"]
+>[number];
+
+function readsGuard(input: TemporalInput, guard: AssignmentGuard) {
+  const { start, end } = guard.location.range;
+  const { line, character } = input.location.range.start;
+  return (
+    input.location.uri === guard.location.uri &&
+    !!end &&
+    (line > start.line ||
+      (line === start.line && character >= start.character)) &&
+    (line < end.line || (line === end.line && character < end.character))
+  );
+}
+
+function guardSampleKey(guard: AssignmentGuard, operand: string) {
+  const { line, character } = guard.location.range.start;
+  return (
+    "g" +
+    (line + 1) +
+    "_" +
+    (character + 1) +
+    (guard.takenWhenTrue ? "_" : "f_") +
+    operand
+  );
+}
+
 function recordedBranchValue(
   evaluation: RecordedWriter["evaluation"],
   assignment: VideTrace["assignments"][number],
@@ -623,28 +672,14 @@ function recordedBranchValue(
     }
   }
   for (const guard of assignment.guards ?? []) {
-    const { start, end } = guard.location.range;
-    if (
-      !end ||
-      guard.location.uri !== input.location.uri ||
-      line < start.line ||
-      line > end.line ||
-      (line === start.line && character < start.character) ||
-      (line === end.line && character >= end.character)
-    )
-      continue;
-    const branch = guard.takenWhenTrue ? "_" : "f_";
-    const key =
-      "g" +
-      (start.line + 1) +
-      "_" +
-      (start.character + 1) +
-      branch +
-      signal.name;
+    if (!readsGuard(input, guard)) continue;
+    const key = guardSampleKey(guard, signal.name);
     if (Object.hasOwn(values, key))
       return {
         value: values[key].toLowerCase(),
         tick: evaluation!.guardEntryTicks?.[key],
+        nextOrdinal: evaluation!.guardEntryNextOrdinals?.[key],
+        guardStart: guard.location.range.start,
       };
   }
 }
@@ -704,7 +739,14 @@ function changesAtOrBefore(
   groups: ReturnType<typeof recordedChanges>,
   cutoff: bigint,
 ) {
-  return groups.findLast((group) => group.tick <= cutoff)?.changes ?? [];
+  let first = 0;
+  let end = groups.length;
+  while (first < end) {
+    const middle = first + Math.floor((end - first) / 2);
+    if (groups[middle].tick <= cutoff) first = middle + 1;
+    else end = middle;
+  }
+  return groups[first - 1]?.changes ?? [];
 }
 
 export type RecordedValueCallbacks = (
@@ -1623,7 +1665,10 @@ export function buildTemporalTrace(
     const selection = selectionKey(gap.signal, gap.bit);
     if (gap.reason === "nodeBudget" || gap.reason === "edgeBudget") {
       frontier.add(gap.signal);
-    } else if (gap.reason !== "staticBudget") {
+    } else if (
+      gap.reason !== "staticBudget" &&
+      gap.reason !== "selectedContinuation"
+    ) {
       missing.set(selection + "/" + gap.reason, {
         signal: gap.signal,
         ...(gap.bit === undefined ? {} : { bit: gap.bit }),
@@ -2305,6 +2350,16 @@ export function buildTemporalTrace(
       }
       const recordedIndex = writer?.targetRange && assignment.targetIndex;
       if (recordedIndex?.op === "signal") indexSignals.add(recordedIndex.args);
+      const recordedRange = writer?.attemptedTargetRange ?? writer?.targetRange;
+      const recordedPackedIndex =
+        recordedIndex?.op === "signal" &&
+        recordedRange &&
+        Math.abs(recordedRange[0] - recordedRange[1]) + 1 ===
+          (assignment.targetIndexedPart?.width ?? 1)
+          ? assignment.targetIndexedPart?.ascendingIndices === false
+            ? Math.max(...recordedRange)
+            : Math.min(...recordedRange)
+          : undefined;
       const targetRange =
         writer?.targetRange ??
         candidate.value?.targetRange ??
@@ -2444,6 +2499,10 @@ export function buildTemporalTrace(
         const evaluationWidth = attempted
           ? Math.abs(attempted[0] - attempted[1]) + 1
           : width;
+        const rhsRight =
+          assignment.kind === "blocking" && attempted
+            ? attempted[1]
+            : targetRange[1];
         const selectedAssignment = assignment.targetIndex
           ? { ...assignment, targetIndex: undefined }
           : assignment;
@@ -2459,7 +2518,7 @@ export function buildTemporalTrace(
         if (event.bit !== undefined) {
           bitReads = dependencies(
             selectedAssignment,
-            Math.abs(event.bit - targetRange[1]),
+            Math.abs(event.bit - rhsRight),
             resolveSelector,
             evaluationWidth,
           );
@@ -2491,7 +2550,7 @@ export function buildTemporalTrace(
                 continue;
               const reads = dependencies(
                 selectedAssignment,
-                slot,
+                Math.abs(bit - rhsRight),
                 resolveSelector,
                 evaluationWidth,
               );
@@ -2534,63 +2593,57 @@ export function buildTemporalTrace(
             evidence.recordedValueCallbacks,
           )
         : undefined;
-      const guardBits = new Map<number, Set<number>>();
-      const guardIndexes = new Set<number>();
-      if (
-        assignment.kind === "blocking" &&
-        evaluation?.operandValues &&
-        !evaluation.guardEntryValues
-      ) {
-        const read = (id: number) => {
-          const subject = signalNames.get(id);
-          const bits = recordedOperandValue(
-            evaluation,
-            assignment.instance,
-            subject,
-          );
-          if (bits === undefined) return;
-          const range = subject?.packedRange ?? span(id);
-          if (range && Math.abs(range[0] - range[1]) + 1 !== bits.length)
-            return;
-          return { bits, width: bits.length, range, signed: subject?.signed };
-        };
-        const controlInputs = assignment.inputs
-          .filter(({ kind }) => kind === "control")
-          .map((input) => ({ ...input, kind: "data" as const }));
+      const guardBits = new Map<TemporalInput, Set<number>>();
+      const guardIndexes = new Set<TemporalInput>();
+      if (evaluation?.guardEntryValues) {
         for (const guard of assignment.guards ?? []) {
-          if (
-            !guard.expression ||
-            evaluateGuard(guard.expression, read) !==
-              Number(guard.takenWhenTrue)
-          ) {
-            guardBits.clear();
-            guardIndexes.clear();
-            break;
-          }
+          if (!guard.expression) continue;
+          const controlInputs = assignment.inputs.filter(
+            (input) =>
+              input.kind === "control" &&
+              !input.hierarchical &&
+              readsGuard(input, guard),
+          );
+          const read = (id: number) => {
+            const subject = signalNames.get(id);
+            if (!subject || subject.instance !== assignment.instance) return;
+            const bits =
+              evaluation.guardEntryValues[
+                guardSampleKey(guard, subject.name)
+              ]?.toLowerCase();
+            if (bits === undefined) return;
+            const range = subject.packedRange ?? span(id);
+            if (range && Math.abs(range[0] - range[1]) + 1 !== bits.length)
+              return;
+            return { bits, width: bits.length, range, signed: subject.signed };
+          };
+          const truth = evaluateGuard(guard.expression, read);
+          if (truth === undefined || (truth === 1) !== guard.takenWhenTrue)
+            continue;
+          const indexes = new Set<number>();
           const reads = dependencies(
             {
               ...assignment,
               hasUnresolvedOperands: false,
               targetIndex: undefined,
-              inputs: controlInputs,
+              inputs: controlInputs.map((input) => ({
+                ...input,
+                kind: "data",
+              })),
               value: guardReadExpression(guard.expression),
             },
             0,
             (selector) => {
               const resolved = evaluateTraceValue(selector, undefined, read);
-              for (const id of resolved?.inputs ?? []) guardIndexes.add(id);
+              for (const id of resolved?.inputs ?? []) indexes.add(id);
               return resolved;
             },
           );
-          if (!reads) {
-            guardBits.clear();
-            guardIndexes.clear();
-            break;
-          }
-          for (const [id, bits] of reads) {
-            const selected = guardBits.get(id) ?? new Set<number>();
-            for (const bit of bits) selected.add(bit);
-            guardBits.set(id, selected);
+          if (!reads) continue;
+          for (const input of controlInputs) {
+            const bits = reads.get(input.signal);
+            if (bits && read(input.signal)) guardBits.set(input, bits);
+            if (indexes.has(input.signal)) guardIndexes.add(input);
           }
         }
       }
@@ -2624,7 +2677,7 @@ export function buildTemporalTrace(
           ? "condition"
           : parameter !== undefined ||
               indexSignals.has(input.signal) ||
-              (input.kind === "control" && guardIndexes.has(input.signal)) ||
+              (input.kind === "control" && guardIndexes.has(input)) ||
               isPortIndex(assignment.port, input.signal)
             ? "index"
             : undefined;
@@ -2637,14 +2690,39 @@ export function buildTemporalTrace(
         )
           continue;
         const sourceObservation = observations.get(input.signal);
+        const wordRange =
+          "wordIndexUnordered" in input && event.bit !== undefined
+            ? span(input.signal)
+            : undefined;
+        const readTargetRange =
+          targetRange ?? signalNames.get(event.signal)?.packedRange;
+        const readBitOffset =
+          selectedData &&
+          readTargetRange &&
+          event.bit !== undefined &&
+          event.bit >= Math.min(...readTargetRange) &&
+          event.bit <= Math.max(...readTargetRange)
+            ? Math.abs(event.bit - readTargetRange[1])
+            : undefined;
+        const projectedWordBits =
+          wordRange &&
+          readTargetRange &&
+          readBitOffset !== undefined &&
+          Math.abs(wordRange[0] - wordRange[1]) ===
+            Math.abs(readTargetRange[0] - readTargetRange[1])
+            ? new Set([
+                wordRange[1] +
+                  readBitOffset * (wordRange[0] < wordRange[1] ? -1 : 1),
+              ])
+            : undefined;
         const selected =
           input.kind === "data"
-            ? bitReads?.get(input.signal)
+            ? (projectedWordBits ?? bitReads?.get(input.signal))
             : input.kind === "control" &&
                 !input.hierarchical &&
                 sourceObservation?.width >
-                  (guardBits.get(input.signal)?.size ?? Infinity)
-              ? guardBits.get(input.signal)
+                  (guardBits.get(input)?.size ?? Infinity)
+              ? guardBits.get(input)
               : undefined;
         if (input.kind === "data" && bitReads && !selected && !role) continue;
         const bits: (number | undefined)[] =
@@ -2653,6 +2731,12 @@ export function buildTemporalTrace(
             ? [...selected]
             : [undefined];
         if (role && !bits.includes(undefined)) bits.push(undefined);
+        const packedIndex =
+          input.kind === "data" &&
+          recordedIndex?.op === "signal" &&
+          recordedIndex.args === input.signal
+            ? recordedPackedIndex
+            : undefined;
         const use = {
           target,
           assignment: candidate.assignment,
@@ -2737,18 +2821,18 @@ export function buildTemporalTrace(
             parameter || !usableHistory
               ? []
               : observed(input.signal, bit, inputTime);
-          if (
-            selected &&
-            input.kind === "control" &&
-            evaluation?.tick === inputTick &&
-            latest[0]?.tick === inputTick
-          ) {
+          const beforeOrdinal =
+            selected && input.kind === "control"
+              ? branch?.nextOrdinal
+              : packedIndex !== undefined && evaluation?.tick === inputTick
+                ? evaluation.ordinal
+                : undefined;
+          if (beforeOrdinal !== undefined && latest[0]?.tick === inputTick) {
             const callbacks = callbacksAt(input.signal, bit, inputTick);
             if (callbacks)
               latest = latest.filter(
                 ({ orderAtTick }) =>
-                  callbacks[(orderAtTick ?? 1) - 1].ordinal <
-                  evaluation.ordinal,
+                  callbacks[(orderAtTick ?? 1) - 1].ordinal < beforeOrdinal,
               );
             if (callbacks && !latest.length)
               latest = observed(input.signal, bit, inputTime - 1n);
@@ -2846,7 +2930,9 @@ export function buildTemporalTrace(
           const selectedIndex =
             input.signal === recordedElement?.signal && bit === undefined
               ? recordedElement.index
-              : undefined;
+              : bit === undefined
+                ? packedIndex
+                : undefined;
           const compatibleValues =
             captured !== undefined
               ? new Set([captured])
@@ -2918,9 +3004,21 @@ export function buildTemporalTrace(
             (targetRange
               ? sliceTraceBits(targetBits, targetView?.range, ...targetRange)
               : targetBits);
+          // The recorder supplies the packed member value in significance
+          // order even when it cannot report the member's declared bounds.
+          const fieldBitOffset =
+            input.signal === field?.id &&
+            readTargetRange &&
+            readBitOffset !== undefined &&
+            upstream?.width ===
+              Math.abs(readTargetRange[0] - readTargetRange[1]) + 1
+              ? readBitOffset
+              : undefined;
           const selectedWidth = sourceRange
             ? Math.abs(sourceRange[0] - sourceRange[1]) + 1
-            : upstream?.width;
+            : fieldBitOffset === undefined
+              ? upstream?.width
+              : 1;
           const selectedValue =
             expected?.length === selectedWidth ? expected : undefined;
           if (
@@ -3081,9 +3179,11 @@ export function buildTemporalTrace(
             if (
               selectedData &&
               (selectedValue === undefined ||
-                (sourceRange && normalized
+                (normalized && sourceRange
                   ? sliceTraceBits(normalized, upstream?.range, ...sourceRange)
-                  : normalized) !== selectedValue)
+                  : normalized && fieldBitOffset !== undefined
+                    ? normalized.at(-1 - fieldBitOffset)
+                    : normalized) !== selectedValue)
             )
               continue;
             const timing =
@@ -3128,11 +3228,26 @@ export function buildTemporalTrace(
                   } as const)
                 : {}),
               ...(enablingChange ? waitCause.evidence : {}),
+              ...(input.kind === "control" &&
+              branch?.guardStart &&
+              captured !== undefined &&
+              normalized === captured
+                ? {
+                    branchEntry: {
+                      line: branch.guardStart.line + 1,
+                      column: branch.guardStart.character + 1,
+                      tick: branch.tick,
+                      nextOrdinal: branch.nextOrdinal,
+                    },
+                  }
+                : {}),
               ...(recordedSameValueWrite
                 ? ({ sourceWriteEvidence: "recordedSameValueWrite" } as const)
                 : {}),
               ...(selectedIndex !== undefined
-                ? ({ arrayIndexEvidence: "recordedTarget" } as const)
+                ? packedIndex !== undefined
+                  ? ({ packedIndexEvidence: "recordedTarget" } as const)
+                  : ({ arrayIndexEvidence: "recordedTarget" } as const)
                 : input.kind === "control" &&
                     captured !== undefined &&
                     (!enablingChange || normalized === captured)

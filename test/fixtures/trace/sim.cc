@@ -107,7 +107,7 @@ int main(int argc, char **argv) {
     for (std::string command; std::getline(std::cin, command);) {
       if (command == "advance" && tick + 1 < count) evaluate(++tick);
       else if (command != "current" && command != "advance") return 2;
-      std::printf("{\"snapshot\":{\"tick\":\"%u\",\"scale\":\"1ps\",\"done\":%s,"
+      std::printf("{\"snapshot\":{\"schemaVersion\":1,\"tick\":\"%u\",\"scale\":\"1ps\",\"done\":%s,"
 #ifdef WAVE_EXECUTION_TRACE
                   "\"executionEvents\":true,"
 #else

@@ -22,9 +22,12 @@ export function normalizeRtlTimescale(value: string) {
 
 export function scaleSeconds(scale: string) {
   const match = /^([\d.e+-]+)\s*(s|ms|us|ns|ps|fs)$/i.exec(scale);
-  if (!match || !(Number(match[1]) > 0))
+  const seconds = match
+    ? Number(match[1]) * UNITS[match[2].toLowerCase() as keyof typeof UNITS]
+    : 0;
+  if (!Number.isFinite(seconds) || seconds <= 0)
     throw new Error(`Unsupported time scale ${scale}`);
-  return Number(match[1]) * UNITS[match[2].toLowerCase() as keyof typeof UNITS];
+  return seconds;
 }
 
 export function scaleHertz(scale: string) {

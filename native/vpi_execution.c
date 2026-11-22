@@ -386,7 +386,8 @@ static void record_modport_write(const struct Probe *probe, const char *value, s
 #endif
 
 static void write_assignment(const char *site, const char *value, svBit committed,
-                             const char *operands, const int *range) {
+                             const char *operands, const int *range,
+                             const char *guards) {
     struct Probe *probe = find_probe(site);
     if (!probe) return;
 #ifdef WAVE_WORKBENCH_VCS_MODPORT_CALLBACKS
@@ -412,19 +413,20 @@ static void write_assignment(const char *site, const char *value, svBit committe
         *pending = 0;
     } else {
         if (blocking) *pending = ordinal + 1;
-        emit_probe_at(probe, "assignment-evaluated", value, 0, NULL, range, operands, NULL);
+        emit_probe_at(probe, "assignment-evaluated", value, 0, NULL, range, operands, guards);
         if (pending_read_count && pending_reads[pending_read_count - 1].probe == probe)
             --pending_read_count;
     }
 }
 
 void wave_workbench_write(const char *site, const char *value, svBit committed) {
-    write_assignment(site, value, committed, NULL, NULL);
+    write_assignment(site, value, committed, NULL, NULL, NULL);
 }
 
-void wave_workbench_blocking_write_index(const char *site, const char *value,
-                                         const char *index, int low, int high,
-                                         svBit committed, const char *operands) {
+static void write_blocking_index(const char *site, const char *value,
+                                 const char *index, int low, int high,
+                                 svBit committed, const char *operands,
+                                 const char *guards) {
     const struct Probe *probe = find_probe(site);
     if (!probe) return;
     char *end;
@@ -442,13 +444,100 @@ void wave_workbench_blocking_write_index(const char *site, const char *value,
     if (unknown || errno == ERANGE || selected < low || selected > high) {
         if (!committed) {
             const uint64_t evaluation = ordinal + 1;
-            emit_probe_at(probe, "assignment-evaluated", value, 0, NULL, NULL, samples, NULL);
+            emit_probe_at(probe, "assignment-evaluated", value, 0, NULL, NULL, samples, guards);
             emit_probe(probe, "assignment-no-target", NULL, evaluation, NULL);
         }
         return;
     }
     const int range[2] = { (int)selected, (int)selected };
-    write_assignment(site, value, committed, samples, range);
+    write_assignment(site, value, committed, samples, range, guards);
+}
+
+void wave_workbench_blocking_write_index(const char *site, const char *value,
+                                         const char *index, int low, int high,
+                                         svBit committed, const char *operands) {
+    write_blocking_index(site, value, index, low, high, committed, operands, NULL);
+}
+
+void wave_workbench_blocking_evaluate_index_guarded(
+    const char *site, const char *value, const char *index, int low, int high,
+    const char *operands, const char *guards) {
+    write_blocking_index(site, value, index, low, high, 0, operands, guards);
+}
+
+void wave_workbench_blocking_write_part(
+    const char *site, const char *value, const char *index, int left, int right,
+    svBit committed, const char *storage, const char *operands, const char *guards) {
+    const struct Probe *probe = find_probe(site);
+    if (!probe) return;
+    const size_t slot = (size_t)(probe - probes);
+    const struct ProbeTarget *selection = &probe_targets[slot];
+    uint64_t *pending = &pending_blocking[slot];
+    const size_t width = strspn(value, "01xzXZ");
+    const int64_t low = left < right ? left : right;
+    const int64_t high = left < right ? right : left;
+    char *end;
+    errno = 0;
+    const int64_t base = strtoll(index, &end, 10);
+    const int too_wide = errno == ERANGE;
+    const int unknown = index[0] && !index[1] && strchr("xXzZ", index[0]);
+    if (selection->selected != 2 || strcmp(probe->kind, "blocking") ||
+        width != (size_t)llabs(selection->left) + 1 || value[width] ||
+        width > MAX_PACKED_WIDTH || (!unknown && (end == index || *end))) {
+        recording_failed("invalid blocking part selection for", probe->signal);
+        return;
+    }
+    const char *samples = *operands ? operands : NULL;
+    const char *entries = *guards ? guards : NULL;
+    // Bound the base before computing the other endpoint.
+    const int distant = too_wide || base < low - MAX_PACKED_WIDTH ||
+                        base > high + MAX_PACKED_WIDTH;
+    const int64_t other = distant ? base : base + selection->left;
+    const int64_t first = base < other ? base : other;
+    const int64_t last = base < other ? other : base;
+    if (unknown || distant || first > high || last < low ||
+        first < INT32_MIN || last > INT32_MAX) {
+        if (!committed) {
+            const uint64_t evaluation = ordinal + 1;
+            emit_probe_at(probe, "assignment-evaluated", value, 0, NULL, NULL, samples, entries);
+            emit_probe(probe, unknown || distant || first > high || last < low
+                       ? "assignment-no-target" : "assignment-unobserved", NULL, evaluation, NULL);
+        }
+        return;
+    }
+    const int ascending = left <= right;
+    const int64_t actual_first = first < low ? low : first;
+    const int64_t actual_last = last > high ? high : last;
+    const int attempted[2] = { (int)(ascending ? first : last),
+                               (int)(ascending ? last : first) };
+    const int actual[2] = { (int)(ascending ? actual_first : actual_last),
+                            (int)(ascending ? actual_last : actual_first) };
+    if (!committed) {
+        write_assignment(site, value, 0, samples, attempted, entries);
+        return;
+    }
+    if (!*pending) {
+        recording_failed("blocking part write missing evaluation for", probe->signal);
+        return;
+    }
+    const size_t written_width = (size_t)(actual_last - actual_first + 1);
+    const size_t source_offset = (size_t)llabs((int64_t)actual[0] - attempted[0]);
+    const size_t storage_offset = (size_t)llabs((int64_t)actual[0] - left);
+    if (strlen(storage) == (size_t)(high - low + 1) &&
+        !strncasecmp(storage + storage_offset, value + source_offset, written_width)) {
+        char observed[MAX_PACKED_WIDTH + 1];
+        memcpy(observed, storage + storage_offset, written_width);
+        observed[written_width] = 0;
+        probe_layouts[slot][0] = left;
+        probe_layouts[slot][1] = right;
+        emit_probe_with_steps(probe, "assignment-committed", observed, *pending,
+                              "simulator-commit", actual, NULL, NULL, NULL, 0,
+                              written_width != width ? attempted : NULL, 0);
+    } else {
+        emit_probe_at(probe, "assignment-unobserved", NULL, *pending,
+                      NULL, attempted, NULL, NULL);
+    }
+    *pending = 0;
 }
 
 #ifdef WAVE_WORKBENCH_VCS_MODPORT_CALLBACKS
@@ -476,8 +565,12 @@ static size_t modport_order[MAX_MODPORT_COMPONENTS];
 static size_t modport_count;
 static size_t modport_observed;
 static int modport_active;
+static int modport_deferred;
+static int modport_read_only_pending;
 static uint64_t modport_tick;
 static size_t modport_covered;
+static uint64_t ambiguous_modport_tick[MAX_WATCHES];
+static int ambiguous_modport_watch[MAX_WATCHES];
 static const size_t modport_widths[sizeof(probes) / sizeof(*probes)] =
     WAVE_WORKBENCH_VCS_MODPORT_WIDTHS;
 
@@ -499,6 +592,8 @@ static void arm_modport_write(struct ModportWrite *write) {
             strcmp(watch->signal, probe->signal))
             continue;
         struct ModportTarget *target = &modport_targets[index];
+        if (ambiguous_modport_watch[index] && ambiguous_modport_tick[index] == tick())
+            target->uncertain = 1;
         if (!target->tracked) {
             const char *bits = packed_value(watch);
             if (!bits) return;
@@ -534,7 +629,7 @@ static void arm_modport_write(struct ModportWrite *write) {
 }
 
 static void observe_modport_change(const struct Watch *watch, const char *bits) {
-    if (!modport_active) return;
+    if (!modport_active || tick() != modport_tick) return;
     const int index = (int)(watch - watches);
     struct ModportTarget *target = &modport_targets[index];
     if (!target->tracked || target->uncertain || !strcasecmp(target->prior, bits)) return;
@@ -595,15 +690,54 @@ static void finish_modport_observation(void) {
     modport_covered = 0;
 }
 
+static void finish_deferred_modport(int competing_write) {
+    if (!modport_deferred) return;
+    modport_deferred = 0;
+    const size_t count = modport_count;
+    finish_modport_observation();
+    for (size_t item = 0; item < count; ++item) {
+        const struct ModportWrite *write = &modport_writes[item];
+        uint64_t *pending = &pending_blocking[write->probe];
+        if (!*pending) continue;
+        if (competing_write && write->watch >= 0) {
+            ambiguous_modport_watch[write->watch] = 1;
+            ambiguous_modport_tick[write->watch] = tick();
+        }
+        emit_probe(&probes[write->probe], "assignment-unobserved", NULL, *pending, NULL);
+        *pending = 0;
+    }
+}
+
+static PLI_INT32 on_modport_read_only(p_cb_data callback) {
+    (void)callback;
+    modport_read_only_pending = 0;
+    if (!failed) finish_deferred_modport(0);
+    return 0;
+}
+
 static void record_modport_write(const struct Probe *probe, const char *value, svBit committed) {
     const size_t index = (size_t)(probe - probes);
     uint64_t *pending = &pending_blocking[index];
+    if (!committed) finish_deferred_modport(1);
     if (modport_count &&
         strcmp(probe_owners[index], probe_owners[modport_writes[0].probe])) {
         recording_failed("interleaved modport assignment probe for", probe->instance);
         return;
     }
     if (committed) {
+        if (modport_deferred) return;
+        if (modport_active && !modport_observed) {
+            if (!modport_read_only_pending) {
+                s_cb_data entry = {
+                    .reason = cbReadOnlySynch, .cb_rtn = on_modport_read_only, .time = &zero_delay,
+                };
+                modport_read_only_pending = vpi_register_cb(&entry) != NULL;
+            }
+            if (modport_read_only_pending) {
+                modport_deferred = 1;
+                return;
+            }
+        }
         if (modport_count) finish_modport_observation();
         if (*pending) {
             emit_probe(probe, "assignment-unobserved", NULL, *pending, NULL);
@@ -639,7 +773,12 @@ static void record_modport_write(const struct Probe *probe, const char *value, s
 
 void wave_workbench_blocking_evaluate_sampled(const char *site, const char *value,
                                              const char *operands) {
-    write_assignment(site, value, 0, operands, NULL);
+    write_assignment(site, value, 0, operands, NULL, NULL);
+}
+
+void wave_workbench_blocking_evaluate_guarded(const char *site, const char *value,
+                                             const char *operands, const char *guards) {
+    write_assignment(site, value, 0, operands, NULL, guards);
 }
 
 void wave_workbench_begin_evaluation(const char *site) {
@@ -862,6 +1001,12 @@ unsigned long long wave_workbench_nba_evaluate_index(const char *site, const cha
     return evaluate_nba(site, value, index, NULL, NULL);
 }
 
+unsigned long long wave_workbench_nba_evaluate_index_sampled(
+    const char *site, const char *value, const char *index,
+    const char *operands, const char *guards) {
+    return evaluate_nba(site, value, index, operands, *guards ? guards : NULL);
+}
+
 unsigned long long wave_workbench_nba_evaluate_sampled(const char *site, const char *value,
                                                        const char *operands) {
     return evaluate_nba(site, value, NULL, operands, NULL);
@@ -1022,8 +1167,29 @@ static void write_json_string(FILE *stream, const char *value) {
     fputc('"', stream);
 }
 
+struct InterfaceAccess {
+    char instance[4097];
+    char signal[4097];
+};
+
+static void resolve_interface_access(vpiHandle operand, struct InterfaceAccess *access) {
+    const int type = operand ? vpi_get(vpiType, operand) : 0;
+    vpiHandle port = type == vpiIODecl || type == vpiPort
+        ? vpi_handle(vpiParent, operand) : NULL;
+    vpiHandle expr = port && vpi_get(vpiType, port) == vpiModport
+        ? vpi_handle(vpiExpr, operand) : NULL;
+    if (!expr) return;
+    const char *path = vpi_get_str(vpiFullName, expr);
+    const char *separator = path ? strrchr(path, '.') : NULL;
+    if (!separator || separator == path || !separator[1] || strlen(path) > 4096) return;
+    memcpy(access->instance, path, (size_t)(separator - path));
+    strcpy(access->signal, separator + 1);
+}
+
 static int write_statement(FILE *stream, const struct Statement *statement,
-                           uint64_t time, int framed) {
+                           uint64_t time, int framed,
+                           const struct InterfaceAccess *read,
+                           const struct InterfaceAccess *write) {
     fprintf(stream, "%s{\"tick\":\"%" PRIu64 "\",\"ordinal\":%" PRIu64
             ",\"kind\":\"assignment-entered\",\"instance\":\"%s\","
             "\"statementId\":\"vcs-%zu\",\"writeKind\":\"%s\",\"statementSite\":{\"file\":",
@@ -1033,6 +1199,22 @@ static int write_statement(FILE *stream, const struct Statement *statement,
     write_json_string(stream, statement->file);
     fprintf(stream, ",\"line\":%d}", statement->line);
     if (statement->signal) fprintf(stream, ",\"signal\":\"%s\"", statement->signal);
+    if (*read->instance || *write->instance) {
+        const struct InterfaceAccess *accesses[] = { read, write };
+        const char *directions[] = { "read", "write" };
+        const char *delimiter = ",\"interfaceAccesses\":[";
+        for (size_t index = 0; index < 2; ++index) {
+            const struct InterfaceAccess *access = accesses[index];
+            if (!*access->instance) continue;
+            fprintf(stream, "%s{\"direction\":\"%s\",\"instance\":", delimiter, directions[index]);
+            write_json_string(stream, access->instance);
+            fputs(",\"signal\":", stream);
+            write_json_string(stream, access->signal);
+            fputc('}', stream);
+            delimiter = ",";
+        }
+        fputc(']', stream);
+    }
     fprintf(stream, "}%s\n", framed ? "}" : "");
     return !ferror(stream);
 }
@@ -1041,8 +1223,12 @@ static PLI_INT32 on_statement(p_cb_data callback) {
     if (failed || !ready) return 0;
     const struct Statement *statement = (const struct Statement *)callback->user_data;
     const uint64_t time = tick();
-    if ((recording && !write_statement(recording, statement, time, 0)) ||
-        (live && !write_statement(stdout, statement, time, 1)))
+    struct InterfaceAccess read = { { 0 }, { 0 } };
+    struct InterfaceAccess write = { { 0 }, { 0 } };
+    resolve_interface_access(vpi_handle(vpiRhs, callback->obj), &read);
+    resolve_interface_access(vpi_handle(vpiLhs, callback->obj), &write);
+    if ((recording && !write_statement(recording, statement, time, 0, &read, &write)) ||
+        (live && !write_statement(stdout, statement, time, 1, &read, &write)))
         recording_failed("cannot write assignment entry for", statement->scope);
     else
         ++ordinal;
@@ -1060,7 +1246,7 @@ static int write_snapshot(int done) {
         if (!bits) return 0;
         memcpy(values[index], bits, (size_t)watches[index].width + 1);
     }
-    fprintf(stdout, "wave-workbench {\"snapshot\":{\"tick\":\"%" PRIu64
+    fprintf(stdout, "wave-workbench {\"snapshot\":{\"schemaVersion\":1,\"tick\":\"%" PRIu64
             "\",\"scale\":\"%d%s\",\"done\":%s,\"executionEvents\":%s,"
             "\"valueChangeEvents\":true,\"statementEntryEvents\":%s,\"nbaCommitEvents\":%s,"
             "\"modportCommitEvents\":%s,\"values\":{",
@@ -1094,6 +1280,9 @@ static PLI_INT32 on_next_slot(p_cb_data callback) {
 static PLI_INT32 on_read_only(p_cb_data callback) {
     (void)callback;
     if (failed) return 0;
+#ifdef WAVE_WORKBENCH_VCS_MODPORT_CALLBACKS
+    finish_deferred_modport(0);
+#endif
     if (pending_advance) {
         pending_advance = 0;
         if (!write_snapshot(0)) return 0;
@@ -1120,6 +1309,9 @@ static PLI_INT32 on_read_only(p_cb_data callback) {
 
 static PLI_INT32 on_end(p_cb_data callback) {
     (void)callback;
+#ifdef WAVE_WORKBENCH_VCS_MODPORT_CALLBACKS
+    if (!failed) finish_deferred_modport(0);
+#endif
 #if defined(WAVE_WORKBENCH_VCS_PROBES) && defined(WAVE_WORKBENCH_VCS_PLI_SITES)
     for (size_t index = 0; index < sizeof(probes) / sizeof(*probes); ++index)
         if (pending_blocking[index] && !strcmp(probes[index].kind, "subroutineCall"))

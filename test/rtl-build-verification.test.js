@@ -131,6 +131,10 @@ test("trace provenance compares waveform hashes, effective compilation and dirty
   assert.deepEqual((await verifyScale("1ns/10ps")).mismatches, ["Default RTL timescale"]);
   await fs.writeFile(manifest, JSON.stringify({ ...configuration, default_timescale: "1ps/1ns" }));
   await assert.rejects(readTraceBuildManifest(manifest), /Unsupported trace build manifest/);
+  for (const schemaVersion of [undefined, 0, 2, "1"]) {
+    await fs.writeFile(manifest, JSON.stringify({ ...configuration, schemaVersion }));
+    await assert.rejects(readTraceBuildManifest(manifest), /Unsupported trace build manifest/);
+  }
   const changed = await verify({ ...effective, defines: ["SIM=2"] }, new Map([[source, "module edited; endmodule\n"]]));
   assert.equal(changed.status, "mismatched");
   assert.ok(changed.mismatches.includes("Predefined macros"));

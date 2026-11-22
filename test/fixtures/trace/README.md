@@ -318,6 +318,226 @@ waveform roots, dump FSDB with VCS and query `alias_tb.x.receiver.rx_data` or
 `alias_tb.x.sender.tx_data` at tick 3. Both resolve to `alias_tb.x.datum` and
 show the value `1`.
 
+## VCS Driver and Load matrix
+
+Build `driver_load_tb.sv` with VCS using the command below, substituting
+`driver_load_tb` for the module name and filename. Run the regression with
+`WAVE_TEST_VCS_DRIVER_LOAD="$PWD"` and the test name pattern `VCS case data`.
+
+The DUT output reaches zero on falling reset edges at 1 and 10 ns.
+At 3 ns the second NBA takes effect, and a clock edge at 5 ns leaves the
+previous value in place. The `case` selects two different data paths at
+7 and 9 ns. The Load checks cover data, control, bit selection and trigger
+edges.
+
+## VCS virtual modport handles
+
+Build and run in a scratch directory with VCS and configure a Trace-capable
+VIDE server in the scratch workspace.
+
+```sh
+cp "$repo/test/fixtures/trace/virtual_if_tb.sv" .
+printf '%s\n' virtual_if_tb.sv > sources.f
+vcs -full64 -kdb -sverilog -timescale=1ns/1ns -debug_access+all \
+  -top virtual_if_tb virtual_if_tb.sv -o simv
+./simv
+WAVE_TEST_VCS_VIRTUAL_INTERFACE="$PWD" node --test \
+  --test-name-pattern='VCS virtual-interface' "$repo/test/mcp-headless.test.js"
+```
+
+The virtual handles select `left` first and `right` second. The data written
+to the physical members is 3 at 1 ns and 9 at 4 ns. `result` receives the
+values on the next tick. The Load query for `stimulus` reports the two
+unresolved write locations, and the Driver query for `result` reports both
+unresolved read locations. The VCD contains the physical member values.
+
+Capture the runtime binding with the VPI statement callbacks.
+
+```sh
+cc -std=c11 -shared -fPIC -I"$VCS_HOME/include" \
+  "$repo/native/vpi_execution.c" -o wave_vpi.so
+vcs -full64 -kdb -sverilog -timescale=1ns/1ns -debug_access+all +vpi \
+  -top virtual_if_tb -load "$PWD/wave_vpi.so:wave_workbench_register_vpi" \
+  virtual_if_tb.sv -o simv
+./simv +wave_statement_scope=virtual_if_tb \
+  "+wave_execution_events=$PWD/raw.jsonl" +wave_watch=virtual_if_tb.result \
+  +wave_watch=virtual_if_tb.left.data +wave_watch=virtual_if_tb.right.data
+node "$repo/scripts/verilator-execution.mjs" seal-vpi \
+  trace.vcd raw.jsonl execution-v2.jsonl
+WAVE_TEST_VCS_VIRTUAL_INTERFACE_EXECUTION="$PWD" node --test \
+  --test-name-pattern='physical interface accesses' "$repo/test/mcp-headless.test.js"
+```
+
+Query `wave_execution_trace` for either physical member or for `result`.
+Statement entries list the member and access direction. Value-change events
+record physical transitions separately.
+
+## VCS hierarchical reads
+
+Build `xmr_leaf.sv` and `xmr_tb.sv` in a scratch directory with VCS and
+run the simulation. Keep both sources and `sources.f` beside `simv.daidir`
+and `xmr.vcd`.
+
+```sh
+printf '%s\n' xmr_leaf.sv xmr_tb.sv > sources.f
+vcs -full64 -sverilog -kdb -debug_access+all -top xmr_tb -f sources.f -o simv
+./simv
+```
+
+Point `WAVE_TEST_VCS_XMR` at the scratch directory and
+`WAVE_WORKBENCH_VIDE_PATH` at the modified VIDE executable. Run
+`node --test --test-name-pattern='binds VCS hierarchical reads' test/mcp-headless.test.js`.
+The regression checks the output port and local net in `u_leaf`, distinct
+bindings for two instances of `local_value`, and the constant-index path
+`lane[1].u_indexed.local_value`. It checks the transition from
+`u_other.local_value` to `q_pair` at 4 ns and the load from `stimulus`
+to the hierarchical write target `u_leaf.external_value`. Starting at the
+child declarations, it checks the parent write, the distinct sets of reads
+from `u_leaf` and `u_other`, downstream Load continuation to `q_follow`,
+and the absence of a read from `lane[0].u_indexed.local_value`.
+For the same-file variant, concatenate `xmr_leaf.sv` and `xmr_tb.sv` into
+one source file in a separate scratch directory and build with that source
+alone. Set `WAVE_TEST_VCS_XMR_SINGLE` to its directory.
+
+## VCS Load through an intermediate cross-file reference
+
+Copy the files in `xmr_intermediate` to a scratch directory and run
+these commands in that directory.
+
+~~~sh
+printf '%s\n' '-top mid_tb' mid_leaf.sv mid_observer.sv mid_tb.sv > sources.f
+vcs -full64 -sverilog -kdb -debug_access+all -timescale=1ns/1ns -f sources.f -o simv
+./simv
+~~~
+
+Set `WAVE_TEST_VCS_XMR_INTERMEDIATE` to that directory and run
+`node --test --test-name-pattern='intermediate signal' test/mcp-headless.test.js`
+with the rebuilt VIDE server. Load from `u_leaf.stimulus` reaches
+`u_observer.observed` through `u_leaf.middle`. The same lookup from
+`u_other.stimulus` stays in that instance. The time graph for `observed`
+links to the change of `u_leaf.middle` at 2 ns.
+
+To check the same reference from an included macro, make a second build
+directory and add `+incdir+.` and `+define+WAVE_TEST_XMR_MACRO` to the filelist.
+Set `WAVE_TEST_VCS_XMR_INTERMEDIATE_MACRO` to the second directory.
+
+Add `+define+WAVE_TEST_XMR_NESTED_MACRO` alongside the macro flag to
+exercise nested expansion with token pasting. Set
+`WAVE_TEST_VCS_XMR_NESTED_MACRO` to that build directory.
+
+## VCS upward references
+
+Copy `xmr_up_leaf.sv` and `xmr_upward.sv` to a scratch directory and build
+them with VCS.
+
+```sh
+printf '%s\n' xmr_up_leaf.sv xmr_upward.sv > sources.f
+vcs -full64 -sverilog -kdb -debug_access+all -top xmr_up_tb -f sources.f -o simv
+./simv
+```
+
+Set `WAVE_TEST_VCS_XMR_UPWARD` to that directory and
+`WAVE_WORKBENCH_VIDE_PATH` to the modified VIDE executable. Run
+`node --test --test-name-pattern='binds VCS upward references' test/mcp-headless.test.js`.
+The same source reference reads each parent's own `shared_value`.
+The regression checks both static inputs and the 2 ns and 4 ns transitions.
+Loads from each leaf's `write_value` reach its own parent's `external_value`.
+Starting at the parent signals, Loads reach the corresponding leaf result and
+Drivers identify that leaf's writer in `xmr_up_leaf.sv`.
+
+## VCS parameterized XMR
+
+Copy `xmr_leaf.sv` and `xmr_parameter_tb.sv` to a scratch directory.
+
+```sh
+printf '%s\n' xmr_leaf.sv xmr_parameter_tb.sv > sources.f
+vcs -full64 -sverilog -kdb -debug_access+all -top xmr_parameter_tb -f sources.f -o simv
+./simv
+```
+
+Set `WAVE_TEST_VCS_XMR_PARAMETER` to that directory and
+`WAVE_WORKBENCH_VIDE_PATH` to the modified VIDE executable. Run
+`node --test --test-name-pattern='actual VCS parameter' test/mcp-headless.test.js`.
+The two instances use the default `SELECT=0` and the override `SELECT=1`.
+The regression checks the selected lane, the 2 ns and 4 ns transitions,
+and reverse Load queries from both elements. The result using
+`(SELECT + 1) % 2` selects the opposite lane in each instance.
+
+## Equal VCS drivers
+
+Copy `equal_drivers_tb.sv` to a scratch directory and run VCS.
+
+```sh
+printf '%s\n' equal_drivers_tb.sv > sources.f
+vcs -full64 -sverilog -kdb -debug_access+all -top equal_drivers_tb -f sources.f -o simv
+./simv
+```
+
+Set `WAVE_TEST_VCS_EQUAL_DRIVERS` to that directory and run
+`node --test --test-name-pattern='preserves both equal VCS drivers' test/mcp-headless.test.js`.
+At tick 2 the VCD records `x` and `1` in order. Both continuous assignments
+remain candidates for the final value, with their own source locations.
+
+## Concurrent VCS task calls
+
+Copy `concurrent_task_tb.sv` to a scratch directory and set `repo` to the
+Wave Workbench checkout. The two calls share one source location and keep
+separate automatic arguments.
+
+```sh
+printf '\012\013' > stimulus.bin
+printf '%s\n' concurrent_task_tb.sv > sources.f
+node "$repo/test/fixtures/trace/concurrent-task-probes.cjs"
+cc -std=c11 -shared -fPIC -I"$VCS_HOME/include" -I"$PWD" \
+  -DWAVE_WORKBENCH_VCS_PROBES "$repo/native/vpi_execution.c" -o wave_vpi.so
+vcs -full64 -sverilog -kdb -debug_access+all +vpi -top concurrent_task_tb \
+  -load "$PWD/wave_vpi.so:wave_workbench_register_vpi" "$PWD/wave_vpi.so" \
+  -f sources.f -o simv
+./simv +wave_execution_events=raw.jsonl \
+  +wave_watch=concurrent_task_tb.bus.data +wave_watch=concurrent_task_tb.result
+node "$repo/scripts/verilator-execution.mjs" seal-vpi task.vcd raw.jsonl \
+  sealed.jsonl probes.json --task-transfers task-transfers.json
+```
+
+Set `WAVE_TEST_VCS_CONCURRENT_TASK` to that directory and run
+`node --test --test-name-pattern='matches concurrent VCS task calls' test/mcp-headless.test.js`.
+Both calls enter at tick 1. At tick 3 the visible writes occur in reverse
+order. MCP links each field update to the matching argument and the actual
+`$fgetc` offset.
+
+## Wildcard modport binding
+
+Build `wildcard_tb.sv` with VCS and KDB. Set `WAVE_TEST_WILDCARD_KDB`
+to the resulting `simv.daidir` and run the wildcard test in
+`test/kdb.test.js`. Repeat with `WAVE_TEST_INDEPENDENT=1`.
+The implicit `.*` connection maps `sink.link.selected` to
+`link.data[7]` and `link.data[5:4]` in that order, and connects
+`sink.result` to the parent `result`. In `wildcard.vcd`, trace
+`wildcard_tb.result[0]` at tick 2 to `wildcard_tb.link.data[4]`.
+
+## Dynamic Verilator output part-select
+
+Copy `dynamic_output_tb.sv` to a scratch directory.
+
+```sh
+printf '%s\n' dynamic_output_tb.sv > sources.f
+verilator --json-only --top-module dynamic_output_tb dynamic_output_tb.sv
+verilator --binary --timing --trace-vcd --top-module dynamic_output_tb dynamic_output_tb.sv
+./obj_dir/Vdynamic_output_tb
+```
+
+Set `WAVE_TEST_VERILATOR_DYNAMIC_OUTPUT` to this directory and run
+`node --test --test-name-pattern='Verilator output part-select' test/mcp-headless.test.js`.
+At 2 ns the high bit receives the selected output value, the low bit
+retains its prior value and Load from `idx` reaches the destination bus.
+
+The `dynamic_output_matrix.sv` fixture adds a widened selector, an addition,
+a descending part select, an ascending bus and a nonzero declared bound.
+Copy it to the scratch directory as `ports.sv`, list that file in
+`sources.f`, and use the same Verilator commands with top `ports`. Set
+`WAVE_TEST_VERILATOR_OUTPUT_MATRIX` to the scratch directory. The regression
+checks the five changed bits at tick 2 and their Load paths from `ports.idx`.
+
 ## Modport bit and part selections
 
 Build `modport_slice_tb.sv` using the VCS command below with `-top slice_tb`.
@@ -472,6 +692,50 @@ NBA commits in this recording are 168 and 226. A path query for
 `state_q` joins the sampled guard to the root in three edges.
 Use `WAVE_TEST_VCS_RV32A_READY_WRITER` with the instrumented fixture
 and the same Node test command to check these paths.
+
+To trace the arbitration loop, add maps for `selected_valid` and
+`selected_hart` with `captureGuardEntry: true`. Add both processes
+to writer coverage and repeat the instrumented run. At the branch that
+writes `selected_valid=1`, the probe records the request bus, the
+loop-local `idx`, and the previous `selected_valid` value at entry.
+The two paths reach request bit 1 at the 370000 ps branch entry and
+request bit 0 at the 380000 ps entry. Both request bits rose at
+370000 ps. The ready evaluation at 455000 ps reads the
+`selected_valid` write from 380000 ps, before a later same-slot
+re-evaluation. Use `WAVE_TEST_VCS_RV32A_BRANCH` with this fixture.
+
+### VCS nested packed guards
+
+Use `vcs_nested_packed_guard_tb.sv` with the VCS DPI probe steps below.
+Build top `nested_packed_guard_tb` and map `q` with
+`captureGuardEntry: true`. Keep the original KDB in `original/`.
+Build the instrumented copy with `generate-vcs-nba`, watch `req`,
+`idx`, and `q` in that order, and seal the reference waveform and
+recording as `probe/reference.vcd` and `probe/covered.jsonl`.
+Declare the sole procedural writer of `q` from tick 1. Bind the
+reference build manifest to the new waveform and executable hashes.
+
+The outer condition at tick 3 reads bit 0 from the change at tick 2.
+The inner condition at tick 5 reads bit 1 from the change at tick 4.
+The write at tick 7 records a third bus value and index. Trace
+`nested_packed_guard_tb.q` at tick 7 with the sealed recording.
+The two control edges carry their own source bit, callback ordinal,
+entry tick, and RTL position.
+
+Repeat with `vcs_nested_packed_nba_guard_tb.sv` and top
+`nested_packed_nba_guard_tb` for a fixed-target NBA. The outer condition
+samples bit 0 at tick 3 before callbacks 1 and 2 drop and restore the bit.
+The inner condition samples `X` on bit 1 and takes the else branch at tick 5.
+Callback 5 changes the bus after that entry. The trace for the tick 7 NBA
+commit 9 should link to request callbacks 0 and 3. For live trace, set a
+commit breakpoint on the mapped else assignment at line 18.
+
+~~~sh
+WAVE_WORKBENCH_VIDE_PATH=/path/to/vide \
+WAVE_TEST_VCS_NESTED_PACKED_GUARD=/path/to/fixture \
+WAVE_TEST_VCS_NESTED_PACKED_NBA_GUARD=/path/to/nba-fixture \
+node --test --test-name-pattern='each nested packed guard' test/mcp-headless.test.js
+~~~
 
 ### VCS modport component evaluations
 
@@ -1062,6 +1326,32 @@ actual and attempted ranges. Older captures can report these outcomes
 as unobserved. The unknown index at tick 10 produces
 `assignment-no-target`. Later in-bounds commits remain verifiable.
 
+Use `vcs_guarded_indexed_nba_tb.sv` and map `q` with
+`captureGuardEntry: true` to exercise nested guards on an indexed
+part-select. Keep the original KDB in `original/`. Watch `req`, `idx`,
+`q`, and `dest` in order and declare the sole procedural writer of `q`
+from tick 1. Put the verified waveform and sealed recording in
+`probe/reference.vcd` and `probe/covered.jsonl`. At tick 7,
+the NBA selects `[2:3]` using the value of `dest` from tick 6.
+The subsequent transition of `dest` to zero happens after the NBA
+evaluation. The trace for `q[2]` should retain this target index and
+the two source bits sampled at the branch entries.
+
+~~~sh
+WAVE_WORKBENCH_VIDE_PATH=/path/to/vide \
+WAVE_TEST_VCS_GUARDED_INDEXED_NBA=/path/to/fixture \
+node --test --test-name-pattern='recorded guards and target' test/mcp-headless.test.js
+~~~
+
+For a single-bit blocking write, repeat with
+`vcs_guarded_indexed_blocking_tb.sv` and top
+`guarded_indexed_blocking_tb`. The commit at tick 7 writes bit 2 and
+retains the two branch-entry reads. At tick 8 the target index is
+unknown. `wave_execution_trace` pairs the two recorded branch-entry
+samples on evaluation 10 with the `assignment-no-target` outcome 11.
+Use `WAVE_TEST_VCS_GUARDED_INDEXED_BLOCKING` and the same Node test
+command to verify both cases.
+
 Use `vcs_partial_target_tb.sv`, top `partial_tb`, to exercise clipping
 at both ends of ascending and descending declarations. Map writes to
 `asc_left`, `asc_right`, `desc_left`, and `desc_right`, and declare
@@ -1094,6 +1384,73 @@ write of `4'b1000`. To include the index and control values, append `index` and
 `phase` to the watch list in both recordings. Older captures can report
 some overlapping commits as unobserved. Compare the settled values with
 the original VCD and use the instrumented VCD for replay.
+
+### Same-range NBA writes in VCS and Xcelium
+
+Copy `same_range_tb.sv` into `original/` under a scratch directory.
+Write `same_range_tb.sv` to `original/sources.f`. Build the original
+with VCS and KDB in that directory. Follow the [VCS NBA probe steps](#vcs-nba-commit-probes)
+in `probe/` using an execution map for `same_range_tb.q` with
+`captureOperands: true`. Declare its initial process as the writer
+from tick 1. Watch `q`, `a`, `b`, and `c` in that order.
+Use `probe/reference.vcd` and `probe/covered.jsonl` for replay and keep
+the KDB at `original/simv.daidir`. Save the build manifest in
+`probe/reference.vcd.wave-build.json`. From the fixture directory:
+
+~~~sh
+node --input-type=commonjs <<'JS'
+const fs = require("node:fs");
+const { createHash } = require("node:crypto");
+const sha256 = path => createHash("sha256").update(fs.readFileSync(path)).digest("hex");
+const source = fs.realpathSync("original/same_range_tb.sv");
+fs.writeFileSync("probe/reference.vcd.wave-build.json", JSON.stringify({
+  format: "wave-workbench-build", schemaVersion: 1,
+  waveformSha256: sha256("probe/reference.vcd"), harnessSha256: sha256("probe/simv"),
+  files: [{ path: source, sha256: sha256(source) }], roots: [source],
+  defines: [], include_dirs: [], top_modules: ["same_range_tb"],
+}));
+JS
+~~~
+
+Generate the elaboration tree in `original/` with Verilator 5.054.
+In `xcelium/`, build the VPI callback recorder and run the same original
+source with Xcelium. Set `repo` to the Wave Workbench checkout and
+`xcelium_include` to Xcelium's `tools/include` directory.
+
+~~~sh
+(cd original && verilator --json-only --top-module same_range_tb \
+  --json-only-output same_range.tree.json \
+  --json-only-meta-output same_range.tree.meta.json same_range_tb.sv)
+(
+  cd xcelium
+  cc -std=c11 -shared -fPIC -I"$xcelium_include" \
+    "$repo/native/vpi_execution.c" -o wave_vpi.so
+  xrun -64bit -sv -access +rwc -top same_range_tb \
+    -loadvpi "$PWD/wave_vpi.so:wave_workbench_register_vpi" \
+    ../original/same_range_tb.sv +wave_execution_events=raw.jsonl \
+    +wave_watch=same_range_tb.q +wave_watch=same_range_tb.a \
+    +wave_watch=same_range_tb.b +wave_watch=same_range_tb.c
+  node "$repo/scripts/verilator-execution.mjs" seal-vpi live.vcd raw.jsonl sealed.jsonl
+)
+~~~
+
+VCS T-2022.06-SP2 records three evaluations in each slot, two
+`assignment-unobserved` outcomes and the final commit (11 at 2 ns and 20
+at 4 ns). The 4 ns commit preserves the bus value. The bit-level time
+trace reports incomplete transition evidence for both slots. Xcelium
+23.09-s013 records all three bus changes in each slot in both VCD and VPI.
+At 4 ns, `q[2]` changes twice. Query with `changeOrder` 1 and 2 for
+callback ordinals 9 and 11. The time trace reports matching callback values
+and keeps assignment evidence at candidate confidence.
+
+Create `workspace/` under the fixture directory and run the regression
+with the modified VIDE server.
+
+~~~sh
+WAVE_WORKBENCH_VIDE_PATH=/path/to/vide \
+WAVE_TEST_NBA_SAME_RANGE=/path/to/fixture \
+node --test --test-name-pattern='same-range NBA' test/mcp-headless.test.js
+~~~
 
 ### VCS packed dependency with an unresolved guard
 
@@ -1499,6 +1856,22 @@ of `first_q` as candidates. With the execution log, evaluation 7
 records RHS 1 and keeps the edge from the `first_q` change at tick 1.
 Compare the offline graph, the online graph and the Markdown report.
 
+## Verilator assignments written with macros
+
+Build the fixture in a scratch directory with Verilator 5.054 and a C++20
+compiler. The test checks the source line and column of two macro calls in
+each of two elaborated instances. Those sites report
+`unsupportedMacroExpansion` and leave the probe IDs unset.
+
+```sh
+cp "$repo/test/fixtures/trace/macro_map_tb.sv" .
+verilator --binary --timing --trace-vcd --top-module macro_map_tb macro_map_tb.sv
+./obj_dir/Vmacro_map_tb
+verilator --json-only --top-module macro_map_tb macro_map_tb.sv
+WAVE_TEST_VERILATOR_MACRO_MAP="$PWD" node --test \
+  --test-name-pattern='both Verilator macro sites' "$repo/test/mcp-headless.test.js"
+```
+
 ## Recorded DPI call
 
 The `recorded_dpi` fixture calls `adjust` from a blocking assignment. Generate
@@ -1517,3 +1890,33 @@ Run the executable from the scratch directory and redirect stdout to
 `TOP.recorded_dpi_tb.result`. Set `WAVE_TEST_RECORDED_DPI` to the scratch
 directory to run the replay test. At tick 3, the recorded argument and return
 value are 4 and 8. The evaluated assignment points to both C++ locations.
+
+### Deferred DPI worker
+
+Set `repo` to the Wave Workbench checkout and run these commands in a clean
+scratch directory with Verilator 5.054 on `PATH`.
+
+```sh
+cp "$repo/test/fixtures/trace/deferred_dpi/recorded_dpi_tb.sv" \
+  "$repo/test/fixtures/trace/deferred_dpi/worker.cc" .
+cp "$repo/test/fixtures/trace/recorded_dpi/harness.cc" .
+node "$repo/test/fixtures/trace/deferred_dpi/map.cjs"
+node "$repo/scripts/verilator-execution.mjs" generate maps.json generated external.json
+verilator --cc --exe --build --trace-vcd --top-module recorded_dpi_tb \
+  -CFLAGS "-std=c++17 -I$repo/native -I$PWD/generated -pthread" -LDFLAGS "-pthread" \
+  generated/wave_workbench_probe.sv generated/recorded_dpi_tb.sv \
+  harness.cc worker.cc "$repo/native/verilator_execution.cc"
+./obj_dir/Vrecorded_dpi_tb > raw.jsonl
+node "$repo/scripts/verilator-execution.mjs" seal generated/execution-probes.json \
+  trace.vcd 1ps raw.jsonl execution.jsonl coverage.json
+WAVE_TEST_DEFERRED_DPI="$PWD" WAVE_TEST_DEFERRED_DPI_STAMPS=1 \
+  WAVE_TEST_DEFERRED_DPI_AUTONOMOUS=1 node --test \
+  --test-name-pattern='deferred Verilator DPI' "$repo/test/rtl-execution.test.js"
+```
+
+At tick 3 the RTL input is 4, the worker's captured input is 3, and its result
+is 6. The test checks both C++ source hashes and matches the live event
+sequence against the VCD replay. The callback is captured at tick 1 and
+delivered to the recorder at the next slot boundary. RTL consumes the
+result at tick 3. Call `wave_workbench_observe_external` from the worker
+for source-mapped observations and join workers before the final drain.

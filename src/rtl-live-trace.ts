@@ -22,9 +22,11 @@ import { project } from "./shared/signals";
 import { normalizeBits } from "./rtl-trace-values";
 import type { TraceRuntimeInputs } from "./rtl-build-verification";
 import type { LiveWaveUpdate } from "./shared/live-wave";
+import { scaleSeconds } from "./shared/time";
 import { LiveWaveHistory } from "./live-wave-history";
 
 export interface LiveSnapshot {
+  schemaVersion?: 1;
   tick: string;
   scale: string;
   values: Record<string, string>;
@@ -295,6 +297,11 @@ export class LiveTraceSession {
         }
         const snapshot = frame.snapshot as LiveSnapshot | undefined;
         if (
+          snapshot?.schemaVersion !== undefined &&
+          snapshot.schemaVersion !== 1
+        )
+          throw Error("Unsupported live simulation snapshot schema.");
+        if (
           !snapshot ||
           !/^\d{1,20}$/.test(snapshot.tick) ||
           typeof snapshot.done !== "boolean" ||
@@ -317,6 +324,14 @@ export class LiveTraceSession {
           )
         )
           throw Error("Invalid live simulation reply.");
+        scaleSeconds(snapshot.scale);
+        if (
+          this.snapshot &&
+          snapshot.schemaVersion !== this.snapshot.schemaVersion
+        )
+          throw Error(
+            "Live simulation snapshot schema changed during the session.",
+          );
         if (this.snapshot && snapshot.scale !== this.snapshot.scale)
           throw Error("Simulation time unit changed during the session.");
         const previousEvent = this.events.at(-1);
@@ -490,9 +505,13 @@ export class LiveTraceSession {
       Object.hasOwn(this.snapshot.values, instance + "." + signal);
     const matching = this.events.filter(
       (event) =>
-        event.instance === instance &&
-        (event.kind !== "assignment-entered" || event.signal !== undefined) &&
-        (event.signal === undefined || event.signal === signal) &&
+        ((event.instance === instance &&
+          (event.kind !== "assignment-entered" || event.signal !== undefined) &&
+          (event.signal === undefined || event.signal === signal)) ||
+          event.interfaceAccesses?.some(
+            (access) =>
+              access.instance === instance && access.signal === signal,
+          )) &&
         first <= BigInt(event.tick) &&
         BigInt(event.tick) <= last,
     );

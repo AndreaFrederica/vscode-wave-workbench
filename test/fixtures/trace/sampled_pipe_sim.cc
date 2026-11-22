@@ -31,7 +31,7 @@ int main() {
       if (command == "advance" && tick < 7) eval(++tick);
       else if (command != "current" && command != "advance")
         return 2;
-      std::printf("{\"snapshot\":{\"tick\":\"%u\",\"scale\":\"1ps\","
+      std::printf("{\"snapshot\":{\"schemaVersion\":1,\"tick\":\"%u\",\"scale\":\"1ps\","
         "\"done\":%s,\"executionEvents\":true,\"values\":{"
         "\"TOP.sampled_pipe_tb.clk\":\"%u\","
         "\"TOP.sampled_pipe_tb.value\":\"%u\","

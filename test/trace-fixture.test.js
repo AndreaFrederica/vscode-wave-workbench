@@ -1418,6 +1418,76 @@ test("trace requests wait for VIDE's startup index and preserve other failures",
   );
 });
 
+test("VIDE results arriving after trace cancellation are discarded", async () => {
+  const token = { isCancellationRequested: false };
+  const api = {
+    version: 1,
+    capabilities: { staticTraceVersion: 1 },
+    async traceLoads(_, receivedToken) {
+      assert.equal(receivedToken, token);
+      token.isCancellationRequested = true;
+      return { schemaVersion: 1 };
+    },
+  };
+  await assert.rejects(queryTrace(api, "loads", {}, token), /trace was cancelled/);
+});
+
+test("closing an isolated trace project invalidates its in-flight response", async () => {
+  const { createStaticAnalysis } = require("../dist/wave-analysis-static");
+  const project = {
+    closed: false,
+    async traceDrivers() {
+      project.closed = true;
+      return { schemaVersion: 1 };
+    },
+  };
+  const { traceRtlPosition } = createStaticAnalysis({});
+  const uri = new URL("file:///trace.sv");
+  await assert.rejects(
+    traceRtlPosition("drivers", uri, { line: 0, character: 0 }, {}, undefined, project),
+    /trace project was closed/,
+  );
+});
+
+test("the VIDE Trace client checks the API, capability, and wire schema separately", async () => {
+  const request = {
+    textDocument: { uri: "file:///fixture.sv" },
+    position: { line: 9, character: 12 },
+    options: { maxDepth: 3, includeCompilation: true },
+  };
+  const graph = {
+    schemaVersion: 1, revision: "31", scope: "file", root: 2,
+    signals: [{ id: 2, name: "ready", declaration: null }],
+    assignments: [], frontier: [{ signal: 2, reason: "depth" }], diagnostics: [],
+  };
+  let calls = 0;
+  const api = {
+    version: 1,
+    capabilities: { staticTraceVersion: 1 },
+    async traceDrivers(params) {
+      assert.deepEqual(JSON.parse(JSON.stringify(params)), request);
+      calls += 1;
+      return JSON.parse(JSON.stringify(graph));
+    },
+  };
+  for (const incompatible of [
+    undefined, { ...api, version: 2 }, { ...api, capabilities: {} },
+    { ...api, capabilities: { staticTraceVersion: 2 } },
+  ])
+    await assert.rejects(queryTrace(incompatible, "drivers", request), /needs RTL trace schema 1/);
+  await assert.rejects(queryTrace(api, "loads", request), /needs RTL trace schema 1/);
+  assert.equal(calls, 0);
+  for (const schemaVersion of [undefined, 0, 2, "1"]) {
+    await assert.rejects(queryTrace({
+      ...api,
+      async traceDrivers() { return JSON.parse(JSON.stringify({ ...graph, schemaVersion })); },
+    }, "drivers", request), /Unsupported VIDE trace result schema/);
+  }
+  const decoded = await queryTrace(api, "drivers", request);
+  assert.deepEqual(decoded, graph);
+  assert.equal(calls, 1);
+});
+
 test("automatic bit history can find a transition before unrelated bus activity", async (t) => {
   const directory = await fs.mkdtemp(
     path.join(os.tmpdir(), "trace-bit-history-"),
@@ -3369,6 +3439,26 @@ test("trace continuation checkpoints track changes to the offline execution reco
   }
 });
 
+test("MCP continuations reject a changed design index without a persisted checkpoint", async (t) => {
+  const { createWaveAnalysis } = require("../dist/wave-analysis");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trace-design-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const waveform = path.join(directory, "trace.dsn");
+  const index = path.join(directory, "trace.shm.hdl.json");
+  await fs.writeFile(waveform, "");
+  await fs.writeFile(index, '{"version":1,"locations":[]}');
+  const analysis = createWaveAnalysis({
+    workspace: { getConfiguration: () => ({ get: () => undefined }), textDocuments: [] },
+  }, () => undefined, () => undefined);
+  const design = { kind: "vendor-hdl", path: index };
+  const viewer = { uri: { fsPath: waveform }, backend: {}, kdb: design };
+  const result = { design, trace: { compilation: { files: [] } } };
+  const guard = await analysis.createContinuationGuard(viewer, result, undefined);
+  await guard.assertCurrent();
+  await fs.appendFile(index, "\n");
+  await assert.rejects(guard.assertCurrent, TraceContextChanged);
+});
+
 test("restored Trace Explorer gaps continue with the saved execution recording", async () => {
   const { createWaveTraceView } = require("../dist/wave-trace-view");
   const trace = {
@@ -4224,6 +4314,49 @@ test("a changing read index links only waveform words compatible with the observ
     graph.nodes[edge.source].signal === 4));
 });
 
+test("a projected array read maps the output bit to the compatible sampled word", () => {
+  const trace = {
+    root: 0,
+    signals: [
+      { id: 0, name: "result", packedRange: [7, 4] },
+      { id: 1, name: "mem" },
+      { id: 2, name: "index" },
+    ],
+    frontier: [],
+    assignments: [{
+      kind: "continuous",
+      targets: [0],
+      inputs: [{ kind: "data", signal: 1 }, { kind: "data", signal: 2 }],
+      wordRead: { signal: 1, index: { op: "signal", args: 2 } },
+    }],
+  };
+  const observation = (signal, range, before, tick, value) => ({
+    signal, width: before.length, range, signed: false,
+    initial: { tick: "0", value: before }, history: [{ tick, value }],
+  });
+  const evidence = { tick: "9", historyStart: "0", observations: [
+    {
+      ...observation(0, [7, 4], "0", "9", "1"),
+      sourceWidth: 4, projected: true, bit: 6,
+    },
+    observation(2, [0, 0], "0", "9", "1"),
+    observation(5, [-2, 1], "0000", "3", "1000"),
+    observation(6, [-2, 1], "0000", "5", "0100"),
+  ] };
+  const words = [
+    { id: 5, array: 1, index: "0", name: "mem[0]", instance: "tb" },
+    { id: 6, array: 1, index: "1", name: "mem[1]", instance: "tb" },
+  ];
+  const graph = buildTemporalTrace(trace, evidence, undefined, false, undefined, undefined, words);
+  assert(!graph.nodes.some(({ signal }) => signal === 5));
+  const source = graph.nodes.findIndex(({ signal, bit, tick, value }) =>
+    signal === 6 && bit === -1 && tick === "5" && value === "1",
+  );
+  assert(source >= 0);
+  assert(graph.edges.some(edge => edge.target === 0 && edge.source === source &&
+    edge.timing === "sameTickUnordered"));
+});
+
 test("a recorded struct member supplies the corresponding continuous assignment operand", () => {
   const packedStruct = { uri: "file:///packet_pkg.sv", range: { start: { line: 1, character: 2 } } };
   const trace = {
@@ -4261,6 +4394,20 @@ test("a recorded struct member supplies the corresponding continuous assignment 
   assert.deepEqual(result.nodes[result.edges[0].source], { signal: 3, tick: "7", value: "1010" });
   assert.equal(result.edges[1].assignment, 1);
   assert.equal(result.nodes[result.edges[1].source].signal, 5);
+  const [whole, ...members] = evidence.observations;
+  trace.signals[0].packedRange = [7, 4];
+  const projected = value => buildTemporalTrace(trace, {
+    ...evidence,
+    observations: [{
+      ...whole, width: 1, sourceWidth: 4, range: [7, 4], projected: true, bit: 5,
+      initial: { value: "0" }, history: [{ tick: "9", value }],
+    }, ...members],
+  }, undefined, false, undefined, undefined, [], fields);
+  assert.deepEqual(projected("1").nodes.slice(1).map(({ signal, tick, value }) =>
+    [signal, tick, value]), [[3, "7", "1010"], [5, "6", "1010"]]);
+  members[0].history[0].value = "1000";
+  assert.equal(projected("1").edges.length, 0);
+  members[0].history[0].value = "1010";
   delete trace.signals[3].packedStruct;
   assert.equal(graph().edges.length, 1);
   evidence.observations[1].history[0].value = "0110";
@@ -4456,6 +4603,13 @@ test(
           assert.equal(declaration.instance, scope);
           assert.equal(declaration.module, "trace_arbiter");
           assert.equal(path.basename(declaration.file), "trace_tb.sv");
+          const preference = await design.resolve(scope + ".PreferHart1");
+          assert.equal(preference.kind, "npiParameter");
+          assert.equal(preference.instance, scope);
+          assert.deepEqual(preference.parameterValue, {
+            bits: preferred,
+            signed: false,
+          });
           assert.deepEqual(
             (await design.instances("trace_request"))
               .map(({ fullname }) => fullname)
