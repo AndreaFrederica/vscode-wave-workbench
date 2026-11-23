@@ -208,6 +208,7 @@ export function createWaveFiles(
     const verilator = design?.kind === "verilator";
     const designView = designSnapshot(viewer);
     const traceProject = traceProjectSelection(viewer);
+    const rtlBinding = document.rtlBinding;
     if (cancellation?.isCancellationRequested) return;
     await saveWaveProject(
       filename,
@@ -217,12 +218,14 @@ export function createWaveFiles(
       verilator ? design.path : undefined,
       designView,
       traceProject,
+      rtlBinding,
     );
     document.projectPath = filename;
     document.savedView = view;
     document.savedKdb = design?.path;
     document.savedDesignView = designView;
     document.traceProject = document.savedTraceProject = traceProject;
+    document.savedRtlBinding = rtlBinding;
     await rememberFile(filename);
     return filename;
   }
@@ -258,6 +261,10 @@ export function createWaveFiles(
       } else if (choice !== "不保存") return;
     }
     const view = await restoreView(viewer.backend, project.view, viewer.meta);
+    document.rtlBinding = document.savedRtlBinding = project.rtlBinding;
+    viewer.sourceInstances.clear();
+    viewer.syncedEditor = undefined;
+    invalidateEditorSync();
     const database = project.verilator || project.kdb;
     if (
       database &&
@@ -273,9 +280,19 @@ export function createWaveFiles(
         );
       }
     }
-    if (database && viewer.kdb?.path === database && project.designView) {
+    if (
+      viewer.kdb &&
+      (!database || viewer.kdb.path === database) &&
+      (project.designView || project.rtlBinding)
+    ) {
       invalidateEditorSync();
-      await viewer.restoreDesignView(project.designView);
+      await viewer.restoreDesignView(
+        project.designView ?? {
+          selected: project.rtlBinding!.dutInstance,
+          expanded: [],
+          includeOther: false,
+        },
+      );
     }
     await viewer.ui("restoreView", { ...view, projectBaseline: true });
     document.projectPath = filename;

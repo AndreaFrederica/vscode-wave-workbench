@@ -9,7 +9,14 @@ import type * as vscode from "vscode";
 import * as path from "node:path";
 
 import { identifiers, resolveSelection, codeOnly } from "./rtl-selection";
-import { mapPrefix } from "./kdb";
+import {
+  belongsToBoundDut,
+  inDirectory,
+  resolveBoundSource,
+  rtlSourceTarget,
+  type RtlNavigationTarget,
+  type RtlProjectBinding,
+} from "./rtl-project-binding";
 import { moduleAt, commonScope, SourceFiles } from "./source-sync";
 import { registerWaveRtlHover } from "./wave-rtl-hover";
 
@@ -84,6 +91,7 @@ export function createWaveSourceNavigation(
   ) {
     const session = viewer.kdb;
     const cfg = vscode.workspace.getConfiguration("waveWorkbench", viewer.uri);
+    const binding = viewer.document.rtlBinding;
     const candidates = await session.instances(module);
     const matches: Location[] = [];
     for (const candidate of candidates) {
@@ -92,12 +100,17 @@ export function createWaveSourceNavigation(
         ? candidate
         : await session.resolve(candidate.fullname);
       if (!record?.definitionFile) continue;
-      const mapped = mapPrefix(
+      const definition = resolveBoundSource(
         record.definitionFile,
+        path.dirname(session.path),
+        binding,
         cfg.get("sourcePathMappings"),
       );
-      const definition = path.resolve(path.dirname(session.path), mapped);
-      if (sourceFiles.same(file, definition)) matches.push(candidate);
+      if (
+        sourceFiles.same(file, definition) &&
+        belongsToBoundDut(binding, definition, candidate.fullname)
+      )
+        matches.push(candidate);
     }
     return matches;
   }
@@ -134,6 +147,9 @@ export function createWaveSourceNavigation(
     const file = doc.uri.fsPath,
       module = moduleAt(doc.getText(), editor.selection?.active?.line || 0);
     if (!module) return;
+    const binding = viewer.document.rtlBinding;
+    const side = binding && rtlSourceTarget(binding, file);
+    if (side && side !== (binding.target ?? "design")) return;
     const stamp = file + ":" + doc.version + ":" + module;
     if (
       viewer.syncedEditor === stamp &&
@@ -245,11 +261,77 @@ export function createWaveSourceNavigation(
     target = "declaration",
   ) {
     if (!viewer.kdb && !(await viewer.attachKdb())) return;
-    const { file, line, record } = await sourceLocation(
+    const location = await sourceLocation(viewer, fullname, target);
+    const { record } = location;
+    const editorScope =
+      target === "instance"
+        ? await viewer.kdb.parent(record.instance || record.fullname)
+        : record.instance || fullname;
+    await showKdbSource(viewer, location, editorScope, target);
+  }
+
+  async function openRtlTarget(
+    viewer: Viewer,
+    binding: RtlProjectBinding,
+    target: RtlNavigationTarget,
+    valid: () => boolean,
+  ) {
+    const design = viewer.kdb;
+    if (!design) return;
+    let instance = binding.dutInstance;
+    if (target === "testbench") {
+      const ancestors = new Set<string>([instance]);
+      while (valid() && (instance = await design.parent(instance))) {
+        if (ancestors.has(instance)) break;
+        ancestors.add(instance);
+        const location = await sourceLocation(
+          viewer,
+          instance,
+          "definition",
+          false,
+        ).catch(() => undefined);
+        if (
+          location &&
+          inDirectory(location.file, binding.testbenchRoot) &&
+          valid()
+        ) {
+          await showKdbSource(viewer, location, instance, "definition");
+          await revealScope(viewer, instance, valid);
+          return;
+        }
+      }
+      if (valid())
+        throw Error(
+          "No testbench ancestor of " +
+            binding.dutInstance +
+            " has a definition in " +
+            binding.testbenchRoot +
+            ".",
+        );
+      return;
+    }
+    const location = await sourceLocation(
       viewer,
-      fullname,
-      target,
+      instance,
+      "definition",
+      false,
     );
+    if (!valid()) return;
+    if (!inDirectory(location.file, binding.designRoot))
+      throw Error(
+        "The DUT definition is outside the original RTL directory: " +
+          location.file,
+      );
+    await showKdbSource(viewer, location, instance, "definition");
+    await revealScope(viewer, instance, valid);
+  }
+
+  async function showKdbSource(
+    viewer: Viewer,
+    { file, line, record }: Awaited<ReturnType<WaveAnalysis["sourceLocation"]>>,
+    editorScope: string,
+    target: string,
+  ) {
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
     let editor;
     suppressEditorSync++;
@@ -273,10 +355,6 @@ export function createWaveSourceNavigation(
     const position = new vscode.Position(line - 1, 0);
     editor.selection = new vscode.Selection(position, position);
     editor.revealRange(new vscode.Range(position, position));
-    const editorScope =
-      target === "instance"
-        ? await viewer.kdb.parent(record.instance || record.fullname)
-        : record.instance || fullname;
     viewer.sourceInstances.set(file, editorScope);
     if (typeof doc.getText === "function")
       viewer.syncedEditor =
@@ -424,5 +502,6 @@ export function createWaveSourceNavigation(
     invalidateEditorSync,
     applyDebugLayout,
     openKdbSource,
+    openRtlTarget,
   };
 }

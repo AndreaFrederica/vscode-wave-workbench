@@ -125,6 +125,29 @@ Verdi 桥接需使用本机 SDK 和许可，在 Linux x64 执行 `VERDI_HOME=/pa
 
 前台和后台 MCP 公开同一份工具接口，覆盖波形查询和导出、解码生命周期、数学、源码和原理图、追踪和分页、执行记录、在线仿真以及 DAP 调试。Tcl 控制台也可用 `waveTool` 调用这些工具。 [MCP 和 Tcl 接口](COMMANDS.md#前台-mcp后台-mcp-和-tcl) · [Tcl 示例](examples/nwave-demo.tcl) · [导出参数](COMMANDS.md#截取--导出波形091)
 
+### 原版 RTL 与 TB 绑定
+
+在波形查看器中选择 **文件 → 设置 RTL 与 TB 绑定**，选取两份工程目录并填写设计数据库中的完整 DUT 实例路径，然后保存波形工程。对同一模块有多个实例的设计，从原版 RTL 跟随波形时会选用绑定的 DUT 子树。
+
+点击 VS Code 状态栏的 **原版 RTL** 或 **仿真 TB** 可切换源码跟随目标。关联设计数据库后，切换时会跳到 DUT 或它在 TB 目录中的最近上层实例。保存工程会记录当前目标。
+
+```json
+{
+  "rtlBinding": {
+    "designRoot": "../original-rtl",
+    "testbenchRoot": "../simulation/tb",
+    "dutInstance": "top.u_dut",
+    "waveformScope": "top.dut_capture"
+  },
+  "traceProject": {
+    "filelist": "../simulation/build/sources.f",
+    "workingDirectory": "../simulation/build"
+  }
+}
+```
+
+这些字段放在现有 `.waveproj` 的顶层。相对路径以 `.waveproj` 所在目录为基准。波形层次与设计数据库一致时可省略 `waveformScope`。若仿真记录的源码路径需要重定位，可在 `rtlBinding.sourcePathMappings` 中填写旧路径前缀到本地目录的映射。跨 DUT 和 TB 的 trace 使用设计数据库及 `traceProject` 指定的实际编译输入。
+
 ## 许可
 
 Wave Workbench 源码采用 MPL-2.0。第三方工具、SDK 和运行时适用各自的许可。 [项目许可](LICENSE) · [第三方声明](NOTICE)

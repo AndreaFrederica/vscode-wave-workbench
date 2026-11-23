@@ -12,6 +12,10 @@ import { type TraceProjectSelection } from "./project";
 import { VerilatorDesign } from "./verilator";
 import { KdbSession, mapPrefix } from "./kdb";
 import {
+  boundHierarchyMappings,
+  resolveBoundSource,
+} from "./rtl-project-binding";
+import {
   TraceContextChanged,
   type TraceDirection,
   type TraceOptions,
@@ -76,16 +80,20 @@ export function createAnalysisProjects<V extends AnalysisView>(
   };
 
   function dumpScope(viewer: V, scope: string) {
+    const binding = viewer.document?.rtlBinding;
     const mappings =
-      host.workspace
-        .getConfiguration("waveWorkbench", viewer.uri)
-        .get<Record<string, string>>("hierarchyMappings") || {};
-    return mapPrefix(
-      scope,
-      Object.fromEntries(
-        Object.entries(mappings).map(([dump, kdb]) => [kdb, dump]),
-      ),
+      boundHierarchyMappings(
+        binding,
+        host.workspace
+          .getConfiguration("waveWorkbench", viewer.uri)
+          .get<Record<string, string>>("hierarchyMappings"),
+      ) || {};
+    const reverse = Object.fromEntries(
+      Object.entries(mappings).map(([dump, design]) => [design, dump]),
     );
+    if (binding?.waveformScope)
+      reverse[binding.dutInstance] = binding.waveformScope;
+    return mapPrefix(scope, reverse);
   }
 
   async function openVideTraceProject(
@@ -142,11 +150,13 @@ export function createAnalysisProjects<V extends AnalysisView>(
         kind: design.kind,
         files: async () =>
           (await files()).map((file) =>
-            path.resolve(
+            resolveBoundSource(
+              file,
               design.kind === "kdb"
                 ? selection.workingDirectory
                 : path.dirname(design.path),
-              mapPrefix(file, sourceMappings),
+              viewer?.document?.rtlBinding,
+              sourceMappings,
             ),
           ),
       };
@@ -263,6 +273,7 @@ export function createAnalysisProjects<V extends AnalysisView>(
     if (token?.isCancellationRequested)
       throw Error("The RTL trace was cancelled.");
     const configuredSelection = traceProjectSelection(viewer);
+    const binding = viewer.document?.rtlBinding;
     const configuredIdentity = JSON.stringify(configuredSelection);
     const design = viewer.kdb;
     const backend = viewer.backend;
@@ -270,6 +281,7 @@ export function createAnalysisProjects<V extends AnalysisView>(
       !viewer.disposed &&
       viewer.backend === backend &&
       viewer.kdb === design &&
+      viewer.document?.rtlBinding === binding &&
       configuredIdentity === JSON.stringify(traceProjectSelection(viewer));
     let selection:
       | TraceProjectSelection
@@ -579,6 +591,7 @@ export function createAnalysisProjects<V extends AnalysisView>(
       return JSON.stringify([
         config.get("hierarchyMappings"),
         config.get("sourcePathMappings"),
+        viewer.document?.rtlBinding,
       ]);
     };
     const mappings = mappingIdentity();

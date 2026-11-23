@@ -7,7 +7,8 @@ import type { BackendProtocol, Signal } from "./shared/protocol";
 import * as path from "node:path";
 import { type TraceProjectSelection } from "./project";
 import { findRtlSignals, fsdbGenerateScope } from "./signal-lookup";
-import { isMissingKdbDeclaration, mapPrefix } from "./kdb";
+import { isMissingKdbDeclaration } from "./kdb";
+import { resolveBoundSource } from "./rtl-project-binding";
 import {
   declaredSignalName,
   TraceContextChanged,
@@ -201,9 +202,11 @@ export function createAnalysisBindings<V extends AnalysisView>(
             issues.set(candidate.id, "declarationMismatch");
             continue;
           }
-          const mapped = path.resolve(
+          const mapped = resolveBoundSource(
+            object.file,
             path.dirname(design.path),
-            mapPrefix(object.file, sourceMappings),
+            viewer.document?.rtlBinding,
+            sourceMappings,
           );
           if (host.file(mapped).toString() === candidate.declaration!.uri) {
             bindings.set(candidate.id, exact[0]);
@@ -419,9 +422,11 @@ export function createAnalysisBindings<V extends AnalysisView>(
         location.line !== candidate.declaration.range.start.line + 1
       )
         continue;
-      const source = path.resolve(
+      const source = resolveBoundSource(
+        location.file,
         path.dirname(design.path),
-        mapPrefix(location.file, mappings),
+        viewer.document?.rtlBinding,
+        mappings,
       );
       if (host.file(source).toString() !== candidate.declaration.uri) continue;
       words.push({ id, array: signal, index, name, instance: scope });

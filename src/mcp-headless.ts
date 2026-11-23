@@ -372,6 +372,7 @@ async function main(workspace: string) {
         filename,
         projectView,
         (database) => attachDesign(session, database),
+        project && { rtlBinding: project.rtlBinding },
       );
       const session: OpenWaveform = {
         filename,
@@ -578,6 +579,7 @@ async function main(workspace: string) {
             : project?.verilator,
         project?.designView,
         project?.traceProject,
+        project?.rtlBinding,
       );
       session.projectPath = destination;
       return { path: destination };

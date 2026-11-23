@@ -1,4 +1,6 @@
 {
+  "command.configureRtlBinding": "Wave Workbench: 设置 RTL 与 TB 绑定",
+  "command.switchRtlTarget": "Wave Workbench: 切换 RTL 与 TB 目标",
   "command.traceWaveDrivers": "追踪波形信号的驱动",
   "command.traceWaveLoads": "追踪波形信号的负载",
   "command.traceWaveAtCursor": "追踪 A 游标处的波形信号",

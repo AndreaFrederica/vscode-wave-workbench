@@ -507,6 +507,10 @@ button.signalAnnotation:hover, button.signalAnnotation:focus-visible {
 }
 #readout #cursorToolbar { flex: 1 0 auto; }
 #readout #cursors { flex: 0 1 auto; }
+#liveEditorBar:not([hidden]) { display: flex; align-items: center; gap: 10px; padding: 3px 8px; color: var(--muted); border-bottom: 1px solid var(--line); }
+#liveEditorBar label { white-space: nowrap; }
+#liveFollow { width: auto; height: auto; vertical-align: middle; }
+#liveEditorStatus { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cursor-toolbar-title { color: var(--text); font-weight: 600; white-space: nowrap; }
 #cursorToolbar .time-cursor-a { color: var(--cursor-a); }
 #cursorToolbar .time-cursor-b { color: var(--cursor-b); }

@@ -21,6 +21,7 @@ import {
 import type { TrackTask } from "./wave-extension-types";
 import { handleWaveOperation } from "./wave-editor-operations";
 import { createWaveEditorQueries } from "./wave-editor-queries";
+import { bindLiveCapture, type LiveCapture } from "./live-wave-editor";
 import type { createWaveSchematics } from "./wave-schematics";
 
 interface EditorActions
@@ -32,6 +33,7 @@ interface EditorActions
       | "showCurrentTraceSchematic"
     > {
   trackTask: TrackTask;
+  liveCaptureFor?(filename: string): LiveCapture | undefined;
   viewers: Set<Viewer>;
   projectChanges: vscode.EventEmitter<
     vscode.CustomDocumentContentChangeEvent<WaveDocument>
@@ -140,6 +142,8 @@ function createWaveEditor(
       document.uri,
     );
     const log = (message: string) => output.append(message);
+    const liveCapture = actions.liveCaptureFor?.(document.uri.fsPath);
+    let unbindLive: (() => void) | undefined;
     const choosePlan = (choice?: WaveBackend) =>
       backendPlan(
         context,
@@ -169,7 +173,10 @@ function createWaveEditor(
       uiSequence: 0,
     } as Viewer;
     const surfaces = createWaveEditorSurfaces(vscode, context, viewer, panel, {
-      metadata: () => metadataMessage(viewer.meta),
+      metadata: () => ({
+        ...metadataMessage(viewer.meta),
+        liveState: liveCapture?.session.status().state,
+      }),
       receive,
       setCurrent,
       refreshSidebar,
@@ -215,6 +222,7 @@ function createWaveEditor(
     });
     const decoders = createWaveEditorDecoders(vscode, viewer, actions);
     panel.onDidDispose(() => {
+      unbindLive?.();
       decoders.dispose();
       viewer.disposed = true;
       viewer.resolveReady(null);
@@ -248,6 +256,7 @@ function createWaveEditor(
         projectChanges,
         rememberFile,
         applyDebugLayout,
+        live: !!liveCapture,
       });
     const receiveQuery = createWaveEditorQueries(viewer, cfg, refreshSidebar);
     async function receive(surface: vscode.Webview, msg) {
@@ -283,6 +292,13 @@ function createWaveEditor(
             if (!opened) return;
             backend = opened.backend;
             await initialize(backend, opened.meta);
+            if (liveCapture && !viewer.disposed) {
+              if (liveCapture.dockOnOpen) {
+                document.view = await viewer.ui("snapshot");
+                await dockWave(viewer);
+              }
+              unbindLive = bindLiveCapture(viewer, liveCapture, log);
+            }
           });
         } else if (msg.type === "rtlCursor") {
           if (
@@ -336,6 +352,11 @@ function createWaveEditor(
           await saveActiveProject(viewer);
         } else if (msg.type === "openProject") {
           await openProject();
+        } else if (msg.type === "configureRtlBinding") {
+          setCurrent(viewer);
+          await vscode.commands.executeCommand(
+            "waveWorkbench.configureRtlBinding",
+          );
         } else if (msg.type === "exportClip") {
           await chooseClipExport(viewer);
         } else if (msg.type === "runScript") {

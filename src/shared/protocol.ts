@@ -358,7 +358,14 @@ export interface BackendProtocol {
     args: { state: import("../decoder-runtime/types").Json };
     result: null;
   };
-  open: { args: { path: string; cadenceShm?: boolean }; result: Metadata };
+  open: {
+    args: { path: string; cadenceShm?: boolean; liveVcd?: boolean };
+    result: Metadata;
+  };
+  appendLiveSamples: {
+    args: { samples: { tick: string; values: string[] }[] };
+    result: { end: string; changed: boolean };
+  };
   hdlLocations: { args: Record<string, never>; result: HdlLocation[] };
   query: {
     args: {

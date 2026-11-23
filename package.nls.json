@@ -1,4 +1,6 @@
 {
+  "command.configureRtlBinding": "Wave Workbench: Configure RTL and Testbench Binding",
+  "command.switchRtlTarget": "Wave Workbench: Switch RTL and Testbench Target",
   "command.traceWaveDrivers": "Trace waveform signal drivers",
   "command.traceWaveLoads": "Trace waveform signal loads",
   "command.traceWaveAtCursor": "Trace waveform signal at Cursor A",

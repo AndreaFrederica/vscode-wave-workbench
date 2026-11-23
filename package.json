@@ -79,6 +79,11 @@
                 "type": "boolean",
                 "default": true
               },
+              "waveformView": {
+                "enum": ["panel", "editor", "docked"],
+                "default": "panel",
+                "description": "Show sampled signals in the compact live panel, the full editor beside the RTL source, or the full viewer in the bottom panel."
+              },
               "plusargs": {
                 "type": "array",
                 "items": {
@@ -207,6 +212,14 @@
         "title": "Wave Workbench: Set Simulation Filelist for Active Waveform Trace"
       },
       {
+        "command": "waveWorkbench.switchRtlTarget",
+        "title": "%command.switchRtlTarget%"
+      },
+      {
+        "command": "waveWorkbench.configureRtlBinding",
+        "title": "%command.configureRtlBinding%"
+      },
+      {
         "command": "waveWorkbench.startLiveTrace",
         "title": "Wave Workbench: Start Live Trace Harness"
       },
@@ -221,6 +234,10 @@
       {
         "command": "waveWorkbench.showLiveWave",
         "title": "%command.showLiveWave%"
+      },
+      {
+        "command": "waveWorkbench.openLiveWaveEditor",
+        "title": "Wave Workbench: Open Live Waveform Editor"
       },
       {
         "command": "waveWorkbench.debugLiveTrace",

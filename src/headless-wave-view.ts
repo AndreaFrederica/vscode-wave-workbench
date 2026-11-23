@@ -7,6 +7,7 @@ import type { Backend } from "./backend";
 import type { DesignSession } from "./kdb";
 import type { Metadata, Signal, WaveState } from "./shared/protocol";
 import { key, project } from "./shared/signals";
+import type { RtlProjectBinding } from "./rtl-project-binding";
 
 export class HeadlessWaveView {
   readonly uri: Uri;
@@ -26,6 +27,7 @@ export class HeadlessWaveView {
       database?: string,
       edited?: boolean,
     ) => Promise<boolean> = async () => false,
+    readonly document?: { rtlBinding?: RtlProjectBinding },
   ) {
     this.uri = {
       fsPath: filename,

@@ -377,6 +377,7 @@ struct Store {
     ids: HashMap<String, Vec<usize>>,
     search: Option<(String, Vec<usize>)>,
     scope_search: Option<(String, Vec<usize>)>,
+    live_vcd: Option<std::fs::File>,
 }
 impl Store {
     fn new(database: Database, budget: usize) -> Self {
@@ -391,6 +392,7 @@ impl Store {
             cache: cache::Cache::new(budget),
             search: None,
             scope_search: None,
+            live_vcd: None,
         }
     }
     fn cache_stats(&self) -> Value {
@@ -839,6 +841,9 @@ struct Request {
     path: Option<String>,
     #[serde(rename = "cadenceShm")]
     cadence_shm: Option<bool>,
+    #[serde(rename = "liveVcd")]
+    live_vcd: Option<bool>,
+    samples: Option<Vec<wavebench_reader::vcd::LiveSample>>,
     signals: Option<Vec<String>>,
     start: Option<String>,
     end: Option<String>,
@@ -908,18 +913,48 @@ fn run(
         #[cfg(fsdb)]
         "kdbPortLinks" => native_kdb.ports(&r.query.ok_or("Missing module instance")?),
         "open" => {
+            let path = r.path.ok_or("Missing path")?;
             let new = Database::open(
-                &r.path.ok_or("Missing path")?,
+                &path,
                 independent,
                 r.cadence_shm.unwrap_or(false),
             )?;
-            let result = new.meta();
+            let mut result = new.meta();
             let budget = db
                 .as_ref()
                 .map(|s| s.cache.stats.budget)
                 .unwrap_or(cache::DEFAULT_BUDGET);
-            *db = Some(Store::new(new, budget));
+            let mut store = Store::new(new, budget);
+            if r.live_vcd == Some(true) {
+                if !matches!(store.database, Database::Vcd(_)) {
+                    return Err("Live samples require a VCD capture".into());
+                }
+                store.live_vcd = Some(
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(path)
+                        .map_err(|error| error.to_string())?,
+                );
+                result["supportsOrderedHistory"] = json!(false);
+            }
+            *db = Some(store);
             Ok(result)
+        }
+        "appendLiveSamples" => {
+            let store = db.as_mut().ok_or("No open database")?;
+            let file = store.live_vcd.as_mut().ok_or("No open live capture")?;
+            let Database::Vcd(wave) = &mut store.database else {
+                return Err("No open live VCD".into());
+            };
+            let samples = r.samples.ok_or("Missing live samples")?;
+            if samples.len() > 512 {
+                return Err("Live sample batch exceeds 512 rows".into());
+            }
+            let changed = wave.append_live(file, samples)?;
+            if changed {
+                store.cache = cache::Cache::new(store.cache.stats.budget);
+            }
+            Ok(json!({ "end": wave.end.to_string(), "changed": changed }))
         }
         "hdlLocations" => match &db.as_ref().ok_or("No open database")?.database {
             Database::Shm(wave) => wave.hdl_locations(),

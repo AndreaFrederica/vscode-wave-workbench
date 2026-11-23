@@ -1496,6 +1496,39 @@ function request() {
   persist();
   render();
 }
+const liveFollow = $("liveFollow") as HTMLInputElement;
+const liveStateLabels: Record<string, string> = {
+  running: "仿真运行中",
+  stepping: "仿真单步中",
+  paused: "仿真已暂停",
+  exited: "仿真已结束",
+  error: "实时波形读取失败",
+};
+function showLiveState(state?: string) {
+  $("liveEditorStatus").textContent = state
+    ? `${localize(liveStateLabels[state] ?? "")} · ${meta.end} × ${meta.scale}`
+    : "";
+}
+function followLiveEnd(previous: number) {
+  if (!liveFollow.checked) return;
+  const latest = Number(meta.end);
+  const first = Number(meta.start);
+  const width = Math.max(1, end - start);
+  const wasFullRange = start === first && end >= previous;
+  cursorA = latest;
+  setWindow(
+    wasFullRange ? first : latest - width,
+    Math.max(first + 1, latest),
+    false,
+    false,
+  );
+  publishRtlCursor();
+}
+liveFollow.onchange = () => {
+  if (!meta) return;
+  followLiveEnd(Number(meta.end));
+  render();
+};
 let viewportReadTimer = 0;
 function needsTimeRefill(id: string) {
   if (!prefetchTime || !panDirection || needsData(id)) return false;
@@ -1784,7 +1817,7 @@ $("catalogPreview").onclick = () => {
   $("search").value = "";
   setCatalog("", false);
 };
-function setWindow(a: number, b: number, defer = false) {
+function setWindow(a: number, b: number, defer = false, save = true) {
   const low = Number(meta.start),
     high = Math.max(low + 1, Number(meta.end)),
     length = Math.min(high - low, Math.max(1, b - a)),
@@ -1807,7 +1840,7 @@ function setWindow(a: number, b: number, defer = false) {
       scheduleViewport();
     }, 85);
   }
-  persist();
+  if (save) persist();
   if (defer) scheduleViewport();
   else render();
 }
@@ -2783,6 +2816,7 @@ function action(name) {
       "runScript",
       "saveProject",
       "openProject",
+      "configureRtlBinding",
       "exportClip",
       "dockWave",
       "showTclConsole",
@@ -3194,6 +3228,8 @@ window.addEventListener("message", async (e) => {
     uartFlight = undefined;
     measurements.invalidate();
     meta = msg;
+    $("liveEditorBar").hidden = !msg.live;
+    showLiveState(msg.liveState);
     data = {};
     cursorValues = {};
     inflight = null;
@@ -3222,9 +3258,42 @@ window.addEventListener("message", async (e) => {
         signals: saved.chosen.slice(0, MAX_SIGNALS),
         virtualDefinitions,
       });
-    else publishProjectState(true);
+    else if (msg.live) {
+      chosen = msg.signals.filter((signal: Signal) => signal.supported);
+      publishProjectState(true);
+    } else publishProjectState(true);
     renderTree();
     request();
+  } else if (msg.type === "liveSamples" && meta) {
+    const previous = Number(meta.end);
+    const latest = Number(msg.end);
+    if (!Number.isSafeInteger(latest) || latest < previous) return;
+    meta = { ...meta, end: msg.end };
+    showLiveState(msg.state);
+    if (msg.changed) {
+      for (const [id, read] of Object.entries(data))
+        if (read.end >= previous) delete data[id];
+      inflight = cursorFlight = null;
+      cursorValues = {};
+      overviews.clear();
+      viewportOverviews.clear();
+      overviewFlight = undefined;
+      uartReads.clear();
+      uartFlight = undefined;
+      measurements.invalidate();
+      for (const [id, lane] of decoderLanes) {
+        if (lane.pending && lane.pending.last > BigInt(previous)) {
+          cancelDecoder(id);
+          lane.key = undefined;
+        }
+        if (lane.cached && lane.cached.last > BigInt(previous)) {
+          lane.cached = undefined;
+          lane.key = undefined;
+        }
+      }
+    }
+    followLiveEnd(previous);
+    render();
   } else if (msg.type === "dockVisibility") {
     document.body.classList.toggle("wave-docked", msg.docked);
     (document.getElementById("dockedNotice") as HTMLElement).hidden =
@@ -3237,6 +3306,8 @@ window.addEventListener("message", async (e) => {
     uartFlight = undefined;
     measurements.invalidate();
     meta = msg;
+    $("liveEditorBar").hidden = !msg.live;
+    showLiveState(msg.liveState);
     $("file").textContent = msg.title;
     $("backend").textContent =
       `${msg.backendLabel || msg.backend} · Vide ${msg.vide || localize("未安装")}`;
@@ -3262,6 +3333,10 @@ window.addEventListener("message", async (e) => {
           ? { ...msg.view, projectBaseline: true, dockSelection: msg.selection }
           : msg.view,
       );
+    if (msg.live) {
+      followLiveEnd(Number(meta.end));
+      render();
+    }
   } else if (msg.type === "ui") {
     try {
       const result = await uiAction(msg.action, msg.payload || {});

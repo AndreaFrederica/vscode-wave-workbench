@@ -11,6 +11,10 @@ import { codeOnly } from "./rtl-selection";
 import { findSignal, kdbGenerateScope } from "./signal-lookup";
 import { isMissingKdbDeclaration, mapPrefix } from "./kdb";
 import {
+  boundHierarchyMappings,
+  resolveBoundSource,
+} from "./rtl-project-binding";
+import {
   declarationColumns,
   declaredSignalName,
   queryTrace,
@@ -93,12 +97,18 @@ export function createStaticAnalysis<V extends AnalysisView>(host: TraceHost) {
     const design = viewer.kdb;
     if (!design) throw Error("Attach a design database to the waveform first.");
     const cfg = host.workspace.getConfiguration("waveWorkbench", viewer.uri);
+    const binding = viewer.document?.rtlBinding;
     const sourcePath = (file: string) =>
-      path.resolve(
+      resolveBoundSource(
+        file,
         path.dirname(design.path),
-        mapPrefix(file, cfg.get("sourcePathMappings")),
+        binding,
+        cfg.get("sourcePathMappings"),
       );
-    const mappedScope = mapPrefix(signal.scope, cfg.get("hierarchyMappings"));
+    const mappedScope = mapPrefix(
+      signal.scope,
+      boundHierarchyMappings(binding, cfg.get("hierarchyMappings")),
+    );
     const scope =
       design.kind === "kdb" ? kdbGenerateScope(mappedScope) : mappedScope;
     const name = declaredSignalName(signal.name);

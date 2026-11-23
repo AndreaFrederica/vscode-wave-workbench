@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use serde::Serialize;
-use std::{collections::HashMap, io::Read};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    io::{Read, Write},
+};
+
+#[derive(Deserialize)]
+pub struct LiveSample {
+    pub tick: String,
+    pub values: Vec<String>,
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct Signal {
@@ -133,6 +142,58 @@ pub fn window(events: &[(u64, String)], start: u64, end: u64, limit: usize) -> (
 }
 
 impl Vcd {
+    pub fn append_live(
+        &mut self,
+        file: &mut std::fs::File,
+        samples: Vec<LiveSample>,
+    ) -> Result<bool, String> {
+        let mut end = self.end;
+        let mut delta: HashMap<String, Events> = HashMap::new();
+        let mut text = String::new();
+        for sample in samples {
+            let tick: u64 = sample.tick.parse().map_err(|_| "Invalid live timestamp")?;
+            if tick < end
+                || tick > 9_007_199_254_740_991
+                || sample.values.len() != self.signals.len()
+            {
+                return Err("Invalid live sample layout or timestamp".into());
+            }
+            if tick != end {
+                text.push_str(&format!("#{tick}\n"));
+            }
+            for (signal, bits) in self.signals.iter().zip(sample.values) {
+                if bits.len() != signal.width as usize
+                    || !bits.bytes().all(|c| matches!(c, b'0' | b'1' | b'x' | b'z'))
+                {
+                    return Err("Invalid live signal value".into());
+                }
+                let events = delta.entry(signal.id.clone()).or_default();
+                let last = events.last().or_else(|| self.data[&signal.id].last());
+                if last.is_some_and(|(_, value)| value == &bits) {
+                    continue;
+                }
+                // A batch may revise the current slot. Retain its latest sample on normal queries.
+                text.push_str(&format!("b{bits} {}\n", signal.id));
+                events.push((tick, bits));
+            }
+            end = tick;
+        }
+        if text.is_empty() {
+            return Ok(false);
+        }
+        let original_size = file.metadata().map_err(|error| error.to_string())?.len();
+        if let Err(error) = file.write_all(text.as_bytes()) {
+            file.set_len(original_size)
+                .map_err(|rollback| format!("{error}; restoring the capture failed: {rollback}"))?;
+            return Err(error.to_string());
+        }
+        for (id, events) in delta {
+            self.data.get_mut(&id).unwrap().extend(events);
+        }
+        self.end = end;
+        Ok(true)
+    }
+
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
         let file = std::fs::File::open(path).map_err(|err| err.to_string())?;
         if file.metadata().map_err(|err| err.to_string())?.len() > 128 * 1024 * 1024 {

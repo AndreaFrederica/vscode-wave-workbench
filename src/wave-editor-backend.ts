@@ -35,6 +35,7 @@ interface BackendActions {
   >;
   rememberFile(filename: string): Thenable<void>;
   applyDebugLayout(viewer: Viewer): Promise<void>;
+  live?: boolean;
 }
 
 export function configureWaveEditorBackend(
@@ -80,6 +81,7 @@ export function configureWaveEditorBackend(
     const meta = await backend.request("open", {
       path: filename,
       cadenceShm: launch.cadenceShm || undefined,
+      liveVcd: actions.live || undefined,
     });
     for (const warning of meta.warnings ?? []) log(warning + "\n");
     if (BigInt(meta.end) > BigInt(Number.MAX_SAFE_INTEGER))
@@ -129,7 +131,9 @@ export function configureWaveEditorBackend(
   const metadataMessage = (meta: Metadata) => ({
     ...meta,
     backendLabel: plan.label,
-    canSelectBackend: ["cadence", "verdi", "independent"].includes(plan.kind),
+    live: actions.live,
+    canSelectBackend:
+      !actions.live && ["cadence", "verdi", "independent"].includes(plan.kind),
     title: path.basename(document.uri.fsPath),
     vide:
       vscode.extensions.getExtension("pascal-lab.vide-code-extension")
@@ -139,8 +143,10 @@ export function configureWaveEditorBackend(
     if (viewer.disposed || backend !== viewer.backend) return;
     viewer.meta = meta;
     refreshSidebar();
-    await context.workspaceState.update("lastWaveform", document.uri.fsPath);
-    await rememberFile(document.uri.fsPath);
+    if (!actions.live) {
+      await context.workspaceState.update("lastWaveform", document.uri.fsPath);
+      await rememberFile(document.uri.fsPath);
+    }
     await applyDebugLayout(viewer);
     await viewer.panel.webview.postMessage({
       type: "metadata",
@@ -164,6 +170,7 @@ export function configureWaveEditorBackend(
   };
   let switching = false;
   viewer.switchBackend = async (choice) => {
+    if (actions.live) throw Error("The live editor uses the VCD backend.");
     let next = choosePlan(choice);
     if (
       viewer.meta &&

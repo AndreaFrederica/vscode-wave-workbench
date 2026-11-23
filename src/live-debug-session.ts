@@ -6,6 +6,7 @@
 import { AutomationDebugger } from "./wave-debug-tools";
 import { LiveDebugAdapter, liveDebugType } from "./live-debug";
 import { LiveWaveView, liveWaveViewId } from "./live-wave-view";
+import { createLiveCapture, type LiveCapture } from "./live-wave-editor";
 import type * as vscode from "vscode";
 import * as path from "node:path";
 
@@ -53,6 +54,7 @@ export function createLiveDebugSession(
   },
 ) {
   let liveTrace: LiveTraceSession | undefined;
+  let liveCapture: LiveCapture | undefined;
   let liveDebugger: LiveDebugAdapter | undefined;
   const liveWave = new LiveWaveView(vscode, context);
   context.subscriptions.push(
@@ -62,6 +64,9 @@ export function createLiveDebugSession(
     }),
     vscode.commands.registerCommand("waveWorkbench.showLiveWave", () =>
       liveWave.show(),
+    ),
+    vscode.commands.registerCommand("waveWorkbench.openLiveWaveEditor", () =>
+      openLiveWaveEditor().catch(report),
     ),
   );
 
@@ -93,18 +98,36 @@ export function createLiveDebugSession(
     dispose: () => liveTrace?.dispose(),
   });
 
-  function useLiveTrace(session: LiveTraceSession) {
+  function useLiveTrace(session: LiveTraceSession, showPanel = true) {
     liveTrace?.dispose();
     liveTrace = latestSimulation = session;
     clearTraceContinuation("live");
     liveWave.setSession(session);
-    showLiveWave();
+    if (showPanel) showLiveWave();
     return session;
   }
 
   function showLiveWave() {
     void liveWave.show().catch((error) => output.appendLine(String(error)));
   }
+
+  async function openLiveWaveEditor(location?: "editor" | "docked") {
+    const session = latestSimulation;
+    if (!session) throw Error("Start a Wave Workbench simulation first.");
+    if (liveCapture?.session !== session)
+      liveCapture = createLiveCapture(session, location === "docked");
+    await vscode.commands.executeCommand(
+      "vscode.openWith",
+      vscode.Uri.file(liveCapture.filename),
+      "waveWorkbench.viewer",
+      location
+        ? { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true }
+        : undefined,
+    );
+  }
+
+  const captureFor = (filename: string) =>
+    liveCapture?.filename === filename ? liveCapture : undefined;
 
   function stopLiveTrace(session: LiveTraceSession) {
     session.dispose();
@@ -125,6 +148,8 @@ export function createLiveDebugSession(
       createDebugAdapterDescriptor(debugSession) {
         if (liveDebugger || debugAutomation.attached)
           throw Error("A Wave Workbench RTL debugger is already active.");
+        const view = debugSession.configuration.waveformView;
+        const fullEditor = view === "editor" || view === "docked";
         const adapter = new LiveDebugAdapter(vscode, {
           root:
             debugSession.workspaceFolder?.uri.fsPath ??
@@ -156,10 +181,12 @@ export function createLiveDebugSession(
                 "The live simulation or debugger changed during launch.",
               );
             }
-            return useLiveTrace(session);
+            return useLiveTrace(session, !fullEditor);
           },
           stop: stopLiveTrace,
-          showWave: showLiveWave,
+          showWave: fullEditor
+            ? () => void openLiveWaveEditor(view).catch(report)
+            : showLiveWave,
           release: () => {
             if (liveDebugger === adapter) liveDebugger = undefined;
           },
@@ -586,6 +613,7 @@ export function createLiveDebugSession(
   }
 
   return {
+    captureFor,
     getLatest: () => liveTrace ?? latestSimulation,
     handleTool,
   };

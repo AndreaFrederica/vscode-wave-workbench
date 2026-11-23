@@ -5,6 +5,11 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { WaveState } from "./shared/protocol";
 import type { Viewer } from "./viewer";
+import {
+  mapBindingPaths,
+  readRtlProjectBinding,
+  type RtlProjectBinding,
+} from "./rtl-project-binding";
 
 interface WaveProject {
   format: "wave-workbench-project";
@@ -14,6 +19,7 @@ interface WaveProject {
   verilator?: string;
   designView?: DesignView;
   traceProject?: TraceProjectSelection | null;
+  rtlBinding?: RtlProjectBinding;
   view: WaveState;
 }
 
@@ -44,6 +50,7 @@ export async function saveWaveProject(
   verilator?: string,
   designView?: DesignView,
   traceProject?: TraceProjectSelection | null,
+  rtlBinding?: RtlProjectBinding,
 ) {
   const directory = path.dirname(filename);
   const document: WaveProject = {
@@ -53,6 +60,12 @@ export async function saveWaveProject(
     kdb: kdb ? path.relative(directory, kdb) : undefined,
     verilator: verilator ? path.relative(directory, verilator) : undefined,
     designView,
+    rtlBinding:
+      rtlBinding &&
+      mapBindingPaths(
+        rtlBinding,
+        (file) => path.relative(directory, file) || ".",
+      ),
     traceProject:
       traceProject &&
       ("videManifest" in traceProject
@@ -117,6 +130,7 @@ export async function readWaveProject(filename: string) {
   const directory = path.dirname(filename);
   return {
     ...document,
+    rtlBinding: readRtlProjectBinding(document.rtlBinding, directory),
     waveform: path.resolve(directory, document.waveform),
     kdb: document.kdb ? path.resolve(directory, document.kdb) : undefined,
     verilator: document.verilator

@@ -21,6 +21,10 @@ import { VerilatorDesign, verilatorTreeFile } from "./verilator";
 import * as WaveSignal from "./shared/signals";
 import { KdbSession, mapPrefix } from "./kdb";
 import {
+  boundHierarchyMappings,
+  resolveBoundSource,
+} from "./rtl-project-binding";
+import {
   mergeTemporalContinuationGraph,
   temporalTraceReferences,
   temporalWaveformSignals,
@@ -533,7 +537,13 @@ export function createWaveSchematics(
       viewer.uri,
     );
     const record = await design.resolve(
-      mapPrefix(fullname, settings.get("hierarchyMappings")),
+      mapPrefix(
+        fullname,
+        boundHierarchyMappings(
+          viewer.document.rtlBinding,
+          settings.get("hierarchyMappings"),
+        ),
+      ),
     );
     if (!record?.instance) throw Error("找不到信号所属的展开实例。");
     if (viewer.kdb === design && !viewer.disposed)
@@ -735,9 +745,11 @@ export function createWaveSchematics(
               "waveWorkbench",
               viewer?.uri,
             );
-            const file = path.resolve(
+            const file = resolveBoundSource(
+              location.file,
               path.dirname(design.path),
-              mapPrefix(location.file, cfg.get("sourcePathMappings")),
+              viewer?.document.rtlBinding,
+              cfg.get("sourcePathMappings"),
             );
             const doc = await vscode.workspace.openTextDocument(
               vscode.Uri.file(file),

@@ -8,7 +8,7 @@
 <nav id="compactToolbar" aria-label="Wave controls" data-rows="1">
 <div id="toolbarControls">
 <div class="toolbarRow">
-<details class="toolMenu" id="fileMenu"><summary>文件</summary><div class="menuPanel"><span id="file">正在读取波形…</span><small id="backend"></small><button data-action="openWaveform">打开波形…</button><button data-action="openRecent">最近打开…</button><button data-action="selectBackend">选择波形后端…</button><button data-action="openProject">打开波形工程…</button><button data-action="saveProject">保存波形工程…</button><button data-action="exportClip">截取 / 导出波形…</button><button data-action="runScript">运行 Tcl 脚本…</button><button data-action="showTclConsole">打开 Tcl 控制台</button></div></details>
+<details class="toolMenu" id="fileMenu"><summary>文件</summary><div class="menuPanel"><span id="file">正在读取波形…</span><small id="backend"></small><button data-action="openWaveform">打开波形…</button><button data-action="openRecent">最近打开…</button><button data-action="selectBackend">选择波形后端…</button><button data-action="openProject">打开波形工程…</button><button data-action="saveProject">保存波形工程…</button><button data-action="configureRtlBinding">设置 RTL 与 TB 绑定</button><button data-action="exportClip">截取 / 导出波形…</button><button data-action="runScript">运行 Tcl 脚本…</button><button data-action="showTclConsole">打开 Tcl 控制台</button></div></details>
 <button data-action="dockWave" class="dock-action">移到底部</button><button data-action="undockWave" class="undock-action">移回编辑器</button>
 <button data-action="fit" title="全局缩放 F" aria-label="全局缩放">全局</button><button data-action="in" title="放大 +" aria-label="放大">＋</button><button data-action="out" title="缩小 -" aria-label="缩小">−</button><button data-action="left" title="向左平移" aria-label="向左平移">←</button><button data-action="right" title="向右平移" aria-label="向右平移">→</button><button data-action="prev" title="上一边沿 [" aria-label="上一边沿">Ⅰ‹</button><button data-action="next" title="下一边沿 ]" aria-label="下一边沿">›Ⅰ</button><i></i>
 <details class="toolMenu" id="displayMenu"><summary>视图</summary><div class="menuPanel">    <div id="protocolPaneChoices" hidden>
@@ -111,6 +111,10 @@
 <div id="protocolInterfaces"></div>
 </nav><aside><details id="catalogPanel" open><summary class="section">波形目录</summary><input id="search" placeholder="搜索层次或信号…" aria-label="Search signals"><div id="catalogModes"><button id="catalogPreview">层次预览</button><button id="catalogAll">全部信号</button></div><div id="tree"></div><div id="count"></div></details><div class="section" id="scopeTitle">Signals · 选择实例查看信号</div><div id="scopeSignals"></div><details id="legacyKdb" open><summary class="section">Elaborated Design</summary><div id="kdbState">未接入设计数据库</div><div id="kdbTools"><button id="kdbUp">↑ 上一级</button><button id="kdbDefinition">模块定义 ↗</button></div><div id="kdbTree"></div></details></aside>
 <section id="viewer">
+<div id="liveEditorBar" hidden>
+  <label><input id="liveFollow" type="checkbox" checked> 跟随仿真</label>
+  <output id="liveEditorStatus"></output>
+</div>
 <div id="readout">
   <div id="cursorToolbar" role="toolbar" aria-label="游标">
     <span class="cursor-toolbar-title">游标</span>

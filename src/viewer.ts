@@ -10,6 +10,7 @@ import type { DesignSession } from "./kdb";
 import type { TclRunner } from "./tcl";
 import type { Metadata, Location, WaveState } from "./shared/protocol";
 import type { DesignView, TraceProjectSelection } from "./project";
+import type { RtlProjectBinding } from "./rtl-project-binding";
 
 export interface WaveDocument extends vscode.CustomDocument {
   view?: WaveState;
@@ -19,6 +20,8 @@ export interface WaveDocument extends vscode.CustomDocument {
   savedDesignView?: DesignView;
   traceProject?: TraceProjectSelection | null;
   savedTraceProject?: TraceProjectSelection | null;
+  rtlBinding?: RtlProjectBinding;
+  savedRtlBinding?: RtlProjectBinding;
   backup?: {
     view: WaveState;
     kdb?: string;
@@ -28,6 +31,8 @@ export interface WaveDocument extends vscode.CustomDocument {
     savedDesignView?: DesignView;
     traceProject?: TraceProjectSelection | null;
     savedTraceProject?: TraceProjectSelection | null;
+    rtlBinding?: RtlProjectBinding;
+    savedRtlBinding?: RtlProjectBinding;
     projectPath?: string;
   };
   dirty?: boolean;

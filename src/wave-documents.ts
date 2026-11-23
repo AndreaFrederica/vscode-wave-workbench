@@ -55,6 +55,8 @@ export function createWaveDocuments(
         savedDesignView: backup?.savedDesignView,
         traceProject: backup?.traceProject,
         savedTraceProject: backup?.savedTraceProject,
+        rtlBinding: backup?.rtlBinding,
+        savedRtlBinding: backup?.savedRtlBinding,
         dirty: !!backup,
         dispose() {},
       };
@@ -70,6 +72,7 @@ export function createWaveDocuments(
           document.view === document.savedView &&
           viewer.kdb?.path === document.savedKdb &&
           document.traceProject === document.savedTraceProject &&
+          document.rtlBinding === document.savedRtlBinding &&
           JSON.stringify(designSnapshot(viewer)) ===
             JSON.stringify(document.savedDesignView)
         )
@@ -122,9 +125,13 @@ export function createWaveDocuments(
       }
       await viewer.restoreDesignView?.(document.savedDesignView);
       document.traceProject = document.savedTraceProject;
+      document.rtlBinding = document.savedRtlBinding;
+      viewer.sourceInstances.clear();
+      viewer.syncedEditor = undefined;
       dropTraceProject(viewer);
       await viewer.ui("restoreView", { ...restored, projectBaseline: true });
       document.dirty = false;
+      refreshSidebar();
     },
     async backupCustomDocument(document, { destination }, cancellation) {
       const viewer = [...viewers].find((view) => view.document === document);
@@ -142,6 +149,8 @@ export function createWaveDocuments(
         savedDesignView: document.savedDesignView,
         traceProject: document.traceProject,
         savedTraceProject: document.savedTraceProject,
+        rtlBinding: document.rtlBinding,
+        savedRtlBinding: document.savedRtlBinding,
         projectPath: document.projectPath,
       };
       await fs.promises.writeFile(filename, JSON.stringify(backup), {

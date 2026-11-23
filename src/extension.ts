@@ -45,12 +45,15 @@ export function activate(context: vscode.ExtensionContext) {
   let tclConsole: ReturnType<typeof registerWaveTclConsole> | undefined;
   let live: ReturnType<typeof createLiveDebugSession> | undefined;
   let automation: WaveToolHandler | undefined;
+  let refreshRtlTarget: (() => void) | undefined;
   const getCurrent = () => current;
   const getLive = () => live?.getLatest();
   const setCurrent = (viewer: Viewer) => {
     current = viewer;
+    refreshRtlTarget?.();
   };
   const refreshSidebar = () => {
+    refreshRtlTarget?.();
     tclConsole?.refresh();
     return sidebar?.refresh();
   };
@@ -197,6 +200,7 @@ export function activate(context: vscode.ExtensionContext) {
     tcl.executeInteractive,
   );
   registerWaveEditor(vscode, context, {
+    liveCaptureFor: (filename) => live?.captureFor(filename),
     trackTask,
     viewers,
     projectChanges,
@@ -254,7 +258,7 @@ export function activate(context: vscode.ExtensionContext) {
     executeTcl: tcl.executeTcl,
     runScript: tcl.runScript,
   });
-  registerWaveVideProject(vscode, {
+  refreshRtlTarget = registerWaveVideProject(vscode, {
     context,
     getCurrent,
     workspace,
@@ -263,6 +267,7 @@ export function activate(context: vscode.ExtensionContext) {
     readSimulationTrace: analyses.readSimulationTrace,
     dropTraceProject: analyses.dropTraceProject,
     clearViewerTrace: trace.clearViewerTrace,
+    openRtlTarget: source.openRtlTarget,
   });
   context.subscriptions.push({
     dispose() {

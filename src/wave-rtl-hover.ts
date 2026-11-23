@@ -7,7 +7,7 @@ import * as path from "node:path";
 import type * as vscode from "vscode";
 import type { Viewer } from "./viewer";
 import type { Location } from "./shared/protocol";
-import { mapPrefix } from "./kdb";
+import { resolveBoundSource } from "./rtl-project-binding";
 import { codeOnly, identifiers, portConnection } from "./rtl-selection";
 import { findRtlSignals, readSignalsAt } from "./signal-lookup";
 import { commonScope, moduleAt, type SourceFiles } from "./source-sync";
@@ -83,9 +83,11 @@ export function registerWaveRtlHover(
         !!record.file &&
         sourceFiles.same(
           file,
-          path.resolve(
+          resolveBoundSource(
+            record.file,
             path.dirname(session.path),
-            mapPrefix(record.file, mappings),
+            viewer.document.rtlBinding,
+            mappings,
           ),
         )
       );

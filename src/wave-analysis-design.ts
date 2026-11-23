@@ -11,6 +11,10 @@ import { type TraceProjectSelection } from "./project";
 import { readSignalsAt } from "./signal-lookup";
 import { VerilatorDesign } from "./verilator";
 import { KdbSession, mapPrefix } from "./kdb";
+import {
+  boundHierarchyMappings,
+  resolveBoundSource,
+} from "./rtl-project-binding";
 import { type TraceDirection, type VideTraceProject } from "./rtl-trace";
 import { discoverVcsRebuild } from "./vide-project-config";
 import { bindModuleGenerateBranches } from "./rtl-trace-instances";
@@ -182,7 +186,14 @@ export function createAnalysisDesign<V extends AnalysisView>(
               .getConfiguration("waveWorkbench", viewer?.uri)
               .get<Record<string, string>>("sourcePathMappings");
             const sourceUri = (file: string) =>
-              host.file(path.resolve(directory, mapPrefix(file, mappings)));
+              host.file(
+                resolveBoundSource(
+                  file,
+                  directory,
+                  viewer?.document?.rtlBinding,
+                  mappings,
+                ),
+              );
             const trace = await traceRtlPosition(
               "drivers",
               sourceUri(scope.definitionFile),
@@ -217,11 +228,18 @@ export function createAnalysisDesign<V extends AnalysisView>(
     viewer: V,
     fullname: string,
     target = "declaration",
+    fromWaveform = true,
   ) {
     const design = viewer.kdb;
     if (!design) throw Error("Attach a design database first.");
     const cfg = host.workspace.getConfiguration("waveWorkbench", viewer.uri);
-    const mapped = mapPrefix(fullname, cfg.get("hierarchyMappings"));
+    const binding = viewer.document?.rtlBinding;
+    const mapped = fromWaveform
+      ? mapPrefix(
+          fullname,
+          boundHierarchyMappings(binding, cfg.get("hierarchyMappings")),
+        )
+      : fullname;
     let record = await design.resolve(mapped);
     if (
       target === "instance" &&
@@ -229,14 +247,18 @@ export function createAnalysisDesign<V extends AnalysisView>(
       record.instance !== record.fullname
     )
       record = await design.resolve(record.instance);
-    let file = target === "definition" ? record?.definitionFile : record?.file;
+    const source =
+      target === "definition" ? record?.definitionFile : record?.file;
     const line =
       target === "definition" ? record?.definitionLine : record?.line;
-    if (!file || !Number.isInteger(line) || line < 1)
+    if (!source || !Number.isInteger(line) || line < 1)
       throw new Error(`No ${target} source location for ${fullname}.`);
-    file = mapPrefix(file, cfg.get("sourcePathMappings"));
-    if (!path.isAbsolute(file))
-      file = path.resolve(path.dirname(viewer.kdb.path), file);
+    const file = resolveBoundSource(
+      source,
+      path.dirname(design.path),
+      binding,
+      cfg.get("sourcePathMappings"),
+    );
     const doc = await host.workspace.openTextDocument(host.file(file));
     if (line > doc.lineCount)
       throw new Error(
@@ -300,7 +322,13 @@ export function createAnalysisDesign<V extends AnalysisView>(
       if (args.signal !== undefined) {
         if (instance) throw Error("Specify either instance or signal.");
         const record = await design.resolve(
-          mapPrefix(String(args.signal), cfg.get("hierarchyMappings")),
+          mapPrefix(
+            String(args.signal),
+            boundHierarchyMappings(
+              viewer.document?.rtlBinding,
+              cfg.get("hierarchyMappings"),
+            ),
+          ),
         );
         if (!record?.instance)
           throw Error("No elaborated instance for " + args.signal);
